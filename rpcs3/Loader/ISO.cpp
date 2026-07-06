@@ -1095,6 +1095,20 @@ iso_archive::iso_archive(fs::file file)
 		return;
 	}
 
+	// CD001 volume-descriptor sniff at sector 16, mirroring the path ctor's
+	// is_iso_file() guard. Without it the descriptor loop below (read<u8>() =
+	// throw-on-short-read) would seek past EOF and throw an UNCAUGHT exception on
+	// a garbage/truncated fd (installIso + _rpcsx_getIsoGameInfoFd build the
+	// archive with no try/catch = process crash instead of a clean failure).
+	{
+		char magic[5]{};
+		if (iso_file.read_at(0x8000 + 1, magic, sizeof(magic)) != sizeof(magic) || std::memcmp(magic, "CD001", 5) != 0)
+		{
+			iso_log.error("iso_archive: fd-backed file is not ISO9660 (no CD001)");
+			return; // leaves m_root empty -> operator bool == false
+		}
+	}
+
 	u8 descriptor_type = -2;
 	bool use_ucs2_decoding = false;
 

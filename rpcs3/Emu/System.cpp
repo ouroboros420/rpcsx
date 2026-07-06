@@ -993,6 +993,11 @@ game_boot_result Emulator::BootGame(std::string path, const std::string& title_i
 
 				if (result != game_boot_result::no_errors)
 				{
+					// Tear down any ISO overlay device mounted during this failed
+					// boot (fd-boot via load_iso, or path-boot inside Load) so its
+					// registration + owned fd do not leak. Matches the stopping
+					// branch below. No-op if nothing was mounted.
+					unload_iso();
 					GetCallbacks().close_gs_frame();
 				}
 			}
@@ -1511,6 +1516,29 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 		}
 
 		const std::string resolved_path = GetCallbacks().resolve_path(m_path);
+
+		// Converge the pre-mounted-ISO flows (Android SAF fd boot via _rpcsx_bootIsoFd,
+		// and savestate-of-archive restore) with the path-boot flow. Both reach here
+		// with the ISO device already mounted and m_path a virtual-device path, so
+		// is_iso_file(m_path) below is false and the disc-archive branches (m_dir/
+		// m_cat=DG, bdvd=virtual, games.yml prefix translation) would be skipped, and
+		// m_path_real would stay empty - which makes the Restart re-mount ensure()
+		// abort. Set both from the mounted device so every branch fires identically.
+		if (m_path.starts_with(iso_device::virtual_device_name))
+		{
+			launching_from_disc_archive = true;
+
+			if (m_path_real.empty())
+			{
+				if (const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/"))
+				{
+					if (const auto dev = dynamic_cast<const iso_device*>(device.get()))
+					{
+						m_path_real = dev->get_loaded_iso();
+					}
+				}
+			}
+		}
 
 		if (!launching_from_disc_archive && is_iso_file(m_path))
 		{
@@ -4346,6 +4374,12 @@ game_boot_result Emulator::AddGameToYml(const std::string& path)
 
 			return game_boot_result::generic_error;
 		}
+
+		// Non-DG ISO (install/patch disc etc.): do NOT fall through to the
+		// filesystem bdvd_dir/elf_dir logic below, which would treat the .iso host
+		// path as a directory and derive bogus paths.
+		sys_log.notice("Can not add non-DG ISO to games.yml. (path=%s, title_id=%s, category=%s)", path, title_id, cat);
+		return game_boot_result::invalid_file_or_folder;
 	}
 
 	// Set bdvd_dir
