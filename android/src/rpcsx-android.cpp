@@ -70,6 +70,7 @@
 #include <algorithm>
 #include <android/log.h>
 #include <cctype>
+#include <cstring>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <atomic>
