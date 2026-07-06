@@ -33,4 +33,9 @@ namespace iso_cache
 
 	// Remove cache entries for ISOs that are no longer in the scanned set.
 	void cleanup(const std::unordered_set<std::string>& valid_iso_paths);
+
+	// Fork addition: host path of the cached ICON0 png for this cache key (the
+	// file save() writes). Android's game list needs a real file path for its
+	// icon loader; upstream's Qt list re-derives this internally.
+	std::string get_icon_file_path(std::string_view cache_key);
 }

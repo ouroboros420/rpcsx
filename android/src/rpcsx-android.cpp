@@ -36,6 +36,8 @@
 #include "Input/hid_pad_handler.h"
 #include "Input/pad_thread.h"
 #include "Input/virtual_pad_handler.h"
+#include "Loader/ISO.h"
+#include "Loader/iso_cache.h"
 #include "Loader/PSF.h"
 #include "Loader/PUP.h"
 #include "Loader/TAR.h"
@@ -69,6 +71,7 @@
 
 #include <algorithm>
 #include <android/log.h>
+#include <cctype>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <atomic>
@@ -768,12 +771,25 @@ static bool tryUnlockGame(const psf::registry &psf) {
   return false;
 }
 
+static bool hasIsoExtension(const std::filesystem::path &p) {
+  auto ext = p.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return ext == ".iso";
+}
+
 static void collectGamePaths(std::vector<std::string> &paths,
                              const std::string &rootDir) {
   std::error_code ec;
   std::vector<std::filesystem::path> workList;
   workList.reserve(32);
   if (!std::filesystem::is_directory(rootDir)) {
+    // A dropped/added .iso is a game entry by itself (played in place)
+    if (hasIsoExtension(rootDir)) {
+      paths.push_back(rootDir);
+      return;
+    }
+
     auto rootPath = std::filesystem::path(rootDir).parent_path();
     if (rootPath.filename() == "USRDIR") {
       rootPath = rootPath.parent_path();
@@ -802,6 +818,12 @@ static void collectGamePaths(std::vector<std::string> &paths,
 
       if (entry.is_regular_file() && entry.path().filename() == "PARAM.SFO") {
         paths.push_back(entry.path().parent_path().string());
+        continue;
+      }
+
+      // Direct-play ISO entries (no extraction)
+      if (entry.is_regular_file() && hasIsoExtension(entry.path())) {
+        paths.push_back(entry.path().string());
         continue;
       }
     }
@@ -994,6 +1016,72 @@ static void collectGameInfo(JNIEnv *env, jlong progressId,
 
   for (auto &&path : paths) {
     processed++;
+
+    // Direct-play ISO entry: metadata comes from inside the archive, served
+    // through the iso_cache so repeated list scans never re-walk the ISO tree
+    // (prohibitive on FUSE/SAF storage).
+    if (!std::filesystem::is_directory(path) && hasIsoExtension(path)) {
+      if (!is_iso_file(path)) {
+        rpcsx_android.warning("collectGameInfo: '%s' is not a readable ISO "
+                              "(encrypted without key, or not ISO9660)",
+                              path);
+        continue;
+      }
+
+      iso_metadata_cache_entry entry;
+
+      if (!iso_cache::load(path, path, entry)) {
+        iso_archive archive(path);
+
+        if (!archive) {
+          continue;
+        }
+
+        const psf::registry iso_psf = archive.open_psf("PS3_GAME/PARAM.SFO");
+
+        if (iso_psf.empty()) {
+          rpcsx_android.warning("collectGameInfo: no PS3_GAME/PARAM.SFO in '%s'", path);
+          continue;
+        }
+
+        entry.psf_data = psf::save_object(iso_psf);
+        entry.icon_path = "PS3_GAME/ICON0.PNG";
+
+        if (auto icon = archive.open(entry.icon_path)) {
+          std::vector<u8> data(icon->size());
+          if (icon->read(data.data(), data.size()) == data.size()) {
+            entry.icon_data = std::move(data);
+          }
+        }
+
+        if (fs::stat_t st{}; fs::get_stat(path, st)) {
+          entry.mtime = st.mtime;
+        }
+
+        iso_cache::save(path, path, entry);
+      }
+
+      const psf::registry psf =
+          psf::load_object(fs::make_stream(std::move(entry.psf_data)), path);
+
+      rpcsx_android.notice("collectGameInfo: iso sfo from %s", path);
+
+      if (auto gameInfo = fetchGameInfo(psf, path)) {
+        // Boot target and icon live at host paths for ISO entries
+        gameInfo->path = path;
+        gameInfo->iconPath =
+            entry.icon_data.empty() ? std::string()
+                                    : iso_cache::get_icon_file_path(path);
+
+        gameInfos.push_back(std::move(*gameInfo));
+
+        if (gameInfos.size() >= 10) {
+          submit();
+        }
+      }
+
+      continue;
+    }
 
     if (!std::filesystem::is_regular_file(path + "/PARAM.SFO")) {
       continue;
