@@ -149,6 +149,7 @@ add_library(rpcs3 STATIC
     Loader/disc.cpp
     Loader/ELF.cpp
     Loader/ISO.cpp
+    Loader/iso_cache.cpp
     Loader/mself.cpp
     Loader/PSF.cpp
     Loader/PUP.cpp
