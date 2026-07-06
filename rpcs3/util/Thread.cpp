@@ -2252,11 +2252,13 @@ static void sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noe
 const bool s_exception_handler_set = []() -> bool
 {
 	struct ::sigaction sa;
-	// SA_ONSTACK: bionic gives every pthread an alternate signal stack, so with
-	// this flag a stack-overflow fault can still run the handler and log instead
-	// of dying silently (without it the kernel cannot deliver the signal on the
-	// overflowed stack and force-kills with nothing written).
-	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	// NOTE: deliberately NOT SA_ONSTACK. signal_handler is the hot guest access-
+	// violation fast path (handle_access_violation, a deep call), fired on every
+	// guest memory fault. Routing it onto the (small, unverified) bionic per-thread
+	// alternate signal stack risks overflowing that stack in the AV path - and only
+	// helps the rare stack-overflow-death case, which would need an explicitly sized
+	// sigaltstack() anyway. Matches upstream RPCS3 (plain SA_SIGINFO).
+	sa.sa_flags = SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_sigaction = signal_handler;
 
