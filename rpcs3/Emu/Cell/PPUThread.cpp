@@ -5822,6 +5822,12 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				break;
 			}
 
+			// Log BEFORE add(): success was only logged afterwards, so a silent
+			// native death inside RuntimeDyld left the victim object unnamed
+			// (observed: Dante's Inferno died between "Loaded module #0" and any
+			// further output - ambiguous between loading #1 and post-link work).
+			ppu_log.notice("LLVM: Linking module #%u %s", mod_index, obj_name);
+
 			if (!failed_to_load && !jits[mod_index / c_moudles_per_jit]->add(cache_path + obj_name))
 			{
 				ppu_log.error("LLVM: Failed to load module %s", obj_name);

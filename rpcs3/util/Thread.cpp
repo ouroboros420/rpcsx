@@ -2229,12 +2229,34 @@ static void sigabrt_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noe
 	::signal(SIGABRT, SIG_DFL);
 	::raise(SIGABRT);
 }
+
+// SIGTRAP: release-LLVM llvm_unreachable/llvm_trap paths emit a BRK instruction;
+// with no handler the process died instantly with ZERO log output (observed:
+// Dante's Inferno silent death mid RuntimeDyld link). Log + tombstone like SIGABRT.
+static void sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noexcept
+{
+	std::string msg = "Process trap (SIGTRAP) - llvm_unreachable/__builtin_trap (BRK) or debug break.\n";
+
+	append_thread_name(msg);
+
+	sys_log.fatal("\n%s", msg);
+	sys_log.notice("\n%s", dump_useful_thread_info());
+	logs::listener::sync_all();
+
+	// Restore the default action and re-raise so the system tombstone is still produced
+	::signal(SIGTRAP, SIG_DFL);
+	::raise(SIGTRAP);
+}
 #endif
 
 const bool s_exception_handler_set = []() -> bool
 {
 	struct ::sigaction sa;
-	sa.sa_flags = SA_SIGINFO;
+	// SA_ONSTACK: bionic gives every pthread an alternate signal stack, so with
+	// this flag a stack-overflow fault can still run the handler and log instead
+	// of dying silently (without it the kernel cannot deliver the signal on the
+	// overflowed stack and force-kills with nothing written).
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_sigaction = signal_handler;
 
@@ -2266,6 +2288,16 @@ const bool s_exception_handler_set = []() -> bool
 	if (::sigaction(SIGABRT, &sa, NULL) == -1)
 	{
 		std::fprintf(stderr, "sigaction(SIGABRT) failed (%d).\n", errno);
+		std::abort();
+	}
+
+	// NOTE: SIGSYS is deliberately NOT claimed here - the orbis side
+	// (rx::thread::initialize) uses it for syscall emulation, and seccomp SIGSYS
+	// deaths already produce attributable tombstones.
+	sa.sa_sigaction = sigtrap_handler;
+	if (::sigaction(SIGTRAP, &sa, NULL) == -1)
+	{
+		std::fprintf(stderr, "sigaction(SIGTRAP) failed (%d).\n", errno);
 		std::abort();
 	}
 #endif
