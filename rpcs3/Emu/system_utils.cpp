@@ -273,6 +273,15 @@ namespace rpcs3::utils
 		return fs::get_cache_dir() + "cache/";
 	}
 
+	std::string get_redump_key_dir()
+	{
+		// Upstream keeps this under get_data_dir(); the fork has no data-dir split,
+		// so the config dir is the stable user-visible location on Android. Users
+		// drop <disc>.dkey/.key files here for encrypted (redump) ISOs; a key file
+		// right beside the .iso works too and is checked first.
+		return fs::get_config_dir() + "redump/";
+	}
+
 	std::string get_cache_dir(std::string_view module_path)
 	{
 		std::string cache_dir = get_cache_dir();
