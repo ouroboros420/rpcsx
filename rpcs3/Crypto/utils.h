@@ -7,6 +7,7 @@
 #include "util/types.hpp"
 
 #include <stdlib.h>
+#include <string_view>
 
 enum
 {
@@ -20,6 +21,8 @@ std::string sha256_get_hash(const char* data, usz size, bool lower_case);
 // Hex string conversion auxiliary functions.
 u64 hex_to_u64(const char* hex_str);
 void hex_to_bytes(unsigned char* data, const char* hex_str, unsigned int str_length);
+// Upstream overload (used by ISO get_key): no-throw when 'error' is provided.
+void hex_to_bytes(unsigned char* data, std::string_view hex_str, usz str_length, std::string* error = nullptr);
 
 // Crypto functions (AES128-CBC, AES128-ECB, SHA1-HMAC and AES-CMAC).
 void aescbc128_decrypt(const unsigned char* key, unsigned char* iv, const unsigned char* in, unsigned char* out, usz len);

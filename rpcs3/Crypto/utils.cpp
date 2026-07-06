@@ -7,9 +7,11 @@
 #include "sha1.h"
 #include "sha256.h"
 #include "key_vault.h"
+#include <charconv>
 #include <cstring>
 #include <cstdio>
 #include <ctime>
+#include <system_error>
 #include "util/StrFmt.h"
 #include "util/StrUtil.h"
 #include "util/File.h"
@@ -61,6 +63,33 @@ void hex_to_bytes(unsigned char* data, const char* hex_str, unsigned int str_len
 			tmp_buf[1] = *hex_str++;
 
 			*data++ = static_cast<u8>(hex_to_u64(tmp_buf) & 0xFF);
+		}
+	}
+}
+
+void hex_to_bytes(unsigned char* data, std::string_view hex_str, usz str_length, std::string* error)
+{
+	const usz strn_length = (str_length > 0) ? str_length : hex_str.size();
+
+	// Don't convert if the string length is odd.
+	if ((strn_length % 2) == 0)
+	{
+		for (usz i = 0; i < strn_length; i += 2)
+		{
+			const auto [ptr, err] = std::from_chars(hex_str.data() + i, hex_str.data() + i + 2, *data++, 16);
+			if (err != std::errc())
+			{
+				std::string msg = fmt::format("Failed to read hex string: %s (hex='%s')", std::make_error_code(err).message(), hex_str);
+
+				if (error)
+				{
+					*error = std::move(msg);
+				}
+				else
+				{
+					fmt::throw_exception("%s", msg);
+				}
+			}
 		}
 	}
 }
