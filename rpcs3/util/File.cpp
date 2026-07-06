@@ -362,6 +362,11 @@ namespace fs
 	{
 	}
 
+	device_base::device_base(std::string prefix)
+		: fs_prefix(std::move(prefix))
+	{
+	}
+
 	device_base::~device_base()
 	{
 	}
