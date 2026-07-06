@@ -12,6 +12,11 @@
 #include <stack>
 #include <cstdlib>
 
+#ifndef _WIN32
+#include <cerrno>
+#include <unistd.h>
+#endif
+
 LOG_CHANNEL(sys_log, "SYS");
 LOG_CHANNEL(iso_log, "ISO");
 
@@ -1050,6 +1055,85 @@ iso_archive::iso_archive(const std::string& path)
 	}
 }
 
+fs::file iso_archive::make_fd_view() const
+{
+#ifdef _WIN32
+	return {};
+#else
+	if (!m_fd_file)
+	{
+		return {};
+	}
+
+	const int dup_fd = ::dup(m_fd_file.get_handle());
+
+	if (dup_fd < 0)
+	{
+		iso_log.error("iso_archive: dup() failed (%d)", errno);
+		return {};
+	}
+
+	return fs::file::from_native_handle(dup_fd);
+#endif
+}
+
+iso_archive::iso_archive(fs::file file)
+{
+	if (!file || !file.size())
+	{
+		iso_log.error("iso_archive: invalid or empty fd-backed file");
+		return;
+	}
+
+	m_fd_file = std::move(file);
+	m_path = "<fd>";
+
+	fs::file iso_file(std::make_unique<::iso_file>(make_fd_view()));
+
+	if (!iso_file)
+	{
+		return;
+	}
+
+	u8 descriptor_type = -2;
+	bool use_ucs2_decoding = false;
+
+	do
+	{
+		const auto descriptor_start = iso_file.pos();
+
+		descriptor_type = iso_file.read<u8>();
+
+		// 1 = primary vol descriptor, 2 = joliet SVD
+		if (descriptor_type == 1 || descriptor_type == 2)
+		{
+			use_ucs2_decoding = descriptor_type == 2;
+
+			// Skip the rest of descriptor's data
+			iso_file.seek(155, fs::seek_cur);
+
+			const auto node = iso_read_directory_entry(iso_file, use_ucs2_decoding);
+
+			if (node)
+			{
+				m_root = iso_fs_node
+				{
+					.metadata = node.value()
+				};
+			}
+		}
+
+		iso_file.seek(descriptor_start + ISO_SECTOR_SIZE);
+	}
+	while (descriptor_type != 255);
+
+	iso_form_hierarchy(iso_file, m_root, use_ucs2_decoding);
+
+	// Decrypted ISOs only for fd-backed archives: the key lookup is path-based.
+	// Default-constructed decryption context = iso_encryption_type::NONE.
+	m_dec = std::make_shared<iso_file_decryption>();
+}
+
 iso_fs_node* iso_archive::retrieve(const std::string& passed_path)
 {
 	if (passed_path.empty())
@@ -1148,6 +1232,11 @@ std::unique_ptr<fs::file_base> iso_archive::get_iso_file(const std::string& path
 {
 	if (m_dec->get_enc_type() == iso_encryption_type::NONE)
 	{
+		if (m_fd_file)
+		{
+			return std::make_unique<iso_file>(make_fd_view(), node);
+		}
+
 		return std::make_unique<iso_file>(path, mode, node);
 	}
 
@@ -1207,6 +1296,31 @@ iso_file::iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, 
 	m_file.seek(m_meta.extents[0].start * ISO_SECTOR_SIZE);
 
 	m_raw_device = fs::is_optical_raw_device(path);
+}
+
+iso_file::iso_file(fs::file&& file)
+{
+	m_file = std::move(file);
+
+	if (!m_file)
+	{
+		iso_log.error("iso_file: invalid adopted handle");
+		return;
+	}
+
+	m_meta.name = "<fd>";
+	m_meta.extents.push_back({0, m_file.size()});
+}
+
+iso_file::iso_file(fs::file&& file, const iso_fs_node& node)
+	: m_meta(node.metadata)
+{
+	m_file = std::move(file);
+
+	if (!m_file)
+	{
+		iso_log.error("iso_file: invalid adopted handle");
+	}
 }
 
 fs::stat_t iso_file::get_stat()
