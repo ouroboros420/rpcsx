@@ -4037,13 +4037,16 @@ game_boot_result Emulator::Restart(bool graceful)
 
 	Emu.after_kill_callback = [this]
 	{
-		// Reset boot path in case of ISO (the virtual device is torn down by
-		// Kill; rebooting must go through the real .iso path so Load() re-mounts)
-		if (m_path.starts_with(iso_device::virtual_device_name))
+		// Reset boot path in case of ISO. A path-boot ISO (real .iso file) must
+		// reboot through that real path so Load() re-mounts it. A content://-fd
+		// ISO (Android SAF) has a URI m_path_real the core cannot re-open, so keep
+		// the virtual path and rely on the overlay device staying mounted across a
+		// continuous restart (Kill skips unload_iso when m_continuous_mode). Guard
+		// on fs::is_file so a URI never becomes the boot path.
+		if (m_path.starts_with(iso_device::virtual_device_name) && !m_path_real.empty()
+			&& !m_path_real.starts_with(iso_device::virtual_device_name) && fs::is_file(m_path_real))
 		{
 			sys_log.notice("Continuous boot: Resetting boot path from '%s' to '%s'", m_path, m_path_real);
-			ensure(!m_path_real.empty());
-			ensure(!m_path_real.starts_with(iso_device::virtual_device_name));
 			m_path = m_path_real;
 		}
 
