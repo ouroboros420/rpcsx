@@ -1711,6 +1711,15 @@ void load_iso(const std::string& path)
 	vfs::mount("/dev_bdvd", iso_device::virtual_device_name + "/");
 }
 
+void load_iso(fs::file file, const std::string& display_path)
+{
+	sys_log.notice("Loading fd-backed ISO '%s'", display_path);
+
+	fs::set_virtual_device(iso_device::virtual_device_name, stx::make_shared<iso_device>(std::move(file), display_path));
+
+	vfs::mount("/dev_bdvd", iso_device::virtual_device_name + "/");
+}
+
 void unload_iso()
 {
 	sys_log.notice("Unloading ISO");

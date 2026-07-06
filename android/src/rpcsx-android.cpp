@@ -2208,6 +2208,62 @@ extern "C" int _rpcsx_boot(std::string_view path_) {
   return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::custom));
 }
 
+// ADD-ONLY ABI (JNI skew rule): boot an ISO from an Android SAF fd without any
+// real filesystem path. The app owns the URI permission and must pass a FRESH
+// detached fd on every boot (provider fds do not survive provider restarts).
+// display_path (the content:// URI) is what games.yml/savestates record.
+// Decrypted ISOs only (sector-key lookup is path-based).
+extern "C" int _rpcsx_bootIsoFd(int fd, std::string_view display_path) {
+  auto file = fs::file::from_native_handle(fd);
+
+  if (!file || !file.size()) {
+    return static_cast<int>(game_boot_result::invalid_file_or_folder);
+  }
+
+  {
+    // Validate before mounting so a bad fd never leaves a half-registered device
+    iso_archive probe(fs::file::from_native_handle(::dup(fd)));
+    if (!probe) {
+      return static_cast<int>(game_boot_result::invalid_file_or_folder);
+    }
+  }
+
+  load_iso(std::move(file), std::string(display_path));
+
+  std::string path = iso_device::virtual_device_name + "/";
+
+  // Install discs have no USRDIR/EBOOT.BIN - boot the archive root then
+  if (fs::is_file(path + "PS3_GAME/USRDIR/EBOOT.BIN")) {
+    path += "PS3_GAME/USRDIR/EBOOT.BIN";
+  }
+
+  Emu.SetForceBoot(true);
+  return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::custom));
+}
+
+// ADD-ONLY ABI: game metadata (title id, name, version) for an ISO given a SAF
+// fd, so the app can list content:// ISOs without extraction. Returns a
+// "titleId|name|version" packed string or null.
+extern "C" jstring _rpcsx_getIsoGameInfoFd(JNIEnv *env, int fd) {
+  iso_archive archive(fs::file::from_native_handle(fd));
+
+  if (!archive) {
+    return nullptr;
+  }
+
+  const psf::registry sfo = archive.open_psf("PS3_GAME/PARAM.SFO");
+  const auto title_id = psf::get_string(sfo, "TITLE_ID");
+
+  if (title_id.empty()) {
+    return nullptr;
+  }
+
+  const auto name = psf::get_string(sfo, "TITLE");
+  const auto version = psf::get_string(sfo, "APP_VER", psf::get_string(sfo, "VERSION", ""));
+
+  return wrap(env, fmt::format("%s|%s|%s", title_id, name, version));
+}
+
 extern "C" int _rpcsx_getState() {
   return static_cast<int>(Emu.GetStatus(false));
 }

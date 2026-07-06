@@ -9,6 +9,10 @@
 bool is_iso_file(const std::string& path, u64* size = nullptr, bool* is_raw_device = nullptr);
 
 void load_iso(const std::string& path);
+// Fork addition (Android SAF): mount an fd-backed ISO. display_path is what
+// games.yml/savestates record for this ISO (the content:// URI) - the app must
+// resolve it back to a fresh fd on later boots.
+void load_iso(fs::file file, const std::string& display_path);
 void unload_iso();
 
 constexpr u64 ISO_SECTOR_SIZE = 2048;
@@ -215,6 +219,13 @@ public:
 
 	iso_device(const std::string& iso_path, const std::string& device_name = virtual_device_name)
 		: fs::device_base(device_name), m_path(iso_path), m_archive(iso_path)
+	{
+	}
+
+	// Fork addition: fd-backed device (Android SAF); display_path is recorded
+	// as the loaded ISO identity (content:// URI).
+	iso_device(fs::file file, const std::string& display_path)
+		: fs::device_base(virtual_device_name), m_path(display_path), m_archive(std::move(file))
 	{
 	}
 
