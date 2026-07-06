@@ -986,6 +986,73 @@ namespace vk
 		}
 	}
 
+	void render_device::save_pipeline_cache()
+	{
+		if (m_pipeline_cache == VK_NULL_HANDLE)
+		{
+			return;
+		}
+
+		// Best-effort serialize. Any failure simply skips persistence.
+		size_t data_size = 0;
+		if (VK_GET_SYMBOL(vkGetPipelineCacheData)(dev, m_pipeline_cache, &data_size, nullptr) != VK_SUCCESS || data_size == 0)
+		{
+			return;
+		}
+
+		if (data_size == m_last_saved_pipeline_cache_size)
+		{
+			// Nothing new compiled since the last save - skip the file write.
+			return;
+		}
+
+		std::vector<u8> blob(data_size);
+		if (VK_GET_SYMBOL(vkGetPipelineCacheData)(dev, m_pipeline_cache, &data_size, blob.data()) != VK_SUCCESS)
+		{
+			return;
+		}
+
+		blob.resize(data_size); // driver may return fewer bytes than the initial query
+
+		pipeline_cache_disk_header hdr{};
+		hdr.length = sizeof(pipeline_cache_disk_header);
+		hdr.version = kPipelineCacheDiskVersion;
+		hdr.vendorID = pgpu->props.vendorID;
+		hdr.deviceID = pgpu->props.deviceID;
+		std::memcpy(hdr.uuid, pgpu->props.pipelineCacheUUID, VK_UUID_SIZE);
+
+		const std::string path = get_pipeline_cache_path();
+		const std::string tmp_path = path + ".tmp";
+
+		// Ensure the cache directory exists (no-op if already present).
+		fs::create_path(rpcs3::utils::get_cache_dir());
+
+		// Write to a temp file then atomically replace, so a crash mid-write can never
+		// leave a half-written blob that we would later read back.
+		if (fs::file out{tmp_path, fs::rewrite})
+		{
+			if (out.write(&hdr, sizeof(hdr)) == sizeof(hdr) &&
+				(blob.empty() || out.write(blob.data(), blob.size()) == blob.size()))
+			{
+				out.close();
+				if (fs::rename(tmp_path, path, true))
+				{
+					m_last_saved_pipeline_cache_size = data_size;
+					rsx_log.notice("vk: pipeline cache saved (%zu bytes).", data_size);
+				}
+				else
+				{
+					fs::remove_file(tmp_path);
+				}
+			}
+			else
+			{
+				out.close();
+				fs::remove_file(tmp_path);
+			}
+		}
+	}
+
 	void render_device::save_and_destroy_pipeline_cache()
 	{
 		if (m_pipeline_cache == VK_NULL_HANDLE)
@@ -993,51 +1060,7 @@ namespace vk
 			return;
 		}
 
-		// Best-effort serialize. Any failure simply skips persistence; the destroy still runs.
-		{
-			size_t data_size = 0;
-			if (VK_GET_SYMBOL(vkGetPipelineCacheData)(dev, m_pipeline_cache, &data_size, nullptr) == VK_SUCCESS && data_size != 0)
-			{
-				std::vector<u8> blob(data_size);
-				if (VK_GET_SYMBOL(vkGetPipelineCacheData)(dev, m_pipeline_cache, &data_size, blob.data()) == VK_SUCCESS)
-				{
-					blob.resize(data_size); // driver may return fewer bytes than the initial query
-
-					pipeline_cache_disk_header hdr{};
-					hdr.length = sizeof(pipeline_cache_disk_header);
-					hdr.version = kPipelineCacheDiskVersion;
-					hdr.vendorID = pgpu->props.vendorID;
-					hdr.deviceID = pgpu->props.deviceID;
-					std::memcpy(hdr.uuid, pgpu->props.pipelineCacheUUID, VK_UUID_SIZE);
-
-					const std::string path = get_pipeline_cache_path();
-					const std::string tmp_path = path + ".tmp";
-
-					// Ensure the cache directory exists (no-op if already present).
-					fs::create_path(rpcs3::utils::get_cache_dir());
-
-					// Write to a temp file then atomically replace, so a crash mid-write can never
-					// leave a half-written blob that we would later read back.
-					if (fs::file out{tmp_path, fs::rewrite})
-					{
-						if (out.write(&hdr, sizeof(hdr)) == sizeof(hdr) &&
-							(blob.empty() || out.write(blob.data(), blob.size()) == blob.size()))
-						{
-							out.close();
-							if (!fs::rename(tmp_path, path, true))
-							{
-								fs::remove_file(tmp_path);
-							}
-						}
-						else
-						{
-							out.close();
-							fs::remove_file(tmp_path);
-						}
-					}
-				}
-			}
-		}
+		save_pipeline_cache();
 
 		VK_GET_SYMBOL(vkDestroyPipelineCache)(dev, m_pipeline_cache, nullptr);
 		m_pipeline_cache = VK_NULL_HANDLE;

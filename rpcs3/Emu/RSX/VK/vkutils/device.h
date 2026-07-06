@@ -156,6 +156,10 @@ namespace vk
 		// Serialize the pipeline cache to disk (best-effort) and destroy it. Never fatal.
 		void save_and_destroy_pipeline_cache();
 
+		// Size of the blob at the last successful disk save; lets periodic saves
+		// skip the file write when nothing new was compiled.
+		usz m_last_saved_pipeline_cache_size = 0;
+
 		u32 m_graphics_queue_family = 0;
 		u32 m_present_queue_family = 0;
 		u32 m_transfer_queue_family = 0;
@@ -323,6 +327,16 @@ namespace vk
 		{
 			return m_pipeline_cache;
 		}
+
+		// Serialize the pipeline cache to disk WITHOUT destroying it. Safe mid-session:
+		// the cache is created with flags=0 (no EXTERNALLY_SYNCHRONIZED bit), so the
+		// driver internally synchronizes vkGetPipelineCacheData against concurrent
+		// pipeline creation on the compiler threads. Skips the write when the blob
+		// size is unchanged since the last save. Never fatal. Rationale: the
+		// teardown-only save loses the whole warmup on any crash/LMK kill, so a
+		// cold-boot compile-burst crash keeps every subsequent boot cold too (the
+		// Write-Color-Buffers crash-loop observed on device).
+		void save_pipeline_cache();
 
 		operator VkDevice() const
 		{

@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "VKGSRender.h"
+#include "Emu/Cell/timers.hpp"
 #include "vkutils/buffer_object.h"
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
@@ -925,4 +926,20 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 	m_frame->flip(m_context);
 	rsx::thread::flip(info);
+
+	// Crash-resilient VkPipelineCache persistence. The disk blob is otherwise
+	// written only on clean teardown, so any crash/LMK kill mid-session loses the
+	// entire pipeline warmup - and a cold-boot compile-burst crash then keeps every
+	// subsequent boot cold too (the observed Write-Color-Buffers crash-loop: two
+	// consecutive runs both "seeded with 0 bytes", both died). Re-save every ~2
+	// minutes; save_pipeline_cache() skips the file write entirely when the cache
+	// size is unchanged, so steady state costs one size query per interval.
+	if (const u64 now = get_system_time(); now >= m_last_pipeline_cache_save_time + 120'000'000)
+	{
+		m_last_pipeline_cache_save_time = now;
+		if (m_device)
+		{
+			m_device->save_pipeline_cache();
+		}
+	}
 }

@@ -134,6 +134,7 @@ private:
 	bool surface_lost = false;
 
 	u64 m_last_heap_sync_time = 0;
+	u64 m_last_pipeline_cache_save_time = 0;
 	u32 m_texbuffer_view_size = 0;
 
 	vk::data_heap m_attrib_ring_info;                  // Vertex data
