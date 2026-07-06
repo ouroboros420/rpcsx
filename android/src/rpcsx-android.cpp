@@ -42,8 +42,6 @@
 #include "Loader/PUP.h"
 #include "Loader/TAR.h"
 #include "cellos/sys_sync.h"
-#include "dev/block_dev.hpp"
-#include "dev/iso.hpp"
 #include "hidapi_libusb.h"
 #include "libusb.h"
 #include "rpcs3_version.h"
@@ -350,8 +348,15 @@ static FileType getFileType(const fs::file &file) {
     return FileType::Rap;
   }
 
-  if (iso_dev::open(std::make_unique<file_view_block_dev>(file))) {
-    return FileType::Iso;
+  {
+    // ISO9660 volume-descriptor probe (sector 16). Works for plain AND
+    // redump-encrypted ISOs (region 0 is unencrypted), unlike the old
+    // full-directory-parse sniff which also walked the whole tree.
+    char vd[6]{};
+    if (file.read_at(0x8000, vd, sizeof(vd)) == sizeof(vd) &&
+        std::memcmp(vd + 1, "CD001", 5) == 0) {
+      return FileType::Iso;
+    }
   }
 
   return FileType::Unknown;
@@ -2677,27 +2682,20 @@ static bool installRap(JNIEnv *env, fs::file &&file, jlong progressId,
 }
 
 static bool installIso(JNIEnv *env, fs::file &&file, jlong progressId) {
-  auto optIso = iso_dev::open(std::make_unique<file_view_block_dev>(file));
+  // Streaming extraction over the ported Loader/ISO reader: every copy runs in
+  // bounded chunks (the old dev/iso path materialized each file TWICE - whole
+  // extent + to_vector - which OOM-killed installs of ISOs with large inner
+  // files). Direct play needs no extraction at all; this is the fallback.
+  iso_archive archive(std::move(file));
   Progress progress(env, progressId);
 
-  if (!optIso) {
-    progress.failure("Failed to read ISO");
+  if (!archive) {
+    progress.failure("Failed to read ISO (not ISO9660, or encrypted)");
     return false;
   }
 
-  auto iso = std::move(*optIso);
-  auto sfo_raw_file = iso.open("PS3_GAME/PARAM.SFO", fs::read);
-
-  if (!sfo_raw_file) {
-    progress.failure("Failed to locate PARAM.SFO in ISO");
-    return false;
-  }
-
-  fs::file sfo_file;
-  sfo_file.reset(std::move(sfo_raw_file));
-
-  auto sfo = psf::load_object(sfo_file, "iso://PS3_GAME/PARAM.SFO");
-  auto title_id = psf::get_string(sfo, "TITLE_ID");
+  const psf::registry sfo = archive.open_psf("PS3_GAME/PARAM.SFO");
+  const auto title_id = psf::get_string(sfo, "TITLE_ID");
 
   if (title_id.empty()) {
     progress.failure("Failed to fetch TITLE_ID from PARAM.SFO in ISO");
@@ -2708,103 +2706,109 @@ static bool installIso(JNIEnv *env, fs::file &&file, jlong progressId) {
     sendGameInfo(env, progressId, {{*gameInfo}});
   }
 
-  std::filesystem::path destinationPath =
+  const std::filesystem::path destinationPath =
       fs::get_config_dir() + "games/" + std::string(title_id);
-  std::size_t filesCount = 0;
 
-  auto roots = [&] {
-    std::vector<std::filesystem::path> result;
-    std::vector<std::filesystem::path> workList;
-    workList.push_back({});
-    result.push_back({});
+  // Collect all files (relative iso paths) up front for progress accounting
+  struct PendingFile {
+    std::string isoPath;
+    const iso_fs_node *node;
+  };
+
+  std::vector<PendingFile> files;
+  std::vector<std::string> dirs;
+
+  {
+    struct WorkItem {
+      const iso_fs_node *node;
+      std::string path;
+    };
+
+    std::vector<WorkItem> workList;
+    workList.push_back({&archive.root(), {}});
 
     while (!workList.empty()) {
-      auto path = std::move(workList.back());
+      auto [node, path] = std::move(workList.back());
       workList.pop_back();
 
-      fs::dir dir;
-      dir.reset(iso.open_dir(path));
+      for (const auto &child : node->children) {
+        const auto &name = child->metadata.name;
 
-      for (auto &entry : dir) {
-        if (entry.name == "." || entry.name == "..") {
+        if (name == "." || name == "..") {
           continue;
         }
-        if (entry.name == "PS3_UPDATE" && path.empty()) {
+        if (path.empty() && name == "PS3_UPDATE") {
           continue;
         }
 
-        if (entry.is_directory) {
-          result.push_back(path / entry.name);
-          workList.push_back(path / entry.name);
+        std::string childPath = path.empty() ? name : path + "/" + name;
+
+        if (child->metadata.is_directory) {
+          dirs.push_back(childPath);
+          workList.push_back({child.get(), std::move(childPath)});
         } else {
-          filesCount++;
+          files.push_back({std::move(childPath), child.get()});
         }
       }
-    }
-
-    return result;
-  }();
-
-  progress.report(0, filesCount);
-
-  std::size_t processedFiles = 0;
-  std::error_code ec;
-
-  for (auto &root : roots) {
-    auto rootDestPath = root.empty() ? destinationPath : destinationPath / root;
-
-    std::filesystem::create_directories(rootDestPath, ec);
-    if (ec) {
-      progress.failure(fmt::format("Failed to create dir %s: %s",
-                                   rootDestPath.string(), ec.message()));
-      return false;
-    }
-
-    fs::dir dir;
-    dir.reset(iso.open_dir(root));
-
-    for (auto &entry : dir) {
-      if (entry.name == "." || entry.name == "..") {
-        continue;
-      }
-
-      auto entryDestPath = rootDestPath / entry.name;
-
-      if (entry.is_directory) {
-        std::filesystem::create_directories(entryDestPath, ec);
-        if (ec) {
-          progress.failure(fmt::format("Failed to create dir %s: %s",
-                                       entryDestPath.string(), ec.message()));
-          return false;
-        }
-
-        continue;
-      }
-      auto raw_file = iso.open(root / entry.name, fs::read);
-
-      if (!raw_file) {
-        progress.failure(fmt::format("Failed to open file in ISO: %s",
-                                     (root / entry.name).string()));
-        return false;
-      }
-
-      fs::file file;
-      file.reset(std::move(raw_file));
-
-      if (!fs::write_file(entryDestPath,
-                          fs::open_mode::create + fs::open_mode::trunc,
-                          file.to_vector<std::uint8_t>())) {
-        progress.failure(fmt::format("Failed to write file: %s, dest %s",
-                                     entryDestPath.string(),
-                                     destinationPath.string()));
-        return false;
-      }
-
-      progress.report(processedFiles++, filesCount);
     }
   }
 
-  collectGameInfo(env, -1, {destinationPath});
+  progress.report(0, files.size());
+
+  std::error_code ec;
+  std::filesystem::create_directories(destinationPath, ec);
+
+  for (const auto &dir : dirs) {
+    std::filesystem::create_directories(destinationPath / dir, ec);
+    if (ec) {
+      progress.failure(fmt::format("Failed to create dir %s: %s",
+                                   (destinationPath / dir).string(),
+                                   ec.message()));
+      return false;
+    }
+  }
+
+  std::size_t processedFiles = 0;
+  std::vector<u8> buffer(1u << 20);
+
+  for (const auto &pending : files) {
+    auto src = archive.open(pending.isoPath);
+
+    if (!src) {
+      progress.failure(
+          fmt::format("Failed to open file in ISO: %s", pending.isoPath));
+      return false;
+    }
+
+    const auto destPath = destinationPath / pending.isoPath;
+    fs::file out(destPath.string(), fs::rewrite);
+
+    if (!out) {
+      progress.failure(fmt::format("Failed to create file: %s, dest %s",
+                                   destPath.string(),
+                                   destinationPath.string()));
+      return false;
+    }
+
+    u64 remaining = src->size();
+
+    while (remaining) {
+      const u64 chunk = std::min<u64>(buffer.size(), remaining);
+
+      if (src->read(buffer.data(), chunk) != chunk ||
+          out.write(buffer.data(), chunk) != chunk) {
+        progress.failure(fmt::format("Failed to copy file: %s (%s left)",
+                                     pending.isoPath, remaining));
+        return false;
+      }
+
+      remaining -= chunk;
+    }
+
+    progress.report(processedFiles++, files.size());
+  }
+
+  collectGameInfo(env, -1, {destinationPath.string()});
   auto ebootPath = locateEbootPath(destinationPath.string());
   g_compilationQueue.push(progress, std::move(ebootPath));
   return true;

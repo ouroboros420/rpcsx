@@ -129,7 +129,6 @@ add_library(rpcs3 STATIC
     module_verifier.cpp
     stb_image.cpp
 
-    dev/iso.cpp
 
     Crypto/aes.cpp
     Crypto/aesni.cpp

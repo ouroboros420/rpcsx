@@ -5,8 +5,6 @@
 #include "Loader/ISO.h"
 #include "Loader/PUP.h"
 #include "util/File.h"
-#include "dev/block_dev.hpp"
-#include "dev/iso.hpp"
 #include "VFS.h"
 #include "util/bin_patch.h"
 #include "Emu/Memory/vm.h"
@@ -220,9 +218,14 @@ static FileType getFileType(const fs::file& file)
 		return FileType::Rap;
 	}
 
-	if (iso_dev::open(std::make_unique<file_view_block_dev>(file)))
 	{
-		return FileType::Iso;
+		// ISO9660 volume-descriptor probe (sector 16). Works for plain AND
+		// redump-encrypted ISOs (region 0 is unencrypted).
+		char vd[6]{};
+		if (file.read_at(0x8000, vd, sizeof(vd)) == sizeof(vd) && std::memcmp(vd + 1, "CD001", 5) == 0)
+		{
+			return FileType::Iso;
+		}
 	}
 
 	return FileType::Unknown;
