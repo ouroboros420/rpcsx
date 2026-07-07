@@ -1009,7 +1009,8 @@ iso_archive::iso_archive(const std::string& path)
 		return;
 	}
 
-	fs::file iso_file(std::make_unique<iso_file>(m_path));
+	fs::file iso_file;
+	iso_file.reset(std::make_unique<iso_file>(m_path));
 
 	u8 descriptor_type = -2;
 	bool use_ucs2_decoding = false;
@@ -1088,7 +1089,8 @@ iso_archive::iso_archive(fs::file file)
 	m_fd_file = std::move(file);
 	m_path = "<fd>";
 
-	fs::file iso_file(std::make_unique<::iso_file>(make_fd_view()));
+	fs::file iso_file;
+	iso_file.reset(std::make_unique<::iso_file>(make_fd_view()));
 
 	if (!iso_file)
 	{
@@ -1271,7 +1273,8 @@ psf::registry iso_archive::open_psf(const std::string& path)
 		return psf::registry();
 	}
 
-	const fs::file psf_file(get_iso_file(m_path, fs::read, *node));
+	fs::file psf_file;
+	psf_file.reset(get_iso_file(m_path, fs::read, *node));
 
 	return psf::load_object(psf_file, path);
 }
