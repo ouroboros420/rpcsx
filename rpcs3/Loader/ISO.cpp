@@ -1010,7 +1010,7 @@ iso_archive::iso_archive(const std::string& path)
 	}
 
 	fs::file iso_file;
-	iso_file.reset(std::make_unique<iso_file>(m_path));
+	iso_file.reset(std::make_unique<::iso_file>(m_path));
 
 	u8 descriptor_type = -2;
 	bool use_ucs2_decoding = false;
