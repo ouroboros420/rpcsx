@@ -1621,9 +1621,32 @@ void iso_dir::rewind()
 	m_pos = 0;
 }
 
+// Normalize a device-dispatched path into an archive-relative path for retrieve().
+//
+// The fork's fs::device_manager::get_device() strips the device prefix BEFORE
+// dispatching, so the `path` these methods receive is already archive-relative
+// but keeps a leading slash (e.g. "/PS3_GAME/USRDIR/EBOOT.BIN"), and is "/" or
+// "" for the archive root. iso_archive::retrieve() wants a prefix-less, slash-less
+// path and treats "." as the root.
+//
+// Upstream instead dispatches the FULL path (prefix included) and strips it here
+// via std::filesystem::relative(path, fs_prefix). Doing that under the fork's
+// convention double-strips into "../PS3_GAME/…", which retrieve() rejects on the
+// leading ".." - which silently broke EVERY ISO lookup (boot, PS3_DISC.SFB probe,
+// dir listing) and made all ISO games fail with InvalidFileOrFolder.
+static std::string iso_device_rel(std::string_view path)
+{
+	while (!path.empty() && (path.front() == '/' || path.front() == '\\'))
+	{
+		path.remove_prefix(1);
+	}
+
+	return path.empty() ? std::string(".") : std::string(path);
+}
+
 bool iso_device::stat(const std::string& path, fs::stat_t& info)
 {
-	const auto relative_path = std::filesystem::relative(std::filesystem::path(path), std::filesystem::path(fs_prefix)).string();
+	const std::string relative_path = iso_device_rel(path);
 
 	const auto node = m_archive.retrieve(relative_path);
 
@@ -1651,7 +1674,7 @@ bool iso_device::stat(const std::string& path, fs::stat_t& info)
 
 bool iso_device::statfs(const std::string& path, fs::device_stat& info)
 {
-	const auto relative_path = std::filesystem::relative(std::filesystem::path(path), std::filesystem::path(fs_prefix)).string();
+	const std::string relative_path = iso_device_rel(path);
 
 	const auto node = m_archive.retrieve(relative_path);
 
@@ -1676,7 +1699,7 @@ bool iso_device::statfs(const std::string& path, fs::device_stat& info)
 
 std::unique_ptr<fs::file_base> iso_device::open(const std::string& path, rx::EnumBitSet<fs::open_mode> mode)
 {
-	const auto relative_path = std::filesystem::relative(std::filesystem::path(path), std::filesystem::path(fs_prefix)).string();
+	const std::string relative_path = iso_device_rel(path);
 
 	const auto node = m_archive.retrieve(relative_path);
 
@@ -1697,7 +1720,7 @@ std::unique_ptr<fs::file_base> iso_device::open(const std::string& path, rx::Enu
 
 std::unique_ptr<fs::dir_base> iso_device::open_dir(const std::string& path)
 {
-	const auto relative_path = std::filesystem::relative(std::filesystem::path(path), std::filesystem::path(fs_prefix)).string();
+	const std::string relative_path = iso_device_rel(path);
 
 	const auto node = m_archive.retrieve(relative_path);
 
