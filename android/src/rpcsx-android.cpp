@@ -639,6 +639,10 @@ struct GameInfo {
   int flags = 0;
   std::string version;
   std::string titleId;
+  // PARAM.SFO CATEGORY (e.g. "DG" disc game, "HG" HDD game, "GD" disc-game
+  // update). The app uses it to de-duplicate the same title across sources:
+  // a full installed game beats a raw .iso, which beats a bare "GD" update.
+  std::string category;
 };
 
 class Progress {
@@ -696,20 +700,31 @@ static void sendGameInfo(JNIEnv *env, jlong progressId,
       gameRepositoryClass, "add", "([Lnet/rpcsx/GameInfo;J)V"));
   auto gameClass = ensure(env->FindClass("net/rpcsx/GameInfo"));
 
-  // Prefer the 6-arg constructor (game version + title id); fall back to the
-  // legacy 4-arg one so a new core keeps working with an older app.
-  jmethodID gameConstructorV2 = env->GetMethodID(
+  // Prefer the 7-arg constructor (adds CATEGORY), then the 6-arg one (version +
+  // title id), then the legacy 4-arg one - so a new core keeps working against an
+  // older app that lacks the newer fields.
+  jmethodID gameConstructorV3 = env->GetMethodID(
       gameClass, "<init>",
-      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
-  if (gameConstructorV2 == nullptr) {
+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+  if (gameConstructorV3 == nullptr) {
+    env->ExceptionClear();
+  }
+
+  jmethodID gameConstructorV2 =
+      gameConstructorV3 ? nullptr
+                        : env->GetMethodID(
+                              gameClass, "<init>",
+                              "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V");
+  if (gameConstructorV2 == nullptr && gameConstructorV3 == nullptr) {
     env->ExceptionClear();
   }
 
   jmethodID gameConstructor =
-      gameConstructorV2 ? nullptr
-                        : ensure(env->GetMethodID(
-                              gameClass, "<init>",
-                              "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V"));
+      (gameConstructorV3 || gameConstructorV2)
+          ? nullptr
+          : ensure(env->GetMethodID(
+                gameClass, "<init>",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V"));
 
   std::vector<jobject> objects;
   objects.reserve(infos.size());
@@ -720,7 +735,13 @@ static void sendGameInfo(JNIEnv *env, jlong progressId,
       path.resize(path.size() - 1);
     }
 
-    if (gameConstructorV2) {
+    if (gameConstructorV3) {
+      objects.push_back(env->NewObject(
+          gameClass, gameConstructorV3, wrap(env, path), wrap(env, info.name),
+          wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
+          jint(info.flags), wrap(env, info.version), wrap(env, info.titleId),
+          wrap(env, info.category)));
+    } else if (gameConstructorV2) {
       objects.push_back(env->NewObject(
           gameClass, gameConstructorV2, wrap(env, path), wrap(env, info.name),
           wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
@@ -989,6 +1010,7 @@ fetchGameInfo(const psf::registry &psf,
       .flags = flags,
       .version = std::move(version),
       .titleId = std::move(titleId),
+      .category = std::string(category),
   };
 }
 
