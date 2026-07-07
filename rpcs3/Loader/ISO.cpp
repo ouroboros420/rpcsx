@@ -1762,7 +1762,12 @@ void load_iso(fs::file file, const std::string& display_path)
 
 void unload_iso()
 {
-	sys_log.notice("Unloading ISO");
-
-	fs::set_virtual_device(iso_device::virtual_device_name, stx::shared_ptr<iso_device>());
+	// set_virtual_device(name, null) removes and RETURNS the device that was
+	// registered (null if none). Only log when an ISO was actually loaded, so the
+	// Kill path of a normal (non-ISO) game does not print a misleading
+	// "Unloading ISO" line (observed booting an installed EBOOT).
+	if (fs::set_virtual_device(iso_device::virtual_device_name, stx::shared_ptr<iso_device>()))
+	{
+		sys_log.notice("Unloading ISO");
+	}
 }
