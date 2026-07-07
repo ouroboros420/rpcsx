@@ -1530,7 +1530,8 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 
 			if (m_path_real.empty())
 			{
-				if (const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/"))
+				std::string_view dev_path;
+				if (const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/", &dev_path))
 				{
 					if (const auto dev = dynamic_cast<const iso_device*>(device.get()))
 					{
@@ -3702,7 +3703,8 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 						// Game mounted from archive
 						if (m_path.starts_with(iso_device::virtual_device_name + "/"))
 						{
-							const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/");
+							std::string_view dev_path;
+							const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/", &dev_path);
 							ensure(device);
 
 							const auto iso_dev = dynamic_cast<const iso_device*>(device.get());

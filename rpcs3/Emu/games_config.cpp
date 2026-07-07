@@ -49,7 +49,8 @@ games_config::result games_config::add_game(const std::string& key, const std::s
 	{
 		// Never store the virtual overlay prefix: translate back to the real
 		// .iso path so the entry survives across boots.
-		const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/");
+		std::string_view dev_path;
+		const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/", &dev_path);
 		if (!device)
 			return result::failure;
 
