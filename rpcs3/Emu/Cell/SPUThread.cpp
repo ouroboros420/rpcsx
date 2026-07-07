@@ -7226,7 +7226,22 @@ void spu_thread::halt()
 		spu_runtime::g_escape(this);
 	}
 
-	spu_log.fatal("Halt");
+	// Log-DoS guard: a cooperative-SPU HALT does not set a stop flag (upstream
+	// behavior), so a SPURS kernel that self-HALTs on a bad job and is re-dispatched
+	// by its runtime spins here forever. The unbounded fatal log then floods the file
+	// (observed 572 MB from ~440k identical "Halt" lines). Keep the first few for
+	// diagnosis, then suppress. HALT semantics are unchanged (still fatal + escape).
+	static atomic_t<u32> s_halt_log_count{0};
+
+	if (const u32 n = s_halt_log_count++; n < 8)
+	{
+		spu_log.fatal("Halt");
+	}
+	else if (n == 8)
+	{
+		spu_log.fatal("Halt (further Halt logs suppressed to bound log size)");
+	}
+
 	spu_runtime::g_escape(this);
 }
 
