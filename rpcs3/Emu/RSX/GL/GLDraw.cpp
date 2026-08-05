@@ -386,6 +386,16 @@ void GLGSRender::load_texture_env()
 					{
 						m_graphics_state |= rsx::fragment_program_state_dirty;
 					}
+
+					if (const auto texture_format = tex.format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
+						sampler_state->format_class != rsx::classify_format(texture_format) &&
+						(texture_format == CELL_GCM_TEXTURE_A8R8G8B8 || texture_format == CELL_GCM_TEXTURE_D8R8G8B8))
+					{
+						// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
+						// If accurate graphics are desired, force a bitcast to COLOR as a workaround.
+						m_fs_sampler_states[i].set_parameteri(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+						m_fs_sampler_states[i].set_parameteri(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+					}
 				}
 			}
 			else
@@ -558,7 +568,7 @@ void GLGSRender::emit_geometry(u32 sub_index)
 	if (vertex_state && !m_vertex_layout.validate())
 	{
 		// No vertex inputs enabled
-		// Execute remainining pipeline barriers with NOP draw
+		// Execute remaining pipeline barriers with NOP draw
 		do
 		{
 			draw_call.execute_pipeline_dependencies(m_ctx);
@@ -608,9 +618,9 @@ void GLGSRender::emit_geometry(u32 sub_index)
 		}
 		else
 		{
-			const auto subranges = draw_call.get_subranges();
+			const auto& subranges = draw_call.get_subranges();
 			const auto draw_count = subranges.size();
-			const auto driver_caps = gl::get_driver_caps();
+			const auto& driver_caps = gl::get_driver_caps();
 			bool use_draw_arrays_fallback = false;
 
 			m_scratch_buffer.resize(draw_count * 24);

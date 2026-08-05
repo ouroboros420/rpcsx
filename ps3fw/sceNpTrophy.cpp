@@ -568,6 +568,11 @@ error_code sceNpTrophyDestroyContext(u32 context)
 	return CELL_OK;
 }
 
+struct register_context_thread_name
+{
+	static constexpr std::string_view thread_name = "Trophy Register Thread";
+};
+
 error_code
 sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle,
 	vm::ptr<SceNpTrophyStatusCallback> statusCb,
@@ -756,56 +761,79 @@ sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle,
 
 	ensure(tropusr->Load(trophyUsrPath, trophyConfPath).success);
 
-	// This emulates vsh sending the events and ensures that not 2 events are
-	// processed at once
-	const std::pair<u32, s32> statuses[] = {
-		{SCE_NP_TROPHY_STATUS_PROCESSING_SETUP, 3},
-		{SCE_NP_TROPHY_STATUS_PROCESSING_PROGRESS,
-			::narrow<s32>(tropusr->GetTrophiesCount()) - 1},
-		{SCE_NP_TROPHY_STATUS_PROCESSING_FINALIZE, 4},
-		{SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 0}};
-
 	lock2.unlock();
 
 	lv2_obj::sleep(ppu);
-
-	// Create a counter which is destroyed after the function ends
-	const auto queued = std::make_shared<atomic_t<u32>>(0);
-
-	for (auto status : statuses)
 	{
-		// One status max per cellSysutilCheckCallback call
-		*queued += status.second;
-		for (s32 completed = 0; completed <= status.second; completed++)
+		const s32 progress_cb_count = ::narrow<s32>(tropusr->GetTrophiesCount()) - 1;
+
+		// This emulates vsh sending the events and ensures that not 2 events are
+		// processed at once
+		const std::pair<SceNpTrophyStatus, s32> statuses[] = {
+			{SCE_NP_TROPHY_STATUS_PROCESSING_SETUP, 3},
+			{SCE_NP_TROPHY_STATUS_PROCESSING_PROGRESS, progress_cb_count},
+			// Seems varying, little bit less than progress_cb_count
+			{SCE_NP_TROPHY_STATUS_PROCESSING_FINALIZE,
+				std::max<s32>(progress_cb_count, 9) - 5},
+			{SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 0}};
+
+		// Create a counter which is destroyed after the function ends
+		const auto queued = std::make_shared<atomic_t<u32>>(0);
+
+		u32 total_events = 0;
+
+		for (auto status : statuses)
 		{
-			sysutil_register_cb([statusCb, status, context, completed, arg,
-									queued](ppu_thread& cb_ppu) -> s32
-				{
-					// TODO: it is possible that we need to check the return value here as
-				    // well.
-					statusCb(cb_ppu, context, status.first, completed, status.second, arg);
-
-					if (queued && (*queued)-- == 1)
-					{
-						queued->notify_one();
-					}
-
-					return 0;
-				});
+			total_events += status.second + 1;
 		}
 
-		u64 current = get_system_time();
-		const u64 until = current + 300'000;
-
-		// If too much time passes just send the rest of the events anyway
-		for (u32 old_value; current < until && (old_value = *queued);
-			current = get_system_time())
+		for (auto status : statuses)
 		{
-			thread_ctrl::wait_on(*queued, old_value, until - current);
-
-			if (ppu.is_stopped())
+			for (s32 completed = 0; completed <= status.second; completed++)
 			{
-				return {};
+				// One status max per cellSysutilCheckCallback call
+				*queued += 1;
+
+				sysutil_register_cb([statusCb, status, context, completed, arg,
+										queued](ppu_thread& cb_ppu) -> s32
+					{
+						// TODO: it is possible that we need to check the return value
+						// here as well.
+						statusCb(cb_ppu, context, status.first, completed, status.second, arg);
+
+						if (queued && (*queued)-- == 1)
+						{
+							queued->notify_one();
+						}
+
+						return 0;
+					});
+
+				u64 current = get_system_time();
+
+				// Minimum register trophy time 2 seconds globally.
+				const u64 until_min = current + (2'000'000 / total_events);
+				const u64 until_max = until_min + 50'000;
+
+				// If too much time passes just send the rest of the events anyway
+				for (u32 old_value = *queued;
+					current < (old_value ? until_max : until_min);
+					current = get_system_time(), old_value = *queued)
+				{
+					if (!old_value)
+					{
+						thread_ctrl::wait_for(until_min - current);
+					}
+					else
+					{
+						thread_ctrl::wait_on(*queued, old_value, until_max - current);
+					}
+
+					if (thread_ctrl::state() == thread_state::aborting)
+					{
+						return {};
+					}
+				}
 			}
 		}
 	}

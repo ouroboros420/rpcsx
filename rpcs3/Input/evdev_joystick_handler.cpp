@@ -18,6 +18,33 @@
 
 LOG_CHANNEL(evdev_log, "evdev");
 
+bool positive_axis::load()
+{
+	if (fs::file cfg_file{ cfg_name, fs::read })
+	{
+		return from_string(cfg_file.to_string());
+	}
+
+	from_default();
+	return false;
+}
+
+void positive_axis::save() const
+{
+	fs::pending_file file(cfg_name);
+
+	if (file.file)
+	{
+		file.file.write(to_string());
+		file.commit();
+	}
+}
+
+bool positive_axis::exist() const
+{
+	return fs::is_file(cfg_name);
+}
+
 evdev_joystick_handler::evdev_joystick_handler()
 	: PadHandlerBase(pad_handler::evdev)
 {
@@ -111,7 +138,12 @@ bool evdev_joystick_handler::Init()
 	if (m_is_init)
 		return true;
 
-	m_pos_axis_config.load();
+	if (!m_pos_axis_config.load())
+	{
+		evdev_log.notice("positive_axis config missing. Using defaults");
+	}
+
+	evdev_log.notice("positive_axis config=\n%s", m_pos_axis_config.to_string());
 
 	if (!m_pos_axis_config.exist())
 		m_pos_axis_config.save();

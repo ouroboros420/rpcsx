@@ -54,13 +54,8 @@ gui_pad_thread::gui_pad_thread()
 
 gui_pad_thread::~gui_pad_thread()
 {
-	if (m_thread)
-	{
-		auto& thread = *m_thread;
-		thread = thread_state::aborting;
-		thread();
+	// Join thread
 		m_thread.reset();
-	}
 
 #ifdef __linux__
 	if (m_uinput_fd != 1)
@@ -295,7 +290,7 @@ void gui_pad_thread::run()
 
 void gui_pad_thread::process_input()
 {
-	if (!m_pad || !(m_pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+	if (!m_pad || !m_pad->is_connected())
 	{
 		return;
 	}

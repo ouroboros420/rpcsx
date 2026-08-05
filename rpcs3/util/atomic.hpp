@@ -205,9 +205,9 @@ namespace atomic_wait
 		constexpr void set(lf_queue<T2>& var, std::nullptr_t = nullptr)
 		{
 			static_assert(Index < Max);
-			static_assert(sizeof(var) == sizeof(uptr));
+			static_assert(sizeof(var) == sizeof(uptr) * 2);
 
-			m_info[Index].data = reinterpret_cast<char*>(&var) + sizeof(u32);
+			m_info[Index].data = std::bit_cast<char*>(&var.get_wait_atomic().raw());
 			m_info[Index].old = 0;
 		}
 
@@ -215,9 +215,9 @@ namespace atomic_wait
 		constexpr void set(stx::atomic_ptr<T2>& var, std::nullptr_t = nullptr)
 		{
 			static_assert(Index < Max);
-			static_assert(sizeof(var) == sizeof(uptr));
+			static_assert(sizeof(var) == sizeof(uptr) * 2);
 
-			m_info[Index].data = reinterpret_cast<char*>(&var) + sizeof(u32);
+			m_info[Index].data = std::bit_cast<char*>(&var.get_wait_atomic().raw());
 			m_info[Index].old = 0;
 		}
 

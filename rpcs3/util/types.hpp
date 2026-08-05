@@ -13,6 +13,20 @@ namespace stx
 	struct generator;
 } // namespace stx
 
+// Removes be_t<> wrapper from type be_t<T> with nop fallback for unwrapped T
+template <typename T>
+struct remove_be
+{
+	using type = T;
+};
+template <typename T>
+struct remove_be<be_t<T>>
+{
+	using type = T;
+};
+template <typename T>
+using remove_be_t = typename remove_be<T>::type;
+
 namespace utils
 {
 	struct serial;

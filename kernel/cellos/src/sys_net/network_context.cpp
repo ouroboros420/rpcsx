@@ -10,71 +10,65 @@
 LOG_CHANNEL(sys_net);
 
 // Used by RPCN to send signaling packets to RPCN server(for UDP hole punching)
-bool send_packet_from_p2p_port_ipv4(const std::vector<u8> &data,
-                                    const sockaddr_in &addr) {
-  auto &nc = g_fxo->get<p2p_context>();
-  {
-    std::lock_guard list_lock(nc.list_p2p_ports_mutex);
-    if (nc.list_p2p_ports.contains(SCE_NP_PORT)) {
-      auto &def_port = ::at32(nc.list_p2p_ports, SCE_NP_PORT);
+bool send_packet_from_p2p_port_ipv4(const std::vector<u8>& data, const sockaddr_in& addr)
+{
+	auto& nc = g_fxo->get<p2p_context>();
+	{
+		std::lock_guard list_lock(nc.list_p2p_ports_mutex);
+		if (nc.list_p2p_ports.contains(SCE_NP_PORT))
+		{
+			auto& def_port = ::at32(nc.list_p2p_ports, SCE_NP_PORT);
 
-      if (def_port.is_ipv6) {
-        const auto addr6 = np::sockaddr_to_sockaddr6(addr);
+			if (np::is_ipv6_supported())
+			{
+				const auto addr6 = np::sockaddr_to_sockaddr6(addr);
 
-        if (::sendto(def_port.p2p_socket,
-                     reinterpret_cast<const char *>(data.data()),
-                     ::size32(data), 0,
-                     reinterpret_cast<const sockaddr *>(&addr6),
-                     sizeof(sockaddr_in6)) == -1) {
-          sys_net.error(
-              "Failed to send IPv4 signaling packet on IPv6 socket: %s",
-              get_last_error(false, false));
-          return false;
-        }
-      } else if (::sendto(def_port.p2p_socket,
-                          reinterpret_cast<const char *>(data.data()),
-                          ::size32(data), 0,
-                          reinterpret_cast<const sockaddr *>(&addr),
-                          sizeof(sockaddr_in)) == -1) {
-        sys_net.error("Failed to send signaling packet on IPv4 socket: %s",
-                      get_last_error(false, false));
-        return false;
-      }
-    } else {
-      sys_net.error("send_packet_from_p2p_port_ipv4: port %d not present",
-                    +SCE_NP_PORT);
-      return false;
-    }
-  }
+				if (::sendto(def_port.p2p_socket, reinterpret_cast<const char*>(data.data()), ::size32(data), 0, reinterpret_cast<const sockaddr*>(&addr6), sizeof(sockaddr_in6)) == -1)
+				{
+					sys_net.error("Failed to send IPv4 signaling packet on IPv6 socket: %s", get_last_error(false, false));
+					return false;
+				}
+			}
+			else if (::sendto(def_port.p2p_socket, reinterpret_cast<const char*>(data.data()), ::size32(data), 0, reinterpret_cast<const sockaddr*>(&addr), sizeof(sockaddr_in)) == -1)
+			{
+				sys_net.error("Failed to send signaling packet on IPv4 socket: %s", get_last_error(false, false));
+				return false;
+			}
+		}
+		else
+		{
+			sys_net.error("send_packet_from_p2p_port_ipv4: port %d not present", +SCE_NP_PORT);
+			return false;
+		}
+	}
 
-  return true;
+	return true;
 }
 
-bool send_packet_from_p2p_port_ipv6(const std::vector<u8> &data,
-                                    const sockaddr_in6 &addr) {
-  auto &nc = g_fxo->get<p2p_context>();
-  {
-    std::lock_guard list_lock(nc.list_p2p_ports_mutex);
-    if (nc.list_p2p_ports.contains(SCE_NP_PORT)) {
-      auto &def_port = ::at32(nc.list_p2p_ports, SCE_NP_PORT);
-      ensure(def_port.is_ipv6);
+bool send_packet_from_p2p_port_ipv6(const std::vector<u8>& data, const sockaddr_in6& addr)
+{
+	auto& nc = g_fxo->get<p2p_context>();
+	{
+		std::lock_guard list_lock(nc.list_p2p_ports_mutex);
+		if (nc.list_p2p_ports.contains(SCE_NP_PORT))
+		{
+			auto& def_port = ::at32(nc.list_p2p_ports, SCE_NP_PORT);
+			ensure(np::is_ipv6_supported());
 
-      if (::sendto(def_port.p2p_socket,
-                   reinterpret_cast<const char *>(data.data()), ::size32(data),
-                   0, reinterpret_cast<const sockaddr *>(&addr),
-                   sizeof(sockaddr_in6)) == -1) {
-        sys_net.error("Failed to send signaling packet on IPv6 socket: %s",
-                      get_last_error(false, false));
-        return false;
-      }
-    } else {
-      sys_net.error("send_packet_from_p2p_port_ipv6: port %d not present",
-                    +SCE_NP_PORT);
-      return false;
-    }
-  }
+			if (::sendto(def_port.p2p_socket, reinterpret_cast<const char*>(data.data()), ::size32(data), 0, reinterpret_cast<const sockaddr*>(&addr), sizeof(sockaddr_in6)) == -1)
+			{
+				sys_net.error("Failed to send signaling packet on IPv6 socket: %s", get_last_error(false, false));
+				return false;
+			}
+		}
+		else
+		{
+			sys_net.error("send_packet_from_p2p_port_ipv6: port %d not present", +SCE_NP_PORT);
+			return false;
+		}
+	}
 
-  return true;
+	return true;
 }
 
 std::vector<std::vector<u8>> get_rpcn_msgs() {

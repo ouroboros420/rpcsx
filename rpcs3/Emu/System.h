@@ -215,7 +215,7 @@ public:
 		std::source_location src_loc = std::source_location::current()) const;
 
 	// Blocking call from the GUI thread
-	void BlockingCallFromMainThread(std::function<void()>&& func, std::source_location src_loc = std::source_location::current()) const;
+	void BlockingCallFromMainThread(std::function<void()>&& func, bool track_emu_state = true, std::source_location src_loc = std::source_location::current()) const;
 
 	enum class stop_counter_t : u64
 	{
@@ -510,6 +510,7 @@ public:
 	u32 AddGamesFromDir(const std::string& path);
 	game_boot_result AddGame(const std::string& path);
 	game_boot_result AddGameToYml(const std::string& path);
+	u32 RemoveGamesFromDir(const std::string& games_dir, const std::vector<std::string>& serials_to_remove_from_yml = {}, bool save_on_disk = true);
 	u32 RemoveGames(const std::vector<std::string>& title_id_list, bool save_on_disk = true);
 	game_boot_result RemoveGameFromYml(const std::string& title_id);
 

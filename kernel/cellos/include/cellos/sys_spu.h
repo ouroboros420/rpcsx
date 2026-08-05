@@ -192,7 +192,7 @@ struct sys_spu_image {
     return num_segs;
   }
 
-  void load(const fs::file &stream);
+  bool load(const fs::file &stream);
   void free() const;
   static void deploy(u8 *loc, std::span<const sys_spu_segment> segs,
                      bool is_verbose = true);
@@ -322,6 +322,8 @@ error_code _sys_spu_image_get_information(ppu_thread &,
                                           vm::ptr<s32> nsegs);
 error_code sys_spu_image_open(ppu_thread &, vm::ptr<sys_spu_image> img,
                               vm::cptr<char> path);
+error_code sys_spu_image_open_by_fd(ppu_thread &, vm::ptr<sys_spu_image> img,
+                                    s32 fd, s64 offset);
 error_code _sys_spu_image_import(ppu_thread &, vm::ptr<sys_spu_image> img,
                                  u32 src, u32 size, u32 arg4);
 error_code _sys_spu_image_close(ppu_thread &, vm::ptr<sys_spu_image> img);

@@ -4,7 +4,7 @@
 #include "util/CRC.h"
 #include "util/Thread.h"
 
-#include "hidapi.h"
+#include <hidapi.h>
 
 #ifdef ANDROID
 #include "hidapi_libusb.h"

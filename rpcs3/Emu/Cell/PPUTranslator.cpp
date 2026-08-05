@@ -409,12 +409,19 @@ Function* PPUTranslator::GetSymbolResolver(const ppu_module<lv2_obj>& info)
 
 	const auto faddr = m_ir->CreateLoad(ptr_inst->getResultElementType(), ptr_inst);
 	const auto faddr_int = m_ir->CreatePtrToInt(faddr, get_type<uptr>());
-	const auto fval = m_ir->CreateOr(m_ir->CreateShl(m_seg0, 32 + 3), faddr_int);
-	const auto pos = m_ir->CreateShl(m_reloc ? m_ir->CreateAdd(func_pc, m_seg0) : func_pc, 1);
+	const auto pos_32 = m_reloc ? m_ir->CreateAdd(func_pc, m_seg0) : func_pc;
+	const auto pos = m_ir->CreateShl(pos_32, 1);
 	const auto ptr = dyn_cast<GetElementPtrInst>(m_ir->CreateGEP(get_type<u8>(), m_exec, pos));
 
+	const auto seg_base_ptr = m_ir->CreateIntToPtr(m_ir->CreateAdd(
+		m_ir->CreatePtrToInt(m_exec, get_type<u64>()), m_ir->getInt64(vm::g_exec_addr_seg_offset)), m_exec->getType());
+	const auto seg_pos = m_ir->CreateLShr(pos_32, 1);
+	const auto seg_ptr = dyn_cast<GetElementPtrInst>(m_ir->CreateGEP(get_type<u8>(), seg_base_ptr, seg_pos));
+	const auto seg_val = m_ir->CreateTrunc(m_ir->CreateLShr(m_seg0, 13), get_type<u16>());
+
 	// Store to jumptable
-	m_ir->CreateStore(fval, ptr);
+	m_ir->CreateStore(faddr_int, ptr);
+	m_ir->CreateStore(seg_val, seg_ptr);
 
 	// Increment index and branch back to loop
 	const auto post_add = m_ir->CreateAdd(index_value, m_ir->getInt64(1));
@@ -603,10 +610,15 @@ void PPUTranslator::CallFunction(u64 target, Value* indirect)
 		const auto pos = m_ir->CreateShl(indirect, 1);
 		const auto ptr = dyn_cast<GetElementPtrInst>(m_ir->CreateGEP(get_type<u8>(), m_exec, pos));
 		const auto val = m_ir->CreateLoad(get_type<u64>(), ptr);
-		callee = FunctionCallee(type, m_ir->CreateIntToPtr(m_ir->CreateAnd(val, 0xffff'ffff'ffff), type->getPointerTo()));
+		callee = FunctionCallee(type, m_ir->CreateIntToPtr(val, type->getPointerTo()));
 
 		// Load new segment address
-		seg0 = m_ir->CreateShl(m_ir->CreateLShr(val, 48), 13);
+		const auto seg_base_ptr = m_ir->CreateIntToPtr(m_ir->CreateAdd(
+			m_ir->CreatePtrToInt(m_exec, get_type<u64>()), m_ir->getInt64(vm::g_exec_addr_seg_offset)), m_exec->getType());
+		const auto seg_pos = m_ir->CreateLShr(indirect, 1);
+		const auto seg_ptr = dyn_cast<GetElementPtrInst>(m_ir->CreateGEP(get_type<u8>(), seg_base_ptr, seg_pos));
+		const auto seg_val = m_ir->CreateZExt(m_ir->CreateLoad(get_type<u16>(), seg_ptr), get_type<u64>());
+		seg0 = m_ir->CreateShl(seg_val, 13);
 	}
 
 	m_ir->SetInsertPoint(block);
@@ -1301,7 +1313,7 @@ void PPUTranslator::VMADDFP(ppu_opcode_t op)
 void PPUTranslator::VMAXFP(ppu_opcode_t op)
 {
 	const auto [a, b] = get_vrs<f32[4]>(op.va, op.vb);
-	set_vr(op.vd, vec_handle_result(bitcast<f32[4]>(bitcast<u32[4]>(fmax(a, b)) & bitcast<u32[4]>(fmax(b, a)))));
+	set_vr(op.vd, vec_handle_result(select(fcmp_ord(a < b) | fcmp_uno(b != b), b, a)));
 }
 
 void PPUTranslator::VMAXSB(ppu_opcode_t op)
@@ -1363,7 +1375,7 @@ void PPUTranslator::VMHRADDSHS(ppu_opcode_t op)
 void PPUTranslator::VMINFP(ppu_opcode_t op)
 {
 	const auto [a, b] = get_vrs<f32[4]>(op.va, op.vb);
-	set_vr(op.vd, vec_handle_result(bitcast<f32[4]>(bitcast<u32[4]>(fmin(a, b)) | bitcast<u32[4]>(fmin(b, a)))));
+	set_vr(op.vd, vec_handle_result(select(fcmp_ord(a > b) | fcmp_uno(b != b), b, a)));
 }
 
 void PPUTranslator::VMINSB(ppu_opcode_t op)
@@ -4783,7 +4795,7 @@ void PPUTranslator::MTFSF(ppu_opcode_t op)
 
 	for (u32 i = 16; i < 20; i++)
 	{
-		if (i != 1 && i != 2 && (op.flm & (128 >> (i / 4))) != 0)
+		if ((op.flm & (128 >> (i / 4))) != 0)
 		{
 			SetFPSCRBit(i, Trunc(m_ir->CreateLShr(value, i ^ 31), GetType<bool>()), false);
 		}

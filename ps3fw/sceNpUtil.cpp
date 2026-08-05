@@ -59,13 +59,7 @@ struct sce_np_util_manager
 
 	void join_thread()
 	{
-		if (bandwidth_test_thread)
-		{
-			auto& thread = *bandwidth_test_thread;
-			thread = thread_state::aborting;
-			thread();
-			bandwidth_test_thread.reset();
-		}
+		bandwidth_test_thread.reset();
 	}
 };
 
@@ -150,9 +144,9 @@ error_code sceNpUtilBandwidthTestAbort()
 }
 
 DECLARE(ppu_module_manager::sceNpUtil)("sceNpUtil", []()
-	{
-		REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestInitStart);
-		REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestShutdown);
-		REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestGetStatus);
-		REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestAbort);
-	});
+{
+	REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestInitStart);
+	REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestShutdown);
+	REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestGetStatus);
+	REG_FUNC(sceNpUtil, sceNpUtilBandwidthTestAbort);
+});

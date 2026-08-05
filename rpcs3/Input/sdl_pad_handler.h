@@ -33,6 +33,8 @@ public:
 	{
 		SDL_Gamepad* gamepad = nullptr;
 		SDL_GamepadType type = SDL_GamepadType::SDL_GAMEPAD_TYPE_UNKNOWN;
+		SDL_GamepadType real_type = SDL_GamepadType::SDL_GAMEPAD_TYPE_UNKNOWN;
+		SDL_GUID guid {};
 		int power_level = 0;
 		int last_power_level = 0;
 
@@ -45,6 +47,7 @@ public:
 		u16 firmware_version = 0;
 
 		bool is_virtual_device = false;
+		bool is_ds3_with_pressure_buttons = false;
 
 		bool has_led = false;
 		bool has_mono_led = false;
@@ -96,6 +99,11 @@ class sdl_pad_handler : public PadHandlerBase
 		Back,
 		Guide,
 		Misc1,
+		Misc2,
+		Misc3,
+		Misc4,
+		Misc5,
+		Misc6,
 		RPaddle1,
 		LPaddle1,
 		RPaddle2,
@@ -117,7 +125,21 @@ class sdl_pad_handler : public PadHandlerBase
 		RSXNeg,
 		RSXPos,
 		RSYNeg,
-		RSYPos
+		RSYPos,
+
+		// DS3 Pressure sensitive buttons (reported as axis)
+		PressureBegin,
+		PressureCross,    // Cross        axis 6
+		PressureCircle,   // Circle       axis 7
+		PressureSquare,   // Square       axis 8
+		PressureTriangle, // Triangle     axis 9
+		PressureL1,       // L1           axis 10
+		PressureR1,       // R1           axis 11
+		PressureUp,       // D-Pad Up     axis 12
+		PressureDown,     // D-Pad Down   axis 13
+		PressureLeft,     // D-Pad Left   axis 14
+		PressureRight,    // D-Pad Right  axis 15
+		PressureEnd,
 	};
 
 public:

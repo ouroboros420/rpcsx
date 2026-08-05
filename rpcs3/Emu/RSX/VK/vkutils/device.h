@@ -37,8 +37,6 @@ namespace vk
 		u64 device_local_total_bytes;
 		u64 host_visible_total_bytes;
 		u64 device_bar_total_bytes;
-
-		PFN_vkGetMemoryHostPointerPropertiesEXT _vkGetMemoryHostPointerPropertiesEXT;
 	};
 
 	struct descriptor_indexing_features
@@ -67,6 +65,14 @@ namespace vk
 		}
 	};
 
+	struct multidraw_features
+	{
+		bool supported;
+		u32 max_batch_size;
+
+		operator bool() const { return supported; }
+	};
+
 	class physical_device
 	{
 		VkInstance parent = VK_NULL_HANDLE;
@@ -84,6 +90,8 @@ namespace vk
 		descriptor_indexing_features descriptor_indexing_support{};
 
 		custom_border_color_features custom_border_color_support{};
+
+		multidraw_features multidraw_support{};
 
 		struct
 		{
@@ -105,7 +113,8 @@ namespace vk
 
 	private:
 		void get_physical_device_features(bool allow_extensions);
-		void get_physical_device_properties(bool allow_extensions);
+		void get_physical_device_properties_0(bool allow_extensions);
+		void get_physical_device_properties_1(bool allow_extensions);
 
 	public:
 		physical_device() = default;
@@ -154,18 +163,6 @@ namespace vk
 			const VkPhysicalDeviceFeatures& requested_features) const;
 
 	public:
-		// Exported device endpoints
-		PFN_vkCmdBeginConditionalRenderingEXT _vkCmdBeginConditionalRenderingEXT = nullptr;
-		PFN_vkCmdEndConditionalRenderingEXT _vkCmdEndConditionalRenderingEXT = nullptr;
-		PFN_vkSetDebugUtilsObjectNameEXT _vkSetDebugUtilsObjectNameEXT = nullptr;
-		PFN_vkQueueInsertDebugUtilsLabelEXT _vkQueueInsertDebugUtilsLabelEXT = nullptr;
-		PFN_vkCmdInsertDebugUtilsLabelEXT _vkCmdInsertDebugUtilsLabelEXT = nullptr;
-		PFN_vkCmdSetEvent2KHR _vkCmdSetEvent2KHR = nullptr;
-		PFN_vkCmdWaitEvents2KHR _vkCmdWaitEvents2KHR = nullptr;
-		PFN_vkCmdPipelineBarrier2KHR _vkCmdPipelineBarrier2KHR = nullptr;
-		PFN_vkGetDeviceFaultInfoEXT _vkGetDeviceFaultInfoEXT = nullptr;
-
-	public:
 		render_device() = default;
 		~render_device() = default;
 
@@ -200,6 +197,10 @@ namespace vk
 		const custom_border_color_features& get_custom_border_color_support() const
 		{
 			return pgpu->custom_border_color_support;
+		}
+		const multidraw_features get_multidraw_support() const
+		{
+			return pgpu->multidraw_support;
 		}
 
 		bool get_shader_stencil_export_support() const

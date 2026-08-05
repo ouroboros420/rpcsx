@@ -50,7 +50,7 @@ namespace vm
 	u8* const g_sudo_addr = g_base_addr + 0x1'0000'0000;
 
 	// Auxiliary virtual memory for executable areas
-	u8* const g_exec_addr = memory_reserve_4GiB(g_sudo_addr, 0x200000000);
+	u8* const g_exec_addr = memory_reserve_4GiB(g_sudo_addr, 0x300000000);
 
 	// Hooks for memory R/W interception (default: zero offset to some function with only ret instructions)
 	u8* const g_hook_addr = memory_reserve_4GiB(g_exec_addr, 0x800000000);
@@ -346,7 +346,7 @@ namespace vm
 		rx::prefetch_read(g_range_lock_set + 2);
 		rx::prefetch_read(g_range_lock_set + 4);
 
-		const auto range = utils::address_range::start_length(addr, size);
+		const auto range = utils::address_range32::start_length(addr, size);
 
 		u64 to_clear = get_range_lock_bits(false).load();
 
@@ -354,7 +354,7 @@ namespace vm
 		{
 			to_clear = for_all_range_locks(to_clear, [&](u32 addr2, u32 size2)
 				{
-					if (range.overlaps(utils::address_range::start_length(addr2, size2))) [[unlikely]]
+				if (range.overlaps(utils::address_range32::start_length(addr2, size2))) [[unlikely]]
 					{
 						return 1;
 					}
@@ -487,8 +487,6 @@ namespace vm
 			}
 		}
 
-		bool to_prepare_memory = true;
-
 		for (u64 i = 0;; i++)
 		{
 			auto& bits = get_range_lock_bits(true);
@@ -516,22 +514,11 @@ namespace vm
 
 			if (i < 100)
 			{
-				if (to_prepare_memory)
-				{
-					// We have some spare time, prepare cache lines (todo: reservation tests here)
-					rx::prefetch_write(vm::get_super_ptr(addr));
-					rx::prefetch_write(vm::get_super_ptr(addr) + 64);
-					to_prepare_memory = false;
-				}
-
 				rx::busy_wait(200);
 			}
 			else
 			{
 				std::this_thread::yield();
-
-				// Thread may have been switched or the cache clue has been undermined, cache needs to be prapred again
-				to_prepare_memory = true;
 			}
 		}
 
@@ -595,13 +582,6 @@ namespace vm
 					break;
 				}
 
-				if (to_prepare_memory)
-				{
-					rx::prefetch_write(vm::get_super_ptr(addr));
-					rx::prefetch_write(vm::get_super_ptr(addr) + 64);
-					to_prepare_memory = false;
-				}
-
 				rx::pause();
 			}
 
@@ -611,13 +591,6 @@ namespace vm
 				{
 					while (!(ptr->state & cpu_flag::wait))
 					{
-						if (to_prepare_memory)
-						{
-							rx::prefetch_write(vm::get_super_ptr(addr));
-							rx::prefetch_write(vm::get_super_ptr(addr) + 64);
-							to_prepare_memory = false;
-						}
-
 						rx::pause();
 					}
 				}
@@ -1841,7 +1814,7 @@ namespace vm
 
 	static bool _test_map(u32 addr, u32 size)
 	{
-		const auto range = utils::address_range::start_length(addr, size);
+		const auto range = utils::address_range32::start_length(addr, size);
 
 		if (!range.valid())
 		{
@@ -1855,7 +1828,7 @@ namespace vm
 				continue;
 			}
 
-			if (range.overlaps(utils::address_range::start_length(block->addr, block->size)))
+			if (range.overlaps(utils::address_range32::start_length(block->addr, block->size)))
 			{
 				return false;
 			}

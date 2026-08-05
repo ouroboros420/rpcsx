@@ -42,14 +42,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif(NOT WIN32 AND NOT CMAKE_CXX_FLAGS MATCHES "LIBICONV_PLUG" AND NOT ANDROID)
     #it seems like glibc includes the iconv functions we use but other libc
     #implementations like the one on OSX don't seem implement them
-    set(ADDITIONAL_LIBS ${ADDITIONAL_LIBS} "iconv")
+    list(APPEND ADDITIONAL_LIBS "iconv")
 endif()
 
 # subdirectories
 add_subdirectory(Emu)
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
-    add_definitions(-DDATADIR="${CMAKE_INSTALL_FULL_DATADIR}/rpcs3")
+    add_compile_definitions(DATADIR="${CMAKE_INSTALL_FULL_DATADIR}/rpcs3")
     # Optionally enable X11 for window management
     find_package(X11)
     if(X11_FOUND)
@@ -127,7 +127,6 @@ endif()
 add_library(rpcs3 STATIC
     rpcs3_version.cpp
     module_verifier.cpp
-    stb_image.cpp
 
     dev/iso.cpp
 
@@ -159,7 +158,6 @@ add_library(rpcs3 STATIC
     Input/ds4_pad_handler.cpp
     Input/dualsense_pad_handler.cpp
     Input/evdev_joystick_handler.cpp
-    Input/evdev_gun_handler.cpp
     Input/hid_pad_handler.cpp
     Input/mm_joystick_handler.cpp
     Input/pad_thread.cpp
@@ -170,6 +168,7 @@ add_library(rpcs3 STATIC
     Input/ps_move_tracker.cpp
     Input/raw_mouse_config.cpp
     Input/raw_mouse_handler.cpp
+    Input/sdl_instance.cpp
     Input/sdl_pad_handler.cpp
     Input/skateboard_pad_handler.cpp
     Input/xinput_pad_handler.cpp

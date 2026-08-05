@@ -192,10 +192,10 @@ class CgBinaryDisasm
 	std::vector<u32> m_loop_end_offsets;
 
 	// VP members
-	u32 m_sca_opcode;
-	u32 m_vec_opcode;
-	static const usz m_max_instr_count = 512;
-	usz m_instr_count;
+	u32 m_sca_opcode = 0;
+	u32 m_vec_opcode = 0;
+	static constexpr usz m_max_instr_count = 512;
+	usz m_instr_count = 0;
 	std::vector<u32> m_data;
 
 public:
@@ -249,6 +249,14 @@ public:
 		m_buffer = new u8[m_buffer_size];
 		f.read(m_buffer, m_buffer_size);
 		fmt::append(m_arb_shader, "Loading... [%s]\n", path.c_str());
+	}
+
+	template <typename T>
+	CgBinaryDisasm(const std::span<T>& data)
+	{
+		m_buffer_size = data.size_bytes();
+		m_buffer = new u8[m_buffer_size];
+		std::memcpy(m_buffer, data.data(), m_buffer_size);
 	}
 
 	~CgBinaryDisasm()
@@ -318,7 +326,7 @@ public:
 		return result;
 	}
 
-	void BuildShaderBody()
+	void BuildShaderBody(bool include_glsl = true)
 	{
 		ParamArray param_array;
 
@@ -356,6 +364,11 @@ public:
 			m_arb_shader += "\n";
 			m_offset = prog.ucode;
 			TaskFP();
+
+			if (!include_glsl)
+			{
+				return;
+			}
 
 			std::vector<u32> be_data;
 
@@ -421,6 +434,11 @@ public:
 				m_data[i] = vdata[i];
 			}
 			TaskVP();
+
+			if (!include_glsl)
+			{
+				return;
+			}
 
 			RSXVertexProgram prog;
 			program_hash_util::vertex_program_utils::analyse_vertex_program(m_data.data(), 0, prog);

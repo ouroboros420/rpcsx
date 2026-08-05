@@ -5,6 +5,7 @@ add_library(rpcs3_emu STATIC
     localized_string.cpp
     savestate_utils.cpp
     scoped_progress_dialog.cpp
+    stb_image.cpp
     System.cpp
     system_config.cpp
     system_config_types.cpp
@@ -32,17 +33,6 @@ if(HAS_MEMORY_BREAKPOINTS)
     target_compile_definitions(rpcs3_emu PRIVATE RPCS3_HAS_MEMORY_BREAKPOINTS)
 endif()
 
-target_link_libraries(rpcs3_emu
-    PRIVATE
-        3rdparty::zlib 3rdparty::yaml-cpp 3rdparty::zstd
-    PUBLIC
-        3rdparty::libevdev 3rdparty::flatbuffers)
-
-
-find_package(Threads REQUIRED)
-target_link_libraries(rpcs3_emu
-    PUBLIC Threads::Threads)
-
 # For stdafx.h
 target_include_directories(rpcs3_emu
     PUBLIC
@@ -57,9 +47,6 @@ target_include_directories(rpcs3_emu
 
 target_include_directories(rpcs3_emu PUBLIC "${CMAKE_SOURCE_DIR}")
 
-target_link_libraries(rpcs3_emu
-    PUBLIC
-        3rdparty::pugixml)
 
 # Audio
 target_sources(rpcs3_emu PRIVATE
@@ -94,16 +81,8 @@ if(WIN32)
         Audio/XAudio2/xaudio2_enumerator.cpp
     )
     target_compile_definitions(rpcs3_emu PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00)
+    target_link_libraries(rpcs3_emu PRIVATE pdh bcrypt)
 endif()
-
-target_link_libraries(rpcs3_emu
-    PUBLIC
-        3rdparty::openal
-        3rdparty::cubeb
-        3rdparty::soundtouch
-        3rdparty::miniupnpc
-        3rdparty::json
-)
 
 # Cell
 target_sources(rpcs3_emu PRIVATE
@@ -133,12 +112,6 @@ if(NOT MSVC)
     )
 endif()
 
-target_link_libraries(rpcs3_emu
-    PRIVATE
-        3rdparty::stblib 3rdparty::libpng
-)
-
-
 # CPU
 target_sources(rpcs3_emu PRIVATE
     CPU/CPUThread.cpp
@@ -154,16 +127,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64")
     )
 endif()
 
-target_link_libraries(rpcs3_emu
-    PUBLIC 3rdparty::llvm 3rdparty::asmjit cellos-kernel
-)
-
 
 # Io
 target_sources(rpcs3_emu PRIVATE
     Io/Buzz.cpp
     Io/camera_config.cpp
     Io/Dimensions.cpp
+    Io/evdev_gun_handler.cpp
     Io/GameTablet.cpp
     Io/GHLtar.cpp
     Io/GunCon3.cpp
@@ -189,10 +159,8 @@ target_sources(rpcs3_emu PRIVATE
     Io/usb_device.cpp
     Io/usb_vfs.cpp
     Io/usio.cpp
-)
-
-target_link_libraries(rpcs3_emu PRIVATE
-    3rdparty::rtmidi
+    Io/LogitechG27.cpp
+    Io/LogitechG27Config.cpp
 )
 
 # Np
@@ -362,6 +330,7 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/VKCommonDecompiler.cpp
         RSX/VK/VKCommonPipelineLayout.cpp
         RSX/VK/VKCompute.cpp
+        RSX/VK/VKDataHeapManager.cpp
         RSX/VK/VKDMA.cpp
         RSX/VK/VKDraw.cpp
         RSX/VK/VKFormats.cpp
@@ -384,23 +353,45 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/VKVertexBuffers.cpp
         RSX/VK/VKVertexProgram.cpp
         RSX/VK/VKTextureCache.cpp
+        RSX/VK/VulkanAPI.cpp
     )
 endif()
 
+find_package(Threads REQUIRED)
+
 target_link_libraries(rpcs3_emu
     PUBLIC
-        3rdparty::ffmpeg 3rdparty::sdl3
-        3rdparty::opengl 3rdparty::stblib
-        3rdparty::vulkan 3rdparty::glew
-        3rdparty::libusb 3rdparty::wolfssl
+        3rdparty::llvm
+        3rdparty::asmjit
+        3rdparty::ffmpeg
+        3rdparty::sdl3
+        3rdparty::opengl
+        3rdparty::stblib
+        3rdparty::vulkan
+        3rdparty::glew
+        3rdparty::libusb
+        3rdparty::wolfssl
+        3rdparty::openal
+        3rdparty::cubeb
+        3rdparty::soundtouch
+        3rdparty::miniupnpc
+        3rdparty::libevdev
+        3rdparty::flatbuffers
+        3rdparty::pugixml
+        3rdparty::json
+        Threads::Threads
         Vulkan::Headers
         rpcsx::fw::ps3::api
         rpcsx::cpu::cell::ppu
         rpcsx::cpu::cell::ppu::semantic
         cellos-kernel
-
     PRIVATE
         3rdparty::glslang
+        3rdparty::libpng
+        3rdparty::rtmidi
+        3rdparty::yaml-cpp
+        3rdparty::zlib
+        3rdparty::zstd
 )
 
 if(APPLE)

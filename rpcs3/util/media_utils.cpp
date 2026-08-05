@@ -833,10 +833,7 @@ namespace utils
 				}
 			}
 
-			auto& thread = *m_thread;
-			thread = thread_state::aborting;
-			thread();
-
+			// Join thread
 			m_thread.reset();
 		}
 

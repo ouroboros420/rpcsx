@@ -11,7 +11,7 @@ namespace vk
 {
 	void image::validate(const vk::render_device& dev, const VkImageCreateInfo& info) const
 	{
-		const auto gpu_limits = dev.gpu().get_limits();
+		const auto& gpu_limits = dev.gpu().get_limits();
 		u32 longest_dim, dim_limit;
 
 		switch (info.imageType)
@@ -291,7 +291,7 @@ namespace vk
 			name_info.objectHandle = reinterpret_cast<u64>(value);
 			name_info.pObjectName = name.c_str();
 
-			g_render_device->_vkSetDebugUtilsObjectNameEXT(m_device, &name_info);
+			_vkSetDebugUtilsObjectNameEXT(m_device, &name_info);
 		}
 	}
 

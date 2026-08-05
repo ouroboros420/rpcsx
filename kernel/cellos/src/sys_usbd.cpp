@@ -40,6 +40,9 @@
 #include "Emu/Io/usb_vfs.h"
 #include "Emu/Io/usio.h"
 #include "Emu/Io/usio_config.h"
+#ifdef HAVE_SDL3
+#include "Emu/Io/LogitechG27.h"
+#endif
 
 #include <libusb.h>
 
@@ -228,7 +231,13 @@ private:
       {0x12BA, 0x04B0, 0x04B0, "Rapala Fishing Rod", nullptr, nullptr},
 
       // GT5 Wheels&co
+#ifdef HAVE_SDL3
+      {0x046D, 0xC283, 0xC29B, "lgFF_c283_c29b",
+       &usb_device_logitech_g27::get_num_emu_devices,
+       &usb_device_logitech_g27::make_instance},
+#else
       {0x046D, 0xC283, 0xC29B, "lgFF_c283_c29b", nullptr, nullptr},
+#endif
       {0x044F, 0xB653, 0xB653, "Thrustmaster RGT FFB Pro", nullptr, nullptr},
       {0x044F, 0xB65A, 0xB65A, "Thrustmaster F430", nullptr, nullptr},
       {0x044F, 0xB65D, 0xB65D, "Thrustmaster FFB", nullptr, nullptr},

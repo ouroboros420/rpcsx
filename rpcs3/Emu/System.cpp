@@ -229,9 +229,9 @@ static FileType getFileType(const fs::file& file)
 
 void Emulator::CallFromMainThread(std::function<void()>&& func, atomic_t<u32>* wake_up, bool track_emu_state, u64 stop_ctr, std::source_location src_loc) const
 {
-	std::function<void()> final_func = [this, before = IsStopped(), track_emu_state, thread_name = thread_ctrl::get_name(), src = src_loc, count = (stop_ctr == umax ? +m_stop_ctr : stop_ctr), func = std::move(func)]
+	std::function<void()> final_func = [this, before = IsStopped(true), track_emu_state, thread_name = thread_ctrl::get_name(), src = src_loc, count = (stop_ctr == umax ? +m_stop_ctr : stop_ctr), func = std::move(func)]
 	{
-		const bool call_it = (!track_emu_state || (count == m_stop_ctr && before == IsStopped()));
+		const bool call_it = (!track_emu_state || (count == m_stop_ctr && before == IsStopped(true)));
 
 		sys_log.trace("Callback from thread '%s' at [%s] is %s", thread_name, src, call_it ? "called" : "skipped");
 
@@ -244,13 +244,13 @@ void Emulator::CallFromMainThread(std::function<void()>&& func, atomic_t<u32>* w
 	m_cb.call_from_main_thread(std::move(final_func), wake_up);
 }
 
-void Emulator::BlockingCallFromMainThread(std::function<void()>&& func, std::source_location src_loc) const
+void Emulator::BlockingCallFromMainThread(std::function<void()>&& func, bool track_emu_state, std::source_location src_loc) const
 {
 	atomic_t<u32> wake_up = 0;
 
 	sys_log.trace("Blocking Callback from thread '%s' at [%s] is queued", thread_ctrl::get_name(), src_loc);
 
-	CallFromMainThread(std::move(func), &wake_up, true, umax, src_loc);
+	CallFromMainThread(std::move(func), &wake_up, track_emu_state, umax, src_loc);
 
 	bool logged = false;
 
@@ -3013,8 +3013,20 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 
 	const u64 read_counter = get_sysutil_cb_manager_read_count();
 
-	if (old_state == system_state::frozen || savestate || !sysutil_send_system_cmd(0x0101 /* CELL_SYSUTIL_REQUEST_EXITGAME */, 0))
+	const bool force_termination = old_state == system_state::frozen || savestate;
+
+	if (!force_termination)
 	{
+		sys_log.notice("Requesting game to exit...");
+	}
+
+	if (force_termination || !sysutil_send_system_cmd(0x0101 /* CELL_SYSUTIL_REQUEST_EXITGAME */, 0))
+	{
+		if (!force_termination)
+		{
+			sys_log.warning("The game ignored the exit request. Forcing termination...");
+		}
+
 		// The callback has been rudely ignored, we have no other option but to force termination
 		Kill(allow_autoexit && !savestate, savestate);
 
@@ -3029,15 +3041,21 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 		return;
 	}
 
-	auto perform_kill = [read_counter, allow_autoexit, this, info = GetEmulationIdentifier()]()
+	sys_log.notice("The game was requested to exit. Waiting for its reaction...");
+
+	auto perform_kill = [read_counter, allow_autoexit, this, info = old_emu_id]()
 	{
 		bool read_sysutil_signal = false;
+		std::vector<stx::shared_ptr<named_thread<ppu_thread>>> ppu_thread_list;
 
-		u32 i = 100;
+		// If EXITGAME signal is not read, force kill after a second.
+		constexpr int loop_timeout_ms = 50;
+		int kill_timeout_ms = 1000;
+		int elapsed_ms = 0;
 
-		qt_events_aware_op(50, [&]()
+		qt_events_aware_op(loop_timeout_ms, [&]()
 			{
-				if (i >= 140)
+			if (elapsed_ms >= kill_timeout_ms)
 				{
 					return true;
 				}
@@ -3049,25 +3067,60 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 					},
 					nullptr, true, read_counter);
 
+			// Check if the EXITGAME signal was read. We allow the game to terminate itself if that's the case.
 				if (!read_sysutil_signal && read_counter != get_sysutil_cb_manager_read_count())
 				{
-					i -= 100; // Grant 5 seconds (if signal is not read force kill after two second)
+				sys_log.notice("The game received the exit request. Waiting for it to terminate itself...");
+				kill_timeout_ms += 5000; // Grant a couple more seconds
 					read_sysutil_signal = true;
+
+				// Observe PPU threads state since this stage
+				idm::select<named_thread<ppu_thread>>([&](u32 id, cpu_thread&)
+				{
+					ppu_thread_list.emplace_back(idm::get_unlocked<named_thread<ppu_thread>>(id));
+				});
 				}
 
-				if (static_cast<u64>(info) != m_stop_ctr)
+			if (static_cast<u64>(info) != m_stop_ctr || Emu.IsStopped())
 				{
 					return true;
 				}
 
+			if (read_sysutil_signal && kill_timeout_ms - elapsed_ms <= 1'500)
+			{
+				int thread_exited_count = 0;
+
+				for (auto& ppu : ppu_thread_list)
+				{
+					if (ppu && (ppu->state & cpu_flag::exit || ppu->joiner == ppu_join_status::zombie))
+					{
+						ppu.reset();
+						thread_exited_count++;
+					}
+				}
+
+				if (thread_exited_count)
+				{
+					// If some threads exited since last check, grant additional 250 miliseconds
+					kill_timeout_ms += 250;
+					sys_log.notice("Threads were terminated.. increasing termination timeout (threads=%d)", thread_exited_count);
+				}
+			}
+
 				// Process events
-				i++;
+			elapsed_ms += loop_timeout_ms;
 				return false;
 			});
 
-		// An inevitable attempt to terminate the *current* emulation course will be issued after 7s
-		CallFromMainThread([allow_autoexit, this]()
+		// An inevitable attempt to terminate the *current* emulation course will be issued after the timeout was reached.
+		CallFromMainThread([this, allow_autoexit, elapsed_ms, read_sysutil_signal]()
 			{
+			if (Emu.IsStopped())
+			{
+				return;
+			}
+
+			sys_log.error("The game did not react to the exit request in time. Terminating manually... (read_sysutil_signal=%d, elapsed_ms=%d)", read_sysutil_signal, elapsed_ms);
 				Kill(allow_autoexit);
 			},
 			info);
@@ -4237,6 +4290,31 @@ game_boot_result Emulator::AddGameToYml(const std::string& path)
 
 	sys_log.notice("Nothing to add in path %s (title_id=%s, category=%s)", path, title_id, cat);
 	return game_boot_result::invalid_file_or_folder;
+}
+
+u32 Emulator::RemoveGamesFromDir(const std::string& games_dir, const std::vector<std::string>& serials_to_remove_from_yml, bool save_on_disk)
+{
+	// List of serials (title id) to remove in "games.yml" file (if any)
+	std::vector<std::string> serials_to_remove = serials_to_remove_from_yml; // Initialize the list with the specified serials (if any)
+
+	if (!games_dir.empty()) // Skip an empty folder, otherwise we'll remove all games (which is not the intention)
+	{
+		// Scan game list to detect the titles belonging to auto-detection "games_dir" folder
+		for (const auto& [serial, path] : Emu.GetGamesConfig().get_games()) // Loop on game list file
+		{
+			// NOTE: Used starts_with(games_dir) instead of Emu.IsPathInsideDir(path, games_dir) due the latter would check
+			//       also the existence of the paths
+			//
+			if (path.starts_with(games_dir)) // If game path belongs to auto-detection "games_dir" folder, add the serial to the removal list
+			{
+				serials_to_remove.push_back(serial);
+			}
+		}
+	}
+
+	// Remove the specified and detected serials (title id) belonging to "games_dir" from the game list in memory
+	// or also in "games.yml" file according to the value of "save_on_disk"
+	return RemoveGames(serials_to_remove, save_on_disk);
 }
 
 u32 Emulator::RemoveGames(const std::vector<std::string>& title_id_list, bool save_on_disk)

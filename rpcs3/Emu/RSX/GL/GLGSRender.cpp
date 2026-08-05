@@ -150,7 +150,7 @@ void GLGSRender::on_init_thread()
 	rsx_log.success("GL VERSION: %s", reinterpret_cast<const char*>(glGetString(GL_VERSION)));
 	rsx_log.success("GLSL VERSION: %s", reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION)));
 
-	auto& gl_caps = gl::get_driver_caps();
+	const auto& gl_caps = gl::get_driver_caps();
 
 	std::vector<std::string> exception_reasons;
 	if (!gl_caps.ARB_texture_buffer_object_supported)
@@ -1255,7 +1255,7 @@ bool GLGSRender::on_access_violation(u32 address, bool is_writing)
 	return true;
 }
 
-void GLGSRender::on_invalidate_memory_range(const utils::address_range& range, rsx::invalidation_cause cause)
+void GLGSRender::on_invalidate_memory_range(const utils::address_range32 &range, rsx::invalidation_cause cause)
 {
 	gl::command_context cmd{gl_state};
 	auto data = m_gl_texture_cache.invalidate_range(cmd, range, cause);

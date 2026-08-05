@@ -204,18 +204,47 @@ void pad_thread::Init()
 		connect_usb_controller(i, input::get_product_by_vid_pid(pad->m_vendor_id, pad->m_product_id));
 	}
 
+	// Set copilots
+	for (usz i = 0; i < m_pads.size(); i++)
+	{
+		if (!m_pads[i]) continue;
+
+		m_pads[i]->copilots.clear();
+
+		for (usz j = 0; j < m_pads.size(); j++)
+		{
+			if (i == j || !m_pads[j] || m_pads[j]->copilot_player() != i)
+				continue;
+
+			m_pads[i]->copilots.push_back(m_pads[j]);
+		}
+	}
+
 	// Initialize active mouse and keyboard. Activate pad handler if one exists.
 	input::set_mouse_and_keyboard(m_handlers.contains(pad_handler::keyboard) ? input::active_mouse_and_keyboard::pad : input::active_mouse_and_keyboard::emulated);
 }
 
-void pad_thread::SetRumble(const u32 pad, u8 large_motor, bool small_motor)
+void pad_thread::SetRumble(u32 pad, u8 large_motor, bool small_motor)
 {
-	if (pad >= m_pads.size())
+	if (pad >= m_pads.size() || !m_pads[pad])
 		return;
 
-	m_pads[pad]->m_last_rumble_time_us = get_system_time();
+	const u64 now_us = get_system_time();
+
+	m_pads[pad]->m_last_rumble_time_us = now_us;
 	m_pads[pad]->m_vibrateMotors[0].m_value = large_motor;
 	m_pads[pad]->m_vibrateMotors[1].m_value = small_motor ? 255 : 0;
+
+	// Rumble copilots as well
+	for (const auto& copilot : m_pads[pad]->copilots)
+	{
+		if (copilot && copilot->is_connected())
+		{
+			copilot->m_last_rumble_time_us = now_us;
+			copilot->m_vibrateMotors[0].m_value = large_motor;
+			copilot->m_vibrateMotors[1].m_value = small_motor ? 255 : 0;
+		}
+	}
 }
 
 void pad_thread::SetIntercepted(bool intercepted)
@@ -240,7 +269,7 @@ void pad_thread::update_pad_states()
 		// Simulate unplugging and plugging in a new controller
 		if (pad && pad->m_disconnection_timer > 0)
 		{
-			const bool is_connected = pad->m_port_status & CELL_PAD_STATUS_CONNECTED;
+			const bool is_connected = pad->is_connected();
 			const u64 now = get_system_time();
 
 			if (is_connected && now < pad->m_disconnection_timer)
@@ -255,7 +284,7 @@ void pad_thread::update_pad_states()
 			}
 		}
 
-		const bool connected = pad && !pad->is_fake_pad && !!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED);
+		const bool connected = pad && !pad->is_fake_pad && pad->is_connected();
 
 		if (m_pads_connected[i] == connected)
 			continue;
@@ -286,13 +315,10 @@ void pad_thread::operator()()
 
 		for (auto& thread : threads)
 		{
-			if (thread)
-			{
-				auto& enumeration_thread = *thread;
-				enumeration_thread = thread_state::aborting;
-				enumeration_thread();
-			}
+			// Join thread (ordered explicitly)
+			thread.reset();
 		}
+
 		threads.clear();
 
 		input_log.notice("Pad threads stopped");
@@ -411,7 +437,7 @@ void pad_thread::operator()()
 			{
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
 				for (const auto& button : pad->m_buttons)
@@ -447,7 +473,7 @@ void pad_thread::operator()()
 
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
 				// Check if an LDD pad pressed the PS button (bit 0 of the first button)
@@ -514,7 +540,7 @@ void pad_thread::operator()()
 			{
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
 				for (const auto& button : pad->m_buttons)
@@ -617,11 +643,11 @@ s32 pad_thread::AddLddPad()
 
 void pad_thread::UnregisterLddPad(u32 handle)
 {
-	ensure(handle < m_pads.size());
+	auto& pad = ::at32(m_pads, handle);
 
-	m_pads[handle]->ldd = false;
-	m_pads[handle]->m_port_status &= ~CELL_PAD_STATUS_CONNECTED;
-	m_pads[handle]->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
+	pad->ldd = false;
+	pad->m_port_status &= ~CELL_PAD_STATUS_CONNECTED;
+	pad->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
 
 	num_ldd_pad--;
 }

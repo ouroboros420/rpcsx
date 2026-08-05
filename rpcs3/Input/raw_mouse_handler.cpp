@@ -278,13 +278,8 @@ void raw_mouse::update_values(s32 scan_code, bool pressed)
 
 raw_mouse_handler::~raw_mouse_handler()
 {
-	if (m_thread)
-	{
-		auto& thread = *m_thread;
-		thread = thread_state::aborting;
-		thread();
+	// Join thread
 		m_thread.reset();
-	}
 
 #ifdef _WIN32
 	unregister_raw_input_devices();
