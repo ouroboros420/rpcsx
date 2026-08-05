@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Emu/Io/usb_device.h"
-#include "Utilities/Thread.h"
+#include "util/Thread.h"
 #include "LogitechG27Config.h"
 
 #ifndef _MSC_VER

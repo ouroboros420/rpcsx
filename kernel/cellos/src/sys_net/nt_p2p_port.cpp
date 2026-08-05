@@ -1,10 +1,12 @@
 #include "sys_net/nt_p2p_port.h"
 #include "Emu/NP/ip_address.h"
 #include "Emu/NP/np_handler.h"
+#include "Emu/NP/np_helpers.h"
 #include "Emu/NP/signaling_handler.h"
 #include "Emu/NP/vport0.h"
-#include "Emu/NP/np_handler.h"
-#include "Emu/NP/np_helpers.h"
+#include "stdafx.h"
+#include "sys_net/lv2_socket_p2ps.h"
+#include "sys_net/sys_net_helpers.h"
 
 LOG_CHANNEL(sys_net);
 
@@ -37,53 +39,73 @@ bool all_reusable(const std::set<s32> &sock_ids) {
 }
 } // namespace sys_net_helpers
 
-nt_p2p_port::nt_p2p_port(u16 port)
-	: port(port)
-{
-	const bool is_ipv6 = np::is_ipv6_supported();
+nt_p2p_port::nt_p2p_port(u16 port) : port(port) {
+  const bool is_ipv6 = np::is_ipv6_supported();
 
-	// Creates and bind P2P Socket
-	p2p_socket = ::socket(is_ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
+  // Creates and bind P2P Socket
+  p2p_socket = ::socket(is_ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
 #ifdef _WIN32
   if (p2p_socket == INVALID_SOCKET)
 #else
   if (p2p_socket == -1)
 #endif
-		fmt::throw_exception("Failed to create DGRAM socket for P2P socket: %s!", get_last_error(true));
+    fmt::throw_exception("Failed to create DGRAM socket for P2P socket: %s!",
+                         get_last_error(true));
 
-	np::set_socket_non_blocking(p2p_socket);
+  np::set_socket_non_blocking(p2p_socket);
 
-	u32 optval = 131072; // value obtained from DECR for a SOCK_DGRAM_P2P socket(should maybe be bigger for actual socket?)
-	if (setsockopt(p2p_socket, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&optval), sizeof(optval)) != 0)
-		fmt::throw_exception("Error setsockopt SO_RCVBUF on P2P socket: %s", get_last_error(true));
+  u32 optval = 131072; // value obtained from DECR for a SOCK_DGRAM_P2P
+                       // socket(should maybe be bigger for actual socket?)
+  if (setsockopt(p2p_socket, SOL_SOCKET, SO_RCVBUF,
+                 reinterpret_cast<const char *>(&optval), sizeof(optval)) != 0)
+    fmt::throw_exception("Error setsockopt SO_RCVBUF on P2P socket: %s",
+                         get_last_error(true));
 
-	int ret_bind = 0;
-	const u16 be_port = std::bit_cast<u16, be_t<u16>>(port);
-	auto& nph = g_fxo->get<named_thread<np::np_handler>>();
+  int ret_bind = 0;
+  const u16 be_port = std::bit_cast<u16, be_t<u16>>(port);
+  auto &nph = g_fxo->get<named_thread<np::np_handler>>();
 
-	if (is_ipv6)
-	{
-		// Some OS(Windows, maybe more) will only support IPv6 adressing by default and we need IPv4 over IPv6
-		optval = 0;
-		if (setsockopt(p2p_socket, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&optval), sizeof(optval)) != 0)
-			fmt::throw_exception("Error setsockopt IPV6_V6ONLY on P2P socket: %s", get_last_error(true));
+  if (is_ipv6) {
+    // Some OS(Windows, maybe more) will only support IPv6 adressing by default
+    // and we need IPv4 over IPv6
+    optval = 0;
+    if (setsockopt(p2p_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                   reinterpret_cast<const char *>(&optval),
+                   sizeof(optval)) != 0)
+      fmt::throw_exception("Error setsockopt IPV6_V6ONLY on P2P socket: %s",
+                           get_last_error(true));
 
-		::sockaddr_in6 p2p_ipv6_addr{.sin6_family = AF_INET6, .sin6_port = be_port};
-		ret_bind = ::bind(p2p_socket, reinterpret_cast<sockaddr*>(&p2p_ipv6_addr), sizeof(p2p_ipv6_addr));
-	}
-	else
-	{
-		::sockaddr_in p2p_ipv4_addr{.sin_family = AF_INET, .sin_port = be_port};
-		const u32 bind_ip = nph.get_bind_ip();
-		p2p_ipv4_addr.sin_addr.s_addr = bind_ip;
+    ::sockaddr_in6 p2p_ipv6_addr{.sin6_family = AF_INET6, .sin6_port = be_port};
+    ret_bind = ::bind(p2p_socket, reinterpret_cast<sockaddr *>(&p2p_ipv6_addr),
+                      sizeof(p2p_ipv6_addr));
+  } else {
+    ::sockaddr_in p2p_ipv4_addr{.sin_family = AF_INET, .sin_port = be_port};
+    const u32 bind_ip = nph.get_bind_ip();
+    p2p_ipv4_addr.sin_addr.s_addr = bind_ip;
 
-		if (ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr)); ret_bind == -1 && bind_ip)
-		{
-			sys_net.error("Failed to bind to %s:%d, falling back to 0.0.0.0:%d", np::ip_to_string(bind_ip), port, port);
-			p2p_ipv4_addr.sin_addr.s_addr = 0;
-			ret_bind = ::bind(p2p_socket, reinterpret_cast<const sockaddr*>(&p2p_ipv4_addr), sizeof(p2p_ipv4_addr));
-		}
-	}
+    if (ret_bind = ::bind(p2p_socket,
+                          reinterpret_cast<const sockaddr *>(&p2p_ipv4_addr),
+                          sizeof(p2p_ipv4_addr));
+        ret_bind == -1 && bind_ip) {
+      sys_net.error("Failed to bind to %s:%d, falling back to 0.0.0.0:%d",
+                    np::ip_to_string(bind_ip), port, port);
+      p2p_ipv4_addr.sin_addr.s_addr = 0;
+      ret_bind = ::bind(p2p_socket,
+                        reinterpret_cast<const sockaddr *>(&p2p_ipv4_addr),
+                        sizeof(p2p_ipv4_addr));
+    }
+  }
+
+  if (ret_bind == -1)
+    fmt::throw_exception("Failed to bind DGRAM socket to %d for P2P: %s!", port,
+                         get_last_error(true));
+
+  nph.upnp_add_port_mapping(port, "UDP");
+
+  sys_net.notice("P2P port %d was bound!", port);
+}
+
+nt_p2p_port::~nt_p2p_port() { np::close_socket(p2p_socket); }
 
 void nt_p2p_port::dump_packet(p2ps_encapsulated_tcp *tcph) {
   sys_net.trace("PACKET DUMP:\nsrc_port: %d\ndst_port: %d\nflags: %d\nseq: "
@@ -92,8 +114,12 @@ void nt_p2p_port::dump_packet(p2ps_encapsulated_tcp *tcph) {
                 tcph->ack, tcph->length);
 }
 
-	nph.upnp_add_port_mapping(port, "UDP");
-	sys_net.notice("P2P port %d was bound!", port);
+u16 nt_p2p_port::get_port() {
+  if (binding_port == 0) {
+    binding_port = 30000;
+  }
+
+  return binding_port++;
 }
 
 bool nt_p2p_port::handle_connected(s32 sock_id,

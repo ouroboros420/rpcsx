@@ -4,7 +4,7 @@
 #include <util/vm.hpp>
 
 #include "Emu/RSX/Common/simple_array.hpp"
-#include "Utilities/address_range.h"
+#include "util/address_range.h"
 
 namespace rsx
 {

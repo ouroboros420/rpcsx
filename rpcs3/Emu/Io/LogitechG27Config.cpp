@@ -2,7 +2,7 @@
 
 #ifdef HAVE_SDL3
 
-#include "Utilities/File.h"
+#include "util/File.h"
 #include "LogitechG27Config.h"
 
 template <>

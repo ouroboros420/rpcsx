@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "Utilities/StrUtil.h"
+#include "util/StrUtil.h"
 
 using namespace std::literals::string_literals;
 

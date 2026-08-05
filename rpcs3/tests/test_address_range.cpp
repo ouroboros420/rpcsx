@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "Utilities/address_range.h"
+#include "util/address_range.h"
 #undef private
 
 using namespace utils;

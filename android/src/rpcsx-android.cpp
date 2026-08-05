@@ -106,8 +106,8 @@ LOG_CHANNEL(rpcsx_android, "ANDROID");
 struct LogListener : logs::listener {
   LogListener() { logs::listener::add(this); }
 
-  void log(u64 stamp, const logs::message &msg, const std::string &prefix,
-           const std::string &text) override {
+  void log(u64 stamp, const logs::message &msg, std::string_view prefix,
+           std::string_view text) override {
     int prio = 0;
     switch (static_cast<logs::level>(msg)) {
     case logs::level::always:
@@ -136,7 +136,9 @@ struct LogListener : logs::listener {
       break;
     }
 
-    __android_log_write(prio, "RPCS3", text.c_str());
+    // text is a string_view and is not guaranteed to be null terminated.
+    __android_log_print(prio, "RPCS3", "%.*s", static_cast<int>(text.size()),
+                        text.data());
   }
 } static g_androidLogListener;
 
