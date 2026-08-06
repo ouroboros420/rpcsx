@@ -1544,16 +1544,20 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 				test_dirs.push_back(hdd0_game + "/" + m_title_id + "/USRDIR/");
 
 				if (!tail.empty())
-					{
-						rpcs3::utils::get_hdd0_dir() + "game/" + m_title_id + "/USRDIR/EBOOT.BIN", tail.empty() ? "" : title_path + tail + "/USRDIR/EBOOT.BIN", title_path + "/PS3_GAME/USRDIR/EBOOT.BIN", title_path + "/USRDIR/EBOOT.BIN"})
 				{
+					// Check in tail directory
+					test_dirs.push_back(title_path + tail + "/USRDIR/");
+
+					// Check in alternate hdd game directory if the tail looks like a Title ID
+					if (tail.size() == 10 && tail.find_first_of(fs::delim) == 0)
+					{
 						test_dirs.push_back(hdd0_game + tail + "/USRDIR/");
 					}
 				}
 
 				// Check games.yml paths
 				if (!title_path.empty())
-					{
+				{
 					test_dirs.push_back(title_path + "/PS3_GAME/USRDIR/");
 					test_dirs.push_back(title_path + "/USRDIR/");
 				}
@@ -2010,7 +2014,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 
 					struct jit_write_guard
 					{
-					~jit_write_guard() noexcept
+						~jit_write_guard() noexcept
 						{
 							pthread_jit_write_protect_np(true);
 						}
@@ -4152,7 +4156,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 									continue;
 								}
 
-							const u64 hash_val = read_from_ptr_unsafe<be_t<u64>>(result.data) & -65536;
+								const u64 hash_val = read_from_ptr_unsafe<be_t<u64>>(result.data) & -65536;
 								const f64 usage = get_cpu_program_usage_percent(hash_val);
 
 								if (usage == 0)
@@ -4468,7 +4472,7 @@ u32 Emulator::AddGamesFromDir(std::string path)
 						continue;
 					}
 
-				const std::string dir_path = path + "/" + dir_entry.name;
+					const std::string dir_path = path + "/" + dir_entry.name;
 
 					if (!dir_entry.is_directory && !is_iso_file(dir_path))
 					{

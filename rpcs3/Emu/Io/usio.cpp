@@ -232,14 +232,14 @@ void usb_device_usio::translate_input_taiko()
 					case usio_btn::test:
 						if (player != 0)
 							break;
-						if (pressed && !status.test_key_pressed) // Solve the need to hold the Test key
+						if (value.pressed && !status.test_key_pressed) // Solve the need to hold the Test key
 							status.test_on = !status.test_on;
 					status.test_key_pressed = value.pressed;
 						break;
 					case usio_btn::coin:
 						if (player != 0)
 							break;
-						if (pressed && !status.coin_key_pressed) // Ensure only one coin is inserted each time the Coin key is pressed
+						if (value.pressed && !status.coin_key_pressed) // Ensure only one coin is inserted each time the Coin key is pressed
 							status.coin_counter++;
 					status.coin_key_pressed = value.pressed;
 						break;

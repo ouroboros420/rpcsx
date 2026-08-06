@@ -74,7 +74,7 @@ struct video_export
 	atomic_t<s32> progress = 0; // 0x0-0xFFFF for 0-100%
 };
 
-bool check_movie_path(const std::string& file_path)
+bool check_movie_path(std::string_view file_path)
 {
 	if (file_path.size() >= CELL_VIDEO_EXPORT_UTIL_HDD_PATH_MAX)
 	{

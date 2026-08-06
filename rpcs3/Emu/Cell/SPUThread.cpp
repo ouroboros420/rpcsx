@@ -1811,7 +1811,7 @@ void spu_thread::init_spu_decoder()
 spu_thread::spu_thread(lv2_spu_group* group, u32 index, std::string_view name, u32 lv2_id, bool is_isolated, u32 option)
 	: cpu_thread(idm::last_id<spu_thread>()), group(group), index(index), thread_type(group ? spu_type::threaded : is_isolated ? spu_type::isolated :
 																															   spu_type::raw),
-	  shm(std::make_shared<utils::shm>(SPU_LS_SIZE)), ls(static_cast<u8*>(utils::memory_reserve(SPU_LS_SIZE * 5, nullptr, true)) + SPU_LS_SIZE * 2), option(option), lv2_id(lv2_id), spu_tname(make_single<std::string>(name))
+	  shm(std::make_shared<utils::shm>(SPU_LS_SIZE)), ls(static_cast<u8*>(utils::memory_reserve(SPU_LS_SIZE * 7, nullptr, true)) + SPU_LS_SIZE * 3), option(option), lv2_id(lv2_id), spu_tname(make_single<std::string>(name))
 {
 	init_spu_decoder();
 

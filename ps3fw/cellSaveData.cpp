@@ -1300,16 +1300,16 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 
 		const auto delete_save = [&]()
 		{
-			strcpy_trunc(doneGet->dirName, save_entries[selected].dirName);
+			const SaveDataEntry& entry = ::at32(save_entries, selected);
+			strcpy_trunc(doneGet->dirName, entry.dirName);
 			doneGet->hddFreeSizeKB =
 				40 * 1024 * 1024 - 256; // Read explanation in cellHddGameCheck
 			doneGet->excResult = CELL_OK;
 			std::memset(doneGet->reserved, 0, sizeof(doneGet->reserved));
 
 			const std::string old_path =
-				base_dir + ".backup_" + save_entries[selected].escaped + "/";
-			const std::string del_path =
-				base_dir + save_entries[selected].escaped + "/";
+				base_dir + ".backup_" + entry.escaped + "/";
+			const std::string del_path = base_dir + entry.escaped + "/";
 
 			const fs::dir _dir(del_path);
 			u64 size_bytes = 0;

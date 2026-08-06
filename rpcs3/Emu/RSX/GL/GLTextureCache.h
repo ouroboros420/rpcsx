@@ -574,8 +574,7 @@ namespace gl
 		}
 
 	protected:
-		gl::texture_view* create_temporary_subresource_view(gl::command_context& cmd, gl::texture** src, u32 gcm_format, u16 x, u16 y, u16 w, u16 h,
-			const rsx::texture_channel_remap_t& remap_vector) override
+		gl::texture_view* create_temporary_subresource_view(gl::command_context& cmd, const deferred_subresource& desc) override
 		{
 			return create_temporary_subresource_impl(cmd, desc.external_handle, static_cast<GLenum>(desc.external_handle->get_internal_format()),
 					GL_TEXTURE_2D, desc.gcm_format, desc.x, desc.y, desc.width, desc.height, 1, 1, desc.remap, true);
@@ -590,7 +589,7 @@ namespace gl
 			if (desc.force_bg_load)
 			{
 				initialize_subresource_from_memory(cmd, result->image(), desc, rsx::texture_dimension_extended::texture_dimension_cubemap);
-		}
+			}
 
 			copy_transfer_regions_impl(cmd, result->image(), desc.sections_to_copy);
 			return result;

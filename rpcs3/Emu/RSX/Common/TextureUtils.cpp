@@ -751,7 +751,6 @@ namespace
 		}
 		fmt::throw_exception("Unsupported texture dimension");
 	}
-} // namespace
 
 // Common implementation for packing texture definitions into subresource layout arrays
 std::vector<rsx::subresource_layout> get_subresources_layout_impl(
@@ -818,9 +817,9 @@ std::vector<rsx::subresource_layout> get_subresources_layout_impl(
 	}
 	fmt::throw_exception("Wrong format 0x%x", format);
 }
-}
+} // namespace
 
-template<typename RsxTextureType>
+template <typename RsxTextureType>
 std::vector<rsx::subresource_layout> get_subresources_layout_impl(const RsxTextureType &texture)
 {
 	const auto [h, depth, layer] = get_height_depth_layer(texture);

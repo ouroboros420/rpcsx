@@ -238,7 +238,13 @@ protected:
 		{
 			if (btn)
 			{
-				func(btn->btn_id(), btn->get(), value, pressed, abort);
+				const input_value params{
+					.btn = btn->btn_id(),
+					.pad_btn = btn->get(),
+					.value = value,
+					.max_value = max_value,
+					.pressed = pressed};
+				func(params, abort);
 				if (abort)
 					break;
 			}

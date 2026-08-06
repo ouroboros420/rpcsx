@@ -27,6 +27,7 @@ std::string g_android_cache_dir;
 
 #include <cwchar>
 #include <windows.h>
+#include <winioctl.h>
 
 static std::unique_ptr<wchar_t[]> to_wchar(std::string_view source)
 {

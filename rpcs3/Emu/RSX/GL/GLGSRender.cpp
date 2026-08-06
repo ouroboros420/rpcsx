@@ -342,7 +342,7 @@ void GLGSRender::on_init_thread()
 	if (backend_config.supports_hw_instanced_rendering)
 	{
 		ensure(gl_caps.ARB_shader_storage_buffer_object_supported);
-	m_instancing_ring_buffer->create(gl::buffer::target::ssbo, 128 * 0x100000);
+		m_instancing_ring_buffer->create(gl::buffer::target::ssbo, 128 * 0x100000);
 	}
 
 	if (shadermode == shader_mode::async_with_interpreter || shadermode == shader_mode::interpreter_only)
@@ -1341,12 +1341,12 @@ void GLGSRender::do_local_task(rsx::FIFO::state state)
 
 		work_queue.remove_if([](auto& q)
 			{
-				return q.received;
+				return q.received.load();
 			});
 
 		for (auto& q : work_queue)
 		{
-			if (q.processed)
+			if (q.processed.load())
 				continue;
 
 			gl::command_context cmd{gl_state};

@@ -1216,7 +1216,11 @@ static void ppu_check_patch_spu_images(const ppu_module<lv2_obj>& mod, const ppu
 
 			auto search_guid_pattern = [&](u32 index, std::string_view data_span, s32 advance_index, u32 lower_bound, u32 upper_bound) -> u32
 			{
-				for (u32 search = index & -16, tries = 16 * 64; tries && search >= lower_bound && search < uppper_bound; tries = tries - 1, search = advance_index < 0 ? rx::sub_saturate<u32>(search, 0 - advance_index) : search + advance_index)
+				ensure(upper_bound <= data_span.size());
+				ensure(lower_bound <= data_span.size());
+				ensure(lower_bound <= upper_bound);
+
+				for (u32 search = index & -16, tries = 16 * 64; tries && search >= lower_bound && search < (upper_bound & -16); tries = tries - 1, search = advance_index < 0 ? rx::sub_saturate<u32>(search, 0 - advance_index) : search + advance_index)
 				{
 					if (seg_view[search] != 0x42 && seg_view[search] != 0x43)
 					{

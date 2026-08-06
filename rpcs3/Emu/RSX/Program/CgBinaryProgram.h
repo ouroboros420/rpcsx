@@ -321,6 +321,9 @@ public:
 	template <typename T>
 	T readData(const u32 offset)
 	{
+		// Bounds check, equivalent to upstream's ::at32 on the buffer
+		ensure(offset < m_buffer_size);
+
 		T result;
 		std::memcpy(&result, m_buffer + offset, sizeof(result));
 		return result;

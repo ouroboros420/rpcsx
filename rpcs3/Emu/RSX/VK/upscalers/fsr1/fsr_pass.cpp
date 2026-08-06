@@ -156,7 +156,8 @@ namespace vk
 				static_cast<f32>(src_image->width()), static_cast<f32>(src_image->height()),    // Size of the raw image to upscale (in case viewport does not cover it all)
 				static_cast<f32>(m_output_size.width), static_cast<f32>(m_output_size.height)); // Size of output viewport (target size)
 
-			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf);
+			ensure(push_constants_size <= (m_constants_buf.size() * sizeof(decltype(m_constants_buf)::value_type)));
+			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf.data());
 		}
 
 		rcas_pass::rcas_pass()
@@ -176,7 +177,8 @@ namespace vk
 			auto cas_attenuation = 2.f - (g_cfg.video.rcas_sharpening_intensity / 50.f);
 			FsrRcasCon(&m_constants_buf[0], cas_attenuation);
 
-			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf);
+			ensure(push_constants_size <= (m_constants_buf.size() * sizeof(decltype(m_constants_buf)::value_type)));
+			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf.data());
 		}
 
 	} // Namespace FidelityFX

@@ -883,6 +883,11 @@ namespace cfg
 			return *m_value.load().get();
 		}
 
+		std::string get() const
+		{
+			return *m_value.load().get();
+		}
+
 		nlohmann::ordered_json to_json() const override
 		{
 			return {

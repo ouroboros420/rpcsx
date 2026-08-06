@@ -26,7 +26,7 @@ namespace utils
 		std::string_view m_postfix;
 
 	public:
-		constexpr version(uint hi, uint mid, uint lo, version_type type, uint type_index, const char* postfix)
+		constexpr version(uint hi, uint mid, uint lo, version_type type, uint type_index, std::string_view postfix)
 			: m_hi(hi), m_mid(mid), m_lo(lo), m_type(type), m_type_index(type_index), m_postfix(postfix)
 		{
 		}

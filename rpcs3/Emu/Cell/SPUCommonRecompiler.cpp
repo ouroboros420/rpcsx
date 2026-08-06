@@ -657,9 +657,9 @@ extern void utilize_spu_data_segment(u32 vaddr, const void* ls_data_vaddr, u32 s
 		rem = 4 - rem;
 
 		if (size < rem)
-	{
-		return;
-	}
+		{
+			return;
+		}
 
 		vaddr += rem;
 		ls_data_vaddr = reinterpret_cast<const char*>(ls_data_vaddr) + rem;
@@ -2377,11 +2377,22 @@ std::vector<u32> spu_thread::discover_functions(u32 base_addr, std::span<const u
 	// TODO: Does not detect jumptables or fixed-addr indirect calls
 	const v128 brasl_mask = is_known_addr ? v128::from32p(0x62u << 23) : v128::from32p(umax);
 
-	for (u32 i = rx::alignUp<u32>(base_addr, 0x10); i < std::min<u32>(base_addr + ::size32(ls), 0x3FFF0); i += 0x10)
+	for (u32 i = base_addr, end_ls = std::min<u32>(base_addr + ::size32(ls), SPU_LS_SIZE); i < end_ls; i = rx::alignUp<u32>(i + 1, 0x10))
 	{
 		// Search for BRSL LR and BRASL LR or BR
 		// TODO: BISL
-		const v128 inst = read_from_ptr<be_t<v128>>(ls.data(), i - base_addr);
+		be_t<v128> inst_be{};
+
+		if (end_ls - i < 16)
+		{
+			std::memcpy(&inst_be, ls.data() + (i - base_addr), end_ls - i);
+		}
+		else
+		{
+			inst_be = read_from_ptr<be_t<v128>>(ls, i - base_addr);
+		}
+
+		const v128 inst = inst_be;
 		const v128 cleared_i16 = gv_and32(inst, v128::from32p(rx::rol32(~0xffff, 7)));
 		const v128 eq_brsl = gv_eq32(cleared_i16, v128::from32p(0x66u << 23));
 		const v128 eq_brasl = gv_eq32(cleared_i16, brasl_mask);

@@ -549,7 +549,9 @@ namespace vk
 		                             .get();
 		push_buf[pos++] = std::bit_cast<f32>(vert_config);
 
-		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, 68, push_buf);
+		ensure(pos <= push_buf.size());
+		ensure(pos == (vertex_push_constants_size / sizeof(f32)));
+		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertex_push_constants_size, push_buf.data());
 
 		// 2. Fragment stuff
 		rsx::overlays::fragment_options frag_opts {};
@@ -576,7 +578,9 @@ namespace vk
 		write_to_ptr(push_buf, pos, m_sdf_config.border_color.rgba);
 		pos += sizeof(m_sdf_config.border_color.rgba) / sizeof(f32);
 
-		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 68, 60, push_buf);
+		ensure(pos <= push_buf.size());
+		ensure(pos == (fragment_push_constants_size / sizeof(f32)));
+		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, vertex_push_constants_size, fragment_push_constants_size, push_buf.data());
 	}
 
 	void ui_overlay_renderer::set_primitive_type(rsx::overlays::primitive_type type)
@@ -759,7 +763,8 @@ namespace vk
 		data[6] = colormask.b;
 		data[7] = colormask.a;
 
-		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, 32, data);
+		static_assert(sizeof(data) == vertex_push_constants_size);
+		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertex_push_constants_size, data);
 	}
 
 	void attachment_clear_pass::set_up_viewport(vk::command_buffer& cmd, u32 x, u32 y, u32 w, u32 h)
@@ -909,7 +914,8 @@ namespace vk
 
 	void video_out_calibration_pass::update_uniforms(vk::command_buffer& cmd, vk::glsl::program* program)
 	{
-		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(config.data), config.data);
+		static_assert(sizeof(config.data) == fragment_push_constants_size);
+		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, fragment_push_constants_size, config.data);
 	}
 
 	void video_out_calibration_pass::run(vk::command_buffer& cmd, const areau& viewport, vk::framebuffer* target,

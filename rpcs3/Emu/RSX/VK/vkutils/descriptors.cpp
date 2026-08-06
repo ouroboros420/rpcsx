@@ -266,8 +266,8 @@ namespace vk
 				}
 			}
 
-			VkDescriptorPool subpool = VK_NULL_HANDLE;
-			if (VkResult result = VK_GET_SYMBOL(vkCreateDescriptorPool)(*m_owner, &m_create_info, nullptr, &subpool))
+			const auto [result, subpool] = new_subpool();
+			if (result != VK_SUCCESS)
 			{
 				if (retries-- && (result == VK_ERROR_FRAGMENTATION_EXT))
 				{
@@ -285,6 +285,7 @@ namespace vk
 
 			m_device_subpools.push_back(
 				{.handle = subpool,
+					.size = m_autoscaling_config.current_size,
 					.busy = VK_FALSE});
 
 			m_current_subpool_index = m_device_subpools.size() - 1;
@@ -315,7 +316,7 @@ namespace vk
 		m_create_info.pPoolSizes = descriptor_pool_sizes.data();
 
 		VkDescriptorPool subpool = VK_NULL_HANDLE;
-		VkResult result = vkCreateDescriptorPool(*m_owner, &m_create_info, nullptr, &subpool);
+		VkResult result = VK_GET_SYMBOL(vkCreateDescriptorPool)(*m_owner, &m_create_info, nullptr, &subpool);
 
 		if (result != VK_SUCCESS)
 		{

@@ -187,7 +187,7 @@ std::string CgBinaryDisasm::GetSRCDisasm(const u32 n) const
 
 	if (abs)
 		ret = "|" + ret + "|";
-	if (src[n].neg)
+	if (s.neg)
 		ret = "-" + ret;
 
 	return ret;

@@ -602,7 +602,7 @@ void ext_hdr::Load(const fs::file& f)
 }
 
 SCEDecrypter::SCEDecrypter(const fs::file& s)
-	: sce_f(s), data_buf_length(0)
+	: sce_f(s)
 {
 }
 
@@ -1123,8 +1123,8 @@ bool SELFDecrypter::LoadMetadata(const u8* klic_key)
 	// Copy the necessary parameters.
 	u8 metadata_key[0x20];
 	u8 metadata_iv[0x10];
-	memcpy(metadata_key, keyset.erk, 0x20);
-	memcpy(metadata_iv, keyset.riv, 0x10);
+	std::memcpy(metadata_key, keyset.erk, 0x20);
+	std::memcpy(metadata_iv, keyset.riv, 0x10);
 
 	// Check DEBUG flag.
 	if ((sce_hdr.se_flags & 0x8000) != 0x8000)

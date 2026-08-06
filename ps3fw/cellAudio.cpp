@@ -1699,8 +1699,12 @@ error_code AudioSetNotifyEventQueue(ppu_thread& ppu, u64 key, u32 iFlags)
 
 												return *ptr == "_cellsurMixerMain"sv;
 											})
-											.ret)
-			{
+											.ret;
+
+		bool was_mxr000_queue_found = false;
+
+		for (usz count = 0; has_sur_mixer_thread && count < 100; count++)
+		{
 			if (lv2_event_queue::find(c_mxr000))
 			{
 				was_mxr000_queue_found = true;

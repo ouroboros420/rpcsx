@@ -2480,6 +2480,11 @@ void ppu_thread::cpu_wait(rx::EnumBitSet<cpu_flag> old)
 // static_assert(offsetof(ppu_thread, gpr[0]) == 24);
 void ppu_thread::exec_task()
 {
+#ifdef __APPLE__
+	// Ensure correct state before executing JIT code
+	pthread_jit_write_protect_np(true);
+#endif
+
 	if (g_cfg.core.ppu_decoder == ppu_decoder_type::llvm_legacy)
 	{
 		// HVContext push to allow recursion. This happens with guest callback invocations.
@@ -4087,7 +4092,7 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 
 	named_thread_group workers("SPRX Worker ", std::min<u32>(software_thread_limit, cpu_thread_limit), [&]
 		{
-		jit_write_guard jit_guard;
+			jit_write_guard jit_guard;
 
 			// Set low priority
 			thread_ctrl::scoped_priority low_prio(-1);
@@ -4531,6 +4536,16 @@ extern void ppu_initialize()
 
 bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_size, concurent_memory_limit& memory_limit)
 {
+	ppu_log.notice("Entering ppu_initialize(const ppu_module&..)");
+
+	struct log_guard
+	{
+		~log_guard() noexcept
+		{
+			ppu_log.notice("Leaving ppu_initialize(const ppu_module&..)");
+		}
+	} _log_guard;
+
 	if (g_cfg.core.ppu_decoder != ppu_decoder_type::llvm_legacy)
 	{
 		if (check_only || vm::base(info.segs[0].addr) != info.segs[0].ptr)
@@ -5198,7 +5213,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				contains_symbol_resolver,
 				daz_and_ftz,
 
-				bitset_last = contains_symbol_resolver,
+				bitset_last = daz_and_ftz,
 			};
 
 			be_t<rx::EnumBitSet<ppu_settings>> settings{};
@@ -5305,7 +5320,8 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		struct thread_op
 		{
 			concurent_memory_limit& memory_limit;
-			atomic_t<u32>& work_cv;
+			const std::add_pointer_t<atomic_t<u64>> work_cv;
+			const std::add_pointer_t<atomic_t<u64>> work_done;
 			std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload;
 			const ppu_module<lv2_obj>& main_module;
 			const std::string& cache_path;
@@ -5313,16 +5329,16 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 			std::unique_lock<decltype(jit_core_allocator::sem)> core_lock;
 
-			thread_op(concurent_memory_limit& memory_limit, atomic_t<u32>& work_cv, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload, const cpu_thread* cpu, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
+			thread_op(concurent_memory_limit& memory_limit, atomic_t<u64>* _work_cv, atomic_t<u64>* _work_done, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload, const cpu_thread* cpu, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
 
-				: memory_limit(memory_limit), work_cv(work_cv), workload(workload), main_module(main_module), cache_path(cache_path), cpu(cpu)
+				: memory_limit(memory_limit), work_cv(_work_cv), work_done(_work_done), workload(workload), main_module(main_module), cache_path(cache_path), cpu(cpu)
 			{
 				// Save mutex
 				core_lock = std::unique_lock{sem, std::defer_lock};
 			}
 
 			thread_op(const thread_op& other) noexcept
-				: memory_limit(other.memory_limit), work_cv(other.work_cv), workload(other.workload), main_module(other.main_module), cache_path(other.cache_path), cpu(other.cpu)
+				: memory_limit(other.memory_limit), work_cv(other.work_cv), work_done(other.work_done), workload(other.workload), main_module(other.main_module), cache_path(other.cache_path), cpu(other.cpu)
 			{
 				if (auto mtx = other.core_lock.mutex())
 				{
@@ -5359,19 +5375,6 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 					ppu_log.warning("LLVM: reporting used memory %u (free/total: %u/%u) by %s%s", total_fn_size * 1024 * 16, memory_limit.free_memory(), memory_limit.total_memory(), cache_path, obj_name);
 					auto used_memory = memory_limit.acquire(total_fn_size * 1024 * 16);
 
-					std::shared_lock rlock(g_fxo->get<jit_core_allocator>().shared_mtx, std::defer_lock);
-					std::unique_lock lock(g_fxo->get<jit_core_allocator>().shared_mtx, std::defer_lock);
-
-					if (false && part.jit_bounds && part.parent->funcs.size() >= 0x8000)
-					{
-						// Make a large symbol-resolving function compile alone because it has massive memory requirements
-						lock.lock();
-					}
-					else
-					{
-						rlock.lock();
-					}
-
 					ppu_log.warning("LLVM: Compiling module %s%s", cache_path, obj_name);
 
 					{
@@ -5390,8 +5393,10 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		// Prevent watchdog thread from terminating
 		g_watchdog_hold_ctr++;
 
-		named_thread_group threads(fmt::format("PPUW.%u.", ++g_fxo->get<thread_index_allocator>().index), thread_count, thread_op(memory_limit, work_cv, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem), [&](u32 /*thread_index*/, thread_op& op)
-			{
+		const std::string worker_group_name = fmt::format("PPUW.%u.", ++g_fxo->get<thread_index_allocator>().index);
+
+		const auto try_lock_thread = [&](u32 thread_index, thread_op& op)
+		{
 			const bool to_lock = (thread_index + *op.work_done) < workload.size() && (cpu ? !cpu->state.all_of(cpu_flag::exit) : !Emu.IsStopped());
 
 			if (!to_lock)
@@ -5399,10 +5404,10 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				return false;
 			}
 
-				// Allocate "core"
-				op.core_lock.lock();
+			// Allocate "core"
+			op.core_lock.lock();
 
-				// Second check before creating another thread
+			// Second check before creating another thread
 			const bool to_unlock = !((thread_index + *op.work_done) < workload.size() && (cpu ? !cpu->state.all_of(cpu_flag::exit) : !Emu.IsStopped()));
 
 			if (to_unlock)
@@ -5415,13 +5420,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		};
 
 		named_thread_group threads(worker_group_name, thread_count
-			, thread_op(&work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem)
+			, thread_op(memory_limit, &work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem)
 			, try_lock_thread);
 
 		const auto old_name = thread_ctrl::get_name();
 		thread_ctrl::set_name(worker_group_name + std::to_string(thread_count + 1));
 
-		thread_op cur_op(&work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem);
+		thread_op cur_op(memory_limit, &work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem);
 
 		if (try_lock_thread(thread_count, cur_op))
 		{
@@ -5551,16 +5556,16 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{
 				ppu_log.notice("Resolving %u symbol resolver functions", jit_mod.symbol_resolvers.size());
 
-		for (auto& sim : jit_mod.symbol_resolvers)
-		{
-			index++;
+				for (auto& sim : jit_mod.symbol_resolvers)
+				{
+					index++;
 
 					ensure(!sim);
-					sim = ensure(reinterpret_cast<void(*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
+					sim = ensure(reinterpret_cast<void (*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
 
 					ppu_log.notice("Resolved symbol resolver function #%u", index);
-		}
-	}
+				}
+			}
 
 			ppu_log.notice("Executing %u symbol resolvers", jit_mod.symbol_resolvers.size());
 
@@ -5645,7 +5650,16 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 	std::unique_ptr<Module> _module = std::make_unique<Module>(obj_name, jit.get_context());
 
 	// Initialize target
+	// Upstream dropped this guard once it required LLVM 21+. Keep it: the
+	// Android build compiles the 3rdparty/llvm submodule (now llvmorg-22.1.8,
+	// so the first branch is taken), but the desktop path can still download a
+	// prebuilt USE_LLVM_VERSION - 20.1.3 at the time of writing - where
+	// Module::setTargetTriple takes a StringRef.
+#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 	_module->setTargetTriple(Triple(jit_compiler::triple1()));
+#else
+	_module->setTargetTriple(jit_compiler::triple1());
+#endif
 	_module->setDataLayout(jit.get_engine().getTargetMachine()->createDataLayout());
 
 	// Initialize translator

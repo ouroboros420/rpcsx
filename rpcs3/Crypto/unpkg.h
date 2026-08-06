@@ -378,6 +378,10 @@ public:
 	{
 		return m_header;
 	}
+	const PKGMetaData& get_metadata() const
+	{
+		return m_metadata;
+	}
 	package_install_result check_target_app_version() const;
 	static package_install_result extract_data(std::deque<package_reader>& readers, std::deque<std::string>& bootable_paths);
 	const psf::registry& get_psf() const

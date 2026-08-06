@@ -442,7 +442,7 @@ namespace vk
 					.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 					.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
 					.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-			memory_barriers.push_back(signal_barrier);
+			memory_barriers.push_back(std::move(signal_barrier));
 		}
 		else
 		{

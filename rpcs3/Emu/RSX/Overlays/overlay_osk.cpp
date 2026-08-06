@@ -1384,23 +1384,23 @@ namespace rsx
 				m_title.back_color.a = 0.7f; // Uses the dimmed color of the frame background
 			}
 
-			const callback_t shift_cb = [this](const std::u32string& text)
+			const callback_t shift_cb = [this](std::u32string_view text)
 			{
 				on_shift(text);
 			};
-			const callback_t layer_cb = [this](const std::u32string& text)
+			const callback_t layer_cb = [this](std::u32string_view text)
 			{
 				on_layer(text);
 			};
-			const callback_t space_cb = [this](const std::u32string& text)
+			const callback_t space_cb = [this](std::u32string_view text)
 			{
 				on_space(text);
 			};
-			const callback_t delete_cb = [this](const std::u32string& text)
+			const callback_t delete_cb = [this](std::u32string_view text)
 			{
 				on_backspace(text);
 			};
-			const callback_t enter_cb = [this](const std::u32string& text)
+			const callback_t enter_cb = [this](std::u32string_view text)
 			{
 				on_enter(text);
 			};

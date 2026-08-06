@@ -684,7 +684,7 @@ bool jit_compiler::add_sub_disk_space(ssz space)
 	    .second;
 }
 
-jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, const std::string& _cpu, u32 flags, std::function<u64(const std::string&)> symbols_cement) noexcept
+jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, std::string_view _cpu, u32 flags, std::function<u64(const std::string&)> symbols_cement) noexcept
 	: m_context(new llvm::LLVMContext, [](llvm::LLVMContext* context)
 		  {
 			  delete context;
@@ -714,7 +714,16 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 	std::string result;
 
 	auto null_mod = std::make_unique<llvm::Module>("null_", *m_context);
+	// Upstream dropped this guard once it required LLVM 21+. Keep it: the
+	// Android build compiles the 3rdparty/llvm submodule (now llvmorg-22.1.8,
+	// so the first branch is taken), but the desktop path can still download a
+	// prebuilt USE_LLVM_VERSION - 20.1.3 at the time of writing - where
+	// Module::setTargetTriple takes a StringRef.
+#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 	null_mod->setTargetTriple(llvm::Triple(jit_compiler::triple1()));
+#else
+	null_mod->setTargetTriple(jit_compiler::triple1());
+#endif
 
 	std::unique_ptr<llvm::RTDyldMemoryManager> mem;
 
@@ -728,7 +737,11 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 		else
 		{
 			mem = std::make_unique<MemoryManager2>(std::move(symbols_cement));
+#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 			null_mod->setTargetTriple(llvm::Triple(jit_compiler::triple2()));
+#else
+			null_mod->setTargetTriple(jit_compiler::triple2());
+#endif
 		}
 	}
 	else

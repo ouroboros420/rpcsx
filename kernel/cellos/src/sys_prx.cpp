@@ -11,6 +11,7 @@
 
 #include "Crypto/unedat.h"
 #include "Emu/Cell/ErrorCodes.h"
+#include "Emu/Cell/PPUFunction.h"
 #include "Emu/Cell/PPUThread.h"
 #include "sys_fs.h"
 #include "sys_memory.h"
@@ -124,7 +125,7 @@ extern const std::map<std::string_view, int> g_prx_list{
     {"libssl.sprx", 0},
     {"libsvc1d.sprx", 0},
     {"libsync2.sprx", 0},
-    {"libsysmodule.sprx", 0},
+    {"libsysmodule.sprx", 1},
     {"libsysutil.sprx", 1},
     {"libsysutil_ap.sprx", 1},
     {"libsysutil_authdialog.sprx", 1},
@@ -186,6 +187,10 @@ extern const std::map<std::string_view, int> g_prx_list{
 
 bool ppu_register_library_lock(std::string_view libname, bool lock_lib);
 
+extern error_code sysmoduleModuleStart(ppu_thread &ppu, u32 args,
+                                       vm::ptr<void> argp);
+extern error_code sysmoduleModuleStop(ppu_thread &ppu);
+
 static error_code
 prx_load_module(const std::string &vpath, u64 flags,
                 vm::ptr<sys_prx_load_module_option_t> /*pOpt*/,
@@ -234,6 +239,13 @@ prx_load_module(const std::string &vpath, u64 flags,
 
   auto hle_load = [&]() {
     const auto prx = idm::make_ptr<lv2_obj, lv2_prx>();
+
+    if (name == "libsysmodule.sprx") {
+      prx->start = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(
+          FIND_FUNC(sysmoduleModuleStart)));
+      prx->stop = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(
+          FIND_FUNC(sysmoduleModuleStop)));
+    }
 
     prx->name = std::move(name);
     prx->path = std::move(path);

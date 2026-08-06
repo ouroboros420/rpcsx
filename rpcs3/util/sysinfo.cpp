@@ -3,6 +3,7 @@
 #include "util/File.h"
 #include "Emu/vfs_config.h"
 #include "util/Thread.h"
+#include "rpcs3_version.h"
 
 #if defined(ARCH_ARM64)
 #include "Emu/CPU/Backends/AArch64/AArch64Common.h"

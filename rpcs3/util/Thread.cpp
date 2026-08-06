@@ -1791,8 +1791,128 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			return true;
 		}
 	while (0);
-#else
-	static_cast<void>(context);
+#elif defined(ARCH_ARM64)
+	const u8* const code = reinterpret_cast<u8*>(RIP(context));
+
+	const u32 instruction = read_from_ptr_unsafe<u32>(code);
+
+	const auto [op, mem_size, reg_size, reg_index, reg_signed] = decode_a64_mem_inst(instruction);
+
+	auto report_opcode = [&]()
+	{
+		sig_log.error("decode_a64_mem_inst(%p): unsupported opcode: %s", code, +std::bit_cast<be_t<u32>>(instruction));
+	};
+
+	if (0x1'0000'0000ull - addr < mem_size)
+	{
+		sig_log.error("Invalid mem_size (0x%llx)", mem_size);
+		report_opcode();
+		return false;
+	}
+
+	// check if address is RawSPU MMIO register
+	do
+		if (addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
+		{
+			auto thread = idm::get_unlocked<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
+
+			if (!thread || is_exec)
+			{
+				break;
+			}
+
+			if (!mem_size)
+			{
+				sig_log.error("Invalid or unsupported instruction (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+
+			bool handled = true;
+
+			switch (op)
+			{
+			case A64_LOAD:
+			{
+				u32 value;
+				const u32 addr_aligned = addr & -4;
+
+				if (addr % 4 + mem_size > 4)
+				{
+					handled = false;
+					break;
+				}
+
+				if (is_writing || !thread->read_reg(addr_aligned, value))
+				{
+					return false;
+				}
+
+				// Adjust value for 8-bit and 16-bit reads
+				value >>= ((4 - mem_size) * 8) - ((addr % 4) * 8);
+				value &= mem_size == 4 ? u32{umax} : ((1u << (mem_size * 8)) - 1);
+
+				if (mem_size == 4)
+				{
+					value = std::bit_cast<be_t<u32>>(value);
+				}
+				else if (mem_size == 2)
+				{
+					value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
+				}
+				else
+				{
+					ensure(mem_size == 1);
+				}
+
+				// Update register value
+				put_a64_reg_value(context, reg_index, reg_size, reg_signed, mem_size, value);
+				break;
+			}
+			case A64_STORE:
+			{
+				if (mem_size != 4)
+				{
+					// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+					handled = false;
+					break;
+				}
+
+				if (!is_writing)
+				{
+					return false;
+				}
+
+				const u64 reg_value = get_a64_reg_value(context, reg_index, reg_size);
+				const u32 val32 = static_cast<u32>(reg_value);
+				if (!thread->write_reg(addr, std::bit_cast<be_t<u32>>(val32)))
+				{
+					return false;
+				}
+
+				break;
+			}
+			default:
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+			}
+
+			if (!handled)
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				break;
+			}
+
+			// skip processed instruction
+			RIP(context) = reinterpret_cast<std::remove_cvref_t<decltype(RIP(context))>>(reinterpret_cast<const char*>(RIP(context)) + 4);
+			g_tls_fault_spu++;
+			return true;
+		}
+	while (0);
 #endif /* ARCH_ */
 
 	const auto required_page_perms = (is_writing ? vm::page_writable : vm::page_readable) + (is_exec ? vm::page_executable : 0);
@@ -2572,10 +2692,11 @@ void thread_base::start()
 	ensure(m_thread);
 	ensure(::ResumeThread(reinterpret_cast<HANDLE>(+m_thread)) != static_cast<DWORD>(-1));
 #elif defined(__APPLE__) || defined(ANDROID)
+	pthread_t thread_id{};
 	pthread_attr_t stack_size_attr;
 	pthread_attr_init(&stack_size_attr);
 	pthread_attr_setstacksize(&stack_size_attr, 0x800000);
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), &stack_size_attr, entry_point, this) == 0);
+	ensure(pthread_create(&thread_id, &stack_size_attr, entry_point, this) == 0);
 #else
 	pthread_t thread_id{};
 	ensure(pthread_create(&thread_id, nullptr, entry_point, this) == 0);
@@ -2599,7 +2720,7 @@ void thread_base::initialize(void (*error_cb)())
 #ifdef __APPLE__
 	while (!m_thread)
 	{
-		busy_wait();
+		rx::busy_wait();
 	}
 	[[maybe_unused]] u64 new_tid = 0;
 #elif defined(ANDROID)
@@ -3302,7 +3423,9 @@ void thread_ctrl::set_name(std::string name)
 							})
 				.second)
 		{
+#ifndef __APPLE__
 			rx::breakpoint();
+#endif
 		}
 	}
 
@@ -3852,16 +3975,16 @@ u64 thread_ctrl::get_tid()
 	static thread_local u64 s_tls_tid = []() -> u64
 	{
 #ifdef _WIN32
-	return GetCurrentThreadId();
+		return GetCurrentThreadId();
 #elif defined(ANDROID)
 		return pthread_gettid_np(pthread_self());
 #elif defined(__linux__)
-	return syscall(SYS_gettid);
-	#elif defined(__APPLE__)
+		return syscall(SYS_gettid);
+#elif defined(__APPLE__)
 		u64 tid{};
 		pthread_threadid_np(nullptr, &tid);
 		return tid;
-	#elif defined(__FreeBSD__)
+#elif defined(__FreeBSD__)
 		return pthread_getthreadid_np();
 #else
 		return static_cast<u64>(pthread_self());

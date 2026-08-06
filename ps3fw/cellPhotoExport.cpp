@@ -73,7 +73,7 @@ struct photo_export
 	atomic_t<s32> progress = 0; // 0x0-0xFFFF for 0-100%
 };
 
-bool check_photo_path(const std::string& file_path)
+bool check_photo_path(std::string_view file_path)
 {
 	if (file_path.size() >= CELL_PHOTO_EXPORT_UTIL_HDD_PATH_MAX)
 	{

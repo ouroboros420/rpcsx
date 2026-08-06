@@ -254,7 +254,8 @@ namespace vk
 
 		void consumer_wait() const
 		{
-			utils::spin_wait(num_waiters, [](auto v)
+			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
+			while (num_waiters.load() != 0)
 			{
 				rx::pause();
 			}
@@ -262,10 +263,11 @@ namespace vk
 
 		void producer_wait() const
 		{
-			utils::spin_wait(pending_state, [](auto v)
+			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
+			while (pending_state.load())
 			{
-				return !v;
-			});
+				std::this_thread::yield();
+			}
 		}
 	};
 

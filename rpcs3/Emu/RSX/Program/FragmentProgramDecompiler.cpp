@@ -1027,8 +1027,7 @@ std::string FragmentProgramDecompiler::BuildCode()
 		OS << "#define clamp16(x) " << getHalfTypeName(4) << "(x)\n";
 	}
 
-	OS << "#define _builtin_lit lit_legacy\n"
-		  "#define _builtin_log2 log2\n"
+	OS << "#define _builtin_log2 log2\n"
 		  "#define _builtin_normalize(x) (length(x) > 0? normalize(x) : x)\n" // HACK!! Workaround for some games that generate NaNs unless texture filtering exactly matches PS3 (BFBC)
 		  "#define _builtin_sqrt(x) sqrt(abs(x))\n"
 		  "#define _builtin_rcp(x) (1. / x)\n"

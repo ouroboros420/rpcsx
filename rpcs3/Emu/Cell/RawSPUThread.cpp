@@ -3,6 +3,7 @@
 #include "Loader/ELF.h"
 #include "rx/asm.hpp"
 #include "rx/align.hpp"
+#include "timers.hpp"
 
 #include "SPUThread.h"
 

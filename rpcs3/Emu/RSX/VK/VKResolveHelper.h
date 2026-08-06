@@ -133,7 +133,9 @@ namespace vk
 
 		void update_uniforms(vk::command_buffer& cmd, vk::glsl::program* program) override
 		{
-			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, static_parameters_width * 4, static_parameters);
+			const u32 size_to_push = static_parameters_width * sizeof(decltype(static_parameters[0]));
+			ensure(size_to_push <= fragment_push_constants_size);
+			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, size_to_push, static_parameters);
 		}
 
 		void update_sample_configuration(vk::image* msaa_image)

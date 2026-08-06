@@ -55,13 +55,13 @@ namespace vk
 		}
 		FORCE_INLINE u32 max_sets() const
 		{
-			return m_create_info.maxSets;
+			return m_current_subpool_index >= m_device_subpools.size() ? 0u : m_device_subpools[m_current_subpool_index].size;
 		}
 
 	private:
 		FORCE_INLINE bool can_allocate(u32 required_count, u32 already_used_count = 0) const
 		{
-			return (required_count + already_used_count) <= m_create_info.maxSets;
+			return (required_count + already_used_count) <= max_sets();
 		};
 		void reset(u32 subpool_id, VkDescriptorPoolResetFlags flags);
 		void next_subpool();

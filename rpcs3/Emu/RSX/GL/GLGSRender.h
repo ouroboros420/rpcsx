@@ -52,10 +52,11 @@ namespace gl
 
 		void producer_wait()
 		{
-			utils::spin_wait(processed, [](auto v)
+			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
+			while (!processed.load())
 			{
-				return v;
-			});
+				std::this_thread::yield();
+			}
 
 			received = true;
 		}

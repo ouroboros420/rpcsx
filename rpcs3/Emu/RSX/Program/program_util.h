@@ -16,13 +16,13 @@ namespace rsx
 	{
 		struct TIU_slot
 		{
-			float scale[3];
-			float bias[3];
-			float clamp_min[2];
-			float clamp_max[2];
-			u32 remap;
-			u32 control;
-		} slots_[16]; // QT headers will collide with any variable named 'slots' because reasons
+			float scale[3]{};
+			float bias[3]{};
+			float clamp_min[2]{};
+			float clamp_max[2]{};
+			u32 remap{};
+			u32 control{};
+		} slots_[16]{}; // QT headers will collide with any variable named 'slots' because reasons
 
 		TIU_slot& operator[](u32 index)
 		{
