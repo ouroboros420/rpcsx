@@ -5,6 +5,7 @@
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/SPUThread.h"
+#include "Emu/Cell/PPUThread.h"
 #include "Emu/IdManager.h"
 #include "Emu/Memory/vm_locking.h"
 
@@ -196,6 +197,10 @@ error_code sys_memory_allocate_from_container(cpu_thread &cpu, u64 size,
           ct.ptr.get()));
 
       if (alloc_addr) {
+        sys_memory.notice("sys_memory_allocate_from_container(): Allocated "
+                          "0x%x address (size=0x%x)",
+                          addr, size);
+
         vm::lock_sudo(addr, static_cast<u32>(size));
         cpu.check_state();
         *alloc_addr = addr;
@@ -232,34 +237,52 @@ error_code sys_memory_free(cpu_thread &cpu, u32 addr) {
   return CELL_OK;
 }
 
-error_code sys_memory_get_page_attribute(cpu_thread &cpu, u32 addr,
+error_code sys_memory_get_page_attribute(ppu_thread &ppu, u32 addr,
                                          vm::ptr<sys_page_attr_t> attr) {
-  cpu.state += cpu_flag::wait;
+  ppu.state += cpu_flag::wait;
 
   sys_memory.trace("sys_memory_get_page_attribute(addr=0x%x, attr=*0x%x)", addr,
                    attr);
 
-  vm::writer_lock rlock;
+  if ((addr >> 28) == (ppu.stack_addr >> 28)) {
+    // Stack address: fast path
+    if (!(addr >= ppu.stack_addr && addr < ppu.stack_addr + ppu.stack_size) &&
+        !vm::check_addr(addr)) {
+      return {CELL_EINVAL, addr};
+    }
 
-  if (!vm::check_addr(addr) || addr >= SPU_FAKE_BASE_ADDR) {
-    return CELL_EINVAL;
+    if (!vm::check_addr(attr.addr(), vm::page_readable, attr.size())) {
+      return CELL_EFAULT;
+    }
+
+    attr->attribute = 0x40000ull; // SYS_MEMORY_PROT_READ_WRITE
+    attr->access_right = SYS_MEMORY_ACCESS_RIGHT_PPU_THR;
+    attr->page_size = 4096;
+    attr->pad = 0; // Always write 0
+    return CELL_OK;
+  }
+
+  const auto [ok, vm_flags] = vm::get_addr_flags(addr);
+
+  if (!ok || addr >= SPU_FAKE_BASE_ADDR) {
+    return {CELL_EINVAL, addr};
   }
 
   if (!vm::check_addr(attr.addr(), vm::page_readable, attr.size())) {
     return CELL_EFAULT;
   }
 
-  attr->attribute = 0x40000ull; // SYS_MEMORY_PROT_READ_WRITE (TODO)
-  attr->access_right = addr >> 28 == 0xdu
-                           ? SYS_MEMORY_ACCESS_RIGHT_PPU_THR
-                           : SYS_MEMORY_ACCESS_RIGHT_ANY; // (TODO)
+  // SYS_MEMORY_PROT_READ_WRITE (TODO)
+  attr->attribute = 0x40000ull;
+  attr->access_right = SYS_MEMORY_ACCESS_RIGHT_ANY; // TODO: Report accurately
 
-  if (vm::check_addr(addr, vm::page_1m_size)) {
+  if (vm_flags & vm::page_1m_size) {
     attr->page_size = 0x100000;
-  } else if (vm::check_addr(addr, vm::page_64k_size)) {
+  } else if (vm_flags & vm::page_64k_size) {
     attr->page_size = 0x10000;
   } else {
-    attr->page_size = 4096;
+    // attr->page_size = 4096;
+    fmt::throw_exception("Unreachable");
   }
 
   attr->pad = 0; // Always write 0

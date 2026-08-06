@@ -59,6 +59,7 @@ namespace vk
 		table.add(0x20B0, 0x20BE, chip_class::NV_ampere);   // GA100
 		table.add(0x2204, 0x25AF, chip_class::NV_ampere);   // GA10x (RTX 30 series)
 		table.add(0x2684, 0x27FF, chip_class::NV_lovelace); // AD102, AD103 (RTX40 series)
+		table.add(0x2B85, 0x2F58, chip_class::NV_blackwell); // RTX50, RTX PRO Blackwell series
 
 		return table;
 	}();

@@ -49,6 +49,8 @@ public:
 	{
 		return inputs;
 	}
+
+	void insertFSExport(std::stringstream& OS);
 };
 
 class VKVertexProgram : public rsx::VertexProgramBase

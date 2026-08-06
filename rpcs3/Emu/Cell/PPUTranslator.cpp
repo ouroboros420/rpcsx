@@ -414,7 +414,6 @@ Function* PPUTranslator::GetSymbolResolver(const ppu_module<lv2_obj>& info)
 	assert(ptr_inst->getResultElementType() == m_ir->getPtrTy());
 
 	const auto faddr = m_ir->CreateLoad(ptr_inst->getResultElementType(), ptr_inst);
-	const auto faddr_int = m_ir->CreatePtrToInt(faddr, get_type<uptr>());
 	const auto pos_32 = m_reloc ? m_ir->CreateAdd(func_pc, m_seg0) : func_pc;
 	const auto pos = m_ir->CreateShl(pos_32, 1);
 	const auto ptr = m_ir->CreatePtrAdd(m_exec, pos);
@@ -425,7 +424,7 @@ Function* PPUTranslator::GetSymbolResolver(const ppu_module<lv2_obj>& info)
 	const auto seg_val = m_ir->CreateTrunc(m_ir->CreateLShr(m_seg0, 13), get_type<u16>());
 
 	// Store to jumptable
-	m_ir->CreateStore(faddr_int, ptr);
+	m_ir->CreateStore(faddr, ptr);
 	m_ir->CreateStore(seg_val, seg_ptr);
 
 	// Increment index and branch back to loop
@@ -591,6 +590,11 @@ void PPUTranslator::CallFunction(u64 target, Value* indirect)
 			{
 				callee = m_module->getOrInsertFunction(fmt::format("__0x%x", target_last - base), type);
 				cast<Function>(callee.getCallee())->setCallingConv(CallingConv::GHC);
+
+				if (g_cfg.core.ppu_prof)
+				{
+					m_ir->CreateStore(GetAddr(target_last - m_addr), m_ir->CreateStructGEP(m_thread_type, m_thread, static_cast<uint>(&m_cia - m_locals)));
+				}
 			}
 		}
 		else
@@ -1113,7 +1117,24 @@ void PPUTranslator::VCFSX(ppu_opcode_t op)
 void PPUTranslator::VCFUX(ppu_opcode_t op)
 {
 	const auto b = get_vr<u32[4]>(op.vb);
-	set_vr(op.vd, fpcast<f32[4]>(b) * fsplat<f32[4]>(std::pow(2, -static_cast<int>(op.vuimm))));
+
+#ifdef ARCH_ARM64
+	return set_vr(op.vd, fpcast<f32[4]>(b) * fsplat<f32[4]>(std::pow(2, -static_cast<int>(op.vuimm))));
+#else
+	if (m_use_avx512)
+	{
+		return set_vr(op.vd, fpcast<f32[4]>(b) * fsplat<f32[4]>(std::pow(2, -static_cast<int>(op.vuimm))));
+	}
+
+	constexpr int bit_shift = 9;
+	const auto shifted = (b >> bit_shift);
+	const auto cleared = shifted << bit_shift;
+	const auto low_bits = b - cleared;
+	const auto high_part = fpcast<f32[4]>(noncast<s32[4]>(shifted)) * fsplat<f32[4]>(static_cast<f32>(1u << bit_shift));
+	const auto low_part = fpcast<f32[4]>(noncast<s32[4]>(low_bits));
+	const auto temp = high_part + low_part;
+	set_vr(op.vd, temp * fsplat<f32[4]>(std::pow(2, -static_cast<int>(op.vuimm))));
+#endif
 }
 
 void PPUTranslator::VCMPBFP(ppu_opcode_t op)

@@ -1150,7 +1150,11 @@ struct llvm_fshl
 	static llvm::Function* get_fshl(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+#if LLVM_VERSION_MAJOR >= 21 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR >= 1)
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
+#else
 		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
+#endif
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -1222,7 +1226,11 @@ struct llvm_fshr
 	static llvm::Function* get_fshr(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+#if LLVM_VERSION_MAJOR >= 21 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR >= 1)
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
+#else
 		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
+#endif
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -2226,7 +2234,11 @@ struct llvm_add_sat
 	static llvm::Function* get_add_sat(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+#if LLVM_VERSION_MAJOR >= 21 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR >= 1)
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+#else
 		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+#endif
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -2309,7 +2321,11 @@ struct llvm_sub_sat
 	static llvm::Function* get_sub_sat(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+#if LLVM_VERSION_MAJOR >= 21 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR >= 1)
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+#else
 		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+#endif
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -3600,7 +3616,11 @@ public:
 	llvm::Function* get_intrinsic(llvm::Intrinsic::ID id)
 	{
 		const auto _module = m_ir->GetInsertBlock()->getParent()->getParent();
+#if LLVM_VERSION_MAJOR >= 21 || (LLVM_VERSION_MAJOR == 20 && LLVM_VERSION_MINOR >= 1)
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, id, {get_type<Types>()...});
+#else
 		return llvm::Intrinsic::getDeclaration(_module, id, {get_type<Types>()...});
+#endif
 	}
 
 	template <typename T1, typename T2>
@@ -4013,7 +4033,7 @@ static inline llvm::CallInst* llvm_asm(
 	const std::string& constraints,
 	llvm::LLVMContext& context)
 {
-	llvm::ArrayRef<llvm::Type*> types_ref = std::nullopt;
+	llvm::ArrayRef<llvm::Type*> types_ref {};
 	std::vector<llvm::Type*> types;
 	types.reserve(args.size());
 

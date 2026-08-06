@@ -74,8 +74,14 @@ enum spu_stop_syscall : u32 {
   SYS_SPU_THREAD_STOP_SWITCH_SYSTEM_MODULE = 0x0120,
 };
 
-struct sys_spu_thread_group_attribute {
+struct reduced_sys_spu_thread_group_attribute {
   be_t<u32> nsize; // name length including NULL terminator
+  vm::bcptr<char> name;
+  be_t<s32> type;
+};
+
+struct sys_spu_thread_group_attribute {
+  be_t<u32> nsize;
   vm::bcptr<char> name;
   be_t<s32> type;
   be_t<u32> ct; // memory container id
@@ -337,9 +343,9 @@ error_code sys_spu_thread_initialize(ppu_thread &, vm::ptr<u32> thread,
                                      vm::ptr<sys_spu_thread_argument>);
 error_code sys_spu_thread_set_argument(ppu_thread &, u32 id,
                                        vm::ptr<sys_spu_thread_argument> arg);
-error_code
-sys_spu_thread_group_create(ppu_thread &, vm::ptr<u32> id, u32 num, s32 prio,
-                            vm::ptr<sys_spu_thread_group_attribute> attr);
+error_code sys_spu_thread_group_create(
+    ppu_thread &, vm::ptr<u32> id, u32 num, s32 prio,
+    vm::ptr<reduced_sys_spu_thread_group_attribute> attr);
 error_code sys_spu_thread_group_destroy(ppu_thread &, u32 id);
 error_code sys_spu_thread_group_start(ppu_thread &, u32 id);
 error_code sys_spu_thread_group_suspend(ppu_thread &, u32 id);

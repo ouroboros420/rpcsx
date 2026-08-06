@@ -121,8 +121,6 @@ void evdev_joystick_handler::init_config(cfg_pad* cfg)
 	cfg->rstickdeadzone.def = 30;                                       // between 0 and 255
 	cfg->ltriggerthreshold.def = 0;                                     // between 0 and 255
 	cfg->rtriggerthreshold.def = 0;                                     // between 0 and 255
-	cfg->lpadsquircling.def = 8000;
-	cfg->rpadsquircling.def = 8000;
 
 	// apply defaults
 	cfg->from_default();
@@ -422,7 +420,7 @@ PadHandlerBase::connection evdev_joystick_handler::get_next_button_press(const s
 	if (call_type != gui_call_type::blacklist && call_type != gui_call_type::reset_input && !has_new_event)
 	{
 		if (callback)
-			callback(0, "", padId, 0, preview_values);
+			callback(0, "", padId, 0, preview_values, get_capabilities(padId));
 		return connection::no_data;
 	}
 
@@ -544,10 +542,12 @@ PadHandlerBase::connection evdev_joystick_handler::get_next_button_press(const s
 
 	if (callback)
 	{
+		pad_capabilities capabilities = get_capabilities(padId);
+
 		if (pressed_button.value > 0)
-			callback(pressed_button.value, pressed_button.name, padId, 0, std::move(preview_values));
+			callback(pressed_button.value, pressed_button.name, padId, 0, std::move(preview_values), std::move(capabilities));
 		else
-			callback(0, "", padId, 0, std::move(preview_values));
+			callback(0, "", padId, 0, std::move(preview_values), std::move(capabilities));
 	}
 
 	return connection::connected;
@@ -1348,7 +1348,7 @@ bool evdev_joystick_handler::bindPadToDevice(std::shared_ptr<Pad> pad)
 
 	const auto find_buttons = [&](const cfg::string& name) -> std::set<u32>
 	{
-		const std::vector<std::string> names = cfg_pad::get_buttons(name);
+		const std::vector<std::string> names = cfg_pad::get_buttons(name.to_string());
 
 		// In evdev we store indices to an EvdevButton vector in our pad objects instead of the usual key codes.
 		std::set<u32> indices;

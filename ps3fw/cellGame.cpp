@@ -484,6 +484,8 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 	{
 		get->isNewData = CELL_HDDGAME_ISNEWDATA_NODIR;
 		get->getParam = {};
+
+		cellGame.warning("cellHddGameCheck(): New data.");
 	}
 	else
 	{
@@ -492,27 +494,28 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 		const psf::registry psf = psf::load_object(local_dir + "/PARAM.SFO");
 
 		// Some following fields may be zero in old FW 1.00 version PARAM.SFO
-		if (psf.contains("PARENTAL_LEVEL"))
-			get->getParam.parentalLevel = ::at32(psf, "PARENTAL_LEVEL").as_integer();
-		if (psf.contains("ATTRIBUTE"))
-			get->getParam.attribute = ::at32(psf, "ATTRIBUTE").as_integer();
-		if (psf.contains("RESOLUTION"))
-			get->getParam.resolution = ::at32(psf, "RESOLUTION").as_integer();
-		if (psf.contains("SOUND_FORMAT"))
-			get->getParam.soundFormat = ::at32(psf, "SOUND_FORMAT").as_integer();
-		if (psf.contains("TITLE"))
-			strcpy_trunc(get->getParam.title, ::at32(psf, "TITLE").as_string());
-		if (psf.contains("APP_VER"))
-			strcpy_trunc(get->getParam.dataVersion,
-				::at32(psf, "APP_VER").as_string());
+		if (psf.contains("PARENTAL_LEVEL")) get->getParam.parentalLevel = ::at32(psf, "PARENTAL_LEVEL").as_integer();
+		if (psf.contains("ATTRIBUTE")) get->getParam.attribute = ::at32(psf, "ATTRIBUTE").as_integer();
+		if (psf.contains("RESOLUTION")) get->getParam.resolution = ::at32(psf, "RESOLUTION").as_integer();
+		if (psf.contains("SOUND_FORMAT")) get->getParam.soundFormat = ::at32(psf, "SOUND_FORMAT").as_integer();
+		if (psf.contains("TITLE")) strcpy_trunc(get->getParam.title, ::at32(psf, "TITLE").as_string());
+
+		// Old games do not have APP_VER key
+		strcpy_trunc(get->getParam.dataVersion, psf::get_string(psf, "APP_VER", psf::get_string(sfo, "VERSION", "")));
+
 		if (psf.contains("TITLE_ID"))
+		{
 			strcpy_trunc(get->getParam.titleId, ::at32(psf, "TITLE_ID").as_string());
+		}
 
 		for (u32 i = 0; i < CELL_HDDGAME_SYSP_LANGUAGE_NUM; i++)
 		{
 			strcpy_trunc(get->getParam.titleLang[i],
 				psf::get_string(psf, fmt::format("TITLE_%02d", i)));
 		}
+
+		cellGame.warning("cellHddGameCheck(): Data exists:\nATTRIBUTE: 0x%x, RESOLUTION: 0x%x, RESOLUTION: 0x%x, SOUND_FORMAT: 0x%x, dataVersion: %s"
+			, get->getParam.attribute, get->getParam.resolution, get->getParam.soundFormat, get->getParam.soundFormat, std::span<const u8>(reinterpret_cast<const u8*>(get->getParam.dataVersion), 6));
 	}
 
 	// TODO ?
@@ -584,12 +587,8 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 		return CELL_OK;
 
 	case CELL_HDDGAME_CBRESULT_ERR_NOSPACE:
-		cellGame.error("cellHddGameCheck(): callback returned "
-					   "CELL_HDDGAME_CBRESULT_ERR_NOSPACE. Space Needed: %d KB",
-			result->errNeedSizeKB);
-		error_msg =
-			get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_NOSPACE,
-				fmt::format("%d", result->errNeedSizeKB).c_str());
+		cellGame.error("cellHddGameCheck(): callback returned CELL_HDDGAME_CBRESULT_ERR_NOSPACE. Space Needed: %d KB", result->errNeedSizeKB);
+		error_msg = get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_NOSPACE, "%d", result->errNeedSizeKB);
 		break;
 
 	case CELL_HDDGAME_CBRESULT_ERR_BROKEN:
@@ -607,21 +606,13 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 		break;
 
 	case CELL_HDDGAME_CBRESULT_ERR_INVALID:
-		cellGame.error("cellHddGameCheck(): callback returned "
-					   "CELL_HDDGAME_CBRESULT_ERR_INVALID. Error message: %s",
-			result->invalidMsg);
-		error_msg =
-			get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_INVALID,
-				fmt::format("%s", result->invalidMsg).c_str());
+		cellGame.error("cellHddGameCheck(): callback returned CELL_HDDGAME_CBRESULT_ERR_INVALID. Error message: %s", result->invalidMsg);
+		error_msg = get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_INVALID, "%s", result->invalidMsg);
 		break;
 
 	default:
-		cellGame.error("cellHddGameCheck(): callback returned unknown error "
-					   "(code=0x%x). Error message: %s",
-			result->invalidMsg);
-		error_msg =
-			get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_INVALID,
-				fmt::format("%s", result->invalidMsg).c_str());
+		cellGame.error("cellHddGameCheck(): callback returned unknown error (code=0x%x). Error message: %s", result->invalidMsg);
+		error_msg = get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_INVALID, "%s", result->invalidMsg);
 		break;
 	}
 
@@ -1295,12 +1286,8 @@ error_code cellGameDataCheckCreate2(ppu_thread& ppu, u32 version,
 		return CELL_OK;
 	}
 	case CELL_GAMEDATA_CBRESULT_ERR_NOSPACE:
-		cellGame.error("cellGameDataCheckCreate2(): callback returned "
-					   "CELL_GAMEDATA_CBRESULT_ERR_NOSPACE. Space Needed: %d KB",
-			cbResult->errNeedSizeKB);
-		error_msg = get_localized_string(
-			localized_string_id::CELL_GAMEDATA_CHECK_NOSPACE,
-			fmt::format("%d", cbResult->errNeedSizeKB).c_str());
+		cellGame.error("cellGameDataCheckCreate2(): callback returned CELL_GAMEDATA_CBRESULT_ERR_NOSPACE. Space Needed: %d KB", cbResult->errNeedSizeKB);
+		error_msg = get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_NOSPACE, "%d", cbResult->errNeedSizeKB);
 		break;
 
 	case CELL_GAMEDATA_CBRESULT_ERR_BROKEN:
@@ -1318,21 +1305,13 @@ error_code cellGameDataCheckCreate2(ppu_thread& ppu, u32 version,
 		break;
 
 	case CELL_GAMEDATA_CBRESULT_ERR_INVALID:
-		cellGame.error("cellGameDataCheckCreate2(): callback returned "
-					   "CELL_GAMEDATA_CBRESULT_ERR_INVALID. Error message: %s",
-			cbResult->invalidMsg);
-		error_msg =
-			get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_INVALID,
-				fmt::format("%s", cbResult->invalidMsg).c_str());
+		cellGame.error("cellGameDataCheckCreate2(): callback returned CELL_GAMEDATA_CBRESULT_ERR_INVALID. Error message: %s", cbResult->invalidMsg);
+		error_msg = get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_INVALID, "%s", cbResult->invalidMsg);
 		break;
 
 	default:
-		cellGame.error("cellGameDataCheckCreate2(): callback returned unknown "
-					   "error (code=0x%x). Error message: %s",
-			cbResult->invalidMsg);
-		error_msg =
-			get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_INVALID,
-				fmt::format("%s", cbResult->invalidMsg).c_str());
+		cellGame.error("cellGameDataCheckCreate2(): callback returned unknown error (code=0x%x). Error message: %s", cbResult->invalidMsg);
+		error_msg = get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_INVALID, "%s", cbResult->invalidMsg);
 		break;
 	}
 
@@ -1962,9 +1941,7 @@ error_code cellGameContentErrorDialog(s32 type, s32 errNeedSizeKB,
 		break;
 	case CELL_GAME_ERRDIALOG_NOSPACE:
 		// Not enough available space. The application will continue.
-		error_msg =
-			get_localized_string(localized_string_id::CELL_GAME_ERROR_NOSPACE,
-				fmt::format("%d", errNeedSizeKB).c_str());
+		error_msg = get_localized_string(localized_string_id::CELL_GAME_ERROR_NOSPACE, "%d", errNeedSizeKB);
 		break;
 	case CELL_GAME_ERRDIALOG_BROKEN_EXIT_GAMEDATA:
 		// Game data is corrupted. The application will be terminated.
@@ -1978,9 +1955,7 @@ error_code cellGameContentErrorDialog(s32 type, s32 errNeedSizeKB,
 		break;
 	case CELL_GAME_ERRDIALOG_NOSPACE_EXIT:
 		// Not enough available space. The application will be terminated.
-		error_msg =
-			get_localized_string(localized_string_id::CELL_GAME_ERROR_NOSPACE_EXIT,
-				fmt::format("%d", errNeedSizeKB).c_str());
+		error_msg = get_localized_string(localized_string_id::CELL_GAME_ERROR_NOSPACE_EXIT, "%d", errNeedSizeKB);
 		break;
 	default:
 		return CELL_GAME_ERROR_PARAM;
@@ -1994,9 +1969,7 @@ error_code cellGameContentErrorDialog(s32 type, s32 errNeedSizeKB,
 		}
 
 		error_msg += '\n';
-		error_msg +=
-			get_localized_string(localized_string_id::CELL_GAME_ERROR_DIR_NAME,
-				fmt::format("%s", dirName).c_str());
+		error_msg += get_localized_string(localized_string_id::CELL_GAME_ERROR_DIR_NAME, "%s", dirName);
 	}
 
 	return open_exit_dialog(error_msg, type > CELL_GAME_ERRDIALOG_NOSPACE,

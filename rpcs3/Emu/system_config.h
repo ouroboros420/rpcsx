@@ -14,11 +14,6 @@ struct cfg_root : cfg::node
 {
 	struct node_core : cfg::node
 	{
-	private:
-		/** We don't wanna include the sysinfo header here */
-		static bool enable_tsx_by_default();
-
-	public:
 		node_core(cfg::node* _this) : cfg::node(_this, "Core") {}
 
 		cfg::_enum<ppu_decoder_type> ppu_decoder{this, "PPU Decoder", ppu_decoder_type::llvm_legacy};
@@ -79,14 +74,14 @@ struct cfg_root : cfg::node
 			}
 		};
 
-		fifo_setting rsx_fifo_accuracy{this, "RSX FIFO Accuracy", rsx_fifo_mode::fast};
+		fifo_setting rsx_fifo_accuracy{this, "RSX FIFO Fetch Accuracy", rsx_fifo_mode::atomic };
 		cfg::_bool spu_verification{this, "SPU Verification", true}; // Should be enabled
 		cfg::_bool spu_cache{this, "SPU Cache", true};
 		cfg::_bool spu_prof{this, "SPU Profiler", false};
+		cfg::_bool ppu_prof{ this, "PPU Profiler", false };
 		cfg::uint<0, 16> mfc_transfers_shuffling{this, "MFC Commands Shuffling Limit", 0};
 		cfg::uint<0, 10000> mfc_transfers_timeout{this, "MFC Commands Timeout", 0, true};
 		cfg::_bool mfc_shuffling_in_steps{this, "MFC Commands Shuffling In Steps", false, true};
-		cfg::_enum<tsx_usage> enable_TSX{this, "Enable TSX", enable_tsx_by_default() ? tsx_usage::enabled : tsx_usage::disabled}; // Enable TSX. Forcing this on Haswell/Broadwell CPUs should be used carefully
 		cfg::_enum<xfloat_accuracy> spu_xfloat_accuracy{this, "XFloat Accuracy", xfloat_accuracy::approximate, false};
 		cfg::_int<-1, 14> ppu_128_reservations_loop_max_length{this, "Accurate PPU 128-byte Reservation Op Max Length", 0, true}; // -1: Always accurate, 0: Never accurate, 1-14: max accurate loop length
 		cfg::_int<-64, 64> stub_ppu_traps{this, "Stub PPU Traps", 0, true};                                                       // Hack, skip PPU traps for rare cases where the trap is continueable (specify relative instructions to skip)
@@ -105,8 +100,6 @@ struct cfg_root : cfg::node
 		cfg::_bool hle_lwmutex{this, "HLE lwmutex"};                 // Force alternative lwmutex/lwcond implementation
 		cfg::uint64 spu_llvm_lower_bound{this, "SPU LLVM Lower Bound"};
 		cfg::uint64 spu_llvm_upper_bound{this, "SPU LLVM Upper Bound", 0xffffffffffffffff};
-		cfg::uint64 tx_limit1_ns{this, "TSX Transaction First Limit", 800};   // In nanoseconds
-		cfg::uint64 tx_limit2_ns{this, "TSX Transaction Second Limit", 2000}; // In nanoseconds
 
 		cfg::_int<10, 3000> clocks_scale{this, "Clocks scale", 100}; // Changing this from 100 (percentage) may affect game speed in unexpected ways
 		cfg::uint<0, 3000> spu_wakeup_delay{this, "SPU Wake-Up Delay", 0, true};
@@ -203,6 +196,7 @@ struct cfg_root : cfg::node
 		cfg::_bool disable_msl_fast_math{this, "Disable MSL Fast Math", false};
 		cfg::_bool disable_async_host_memory_manager{this, "Disable Asynchronous Memory Manager", false, true};
 		cfg::_enum<output_scaling_mode> output_scaling{this, "Output Scaling Mode", output_scaling_mode::bilinear, true};
+		cfg::_bool record_with_overlays{ this, "Record With Overlays", true, true };
 
 		struct node_vk : cfg::node
 		{
@@ -216,6 +210,7 @@ struct cfg_root : cfg::node
 			cfg::uint<0, 100> rcas_sharpening_intensity{this, "FidelityFX CAS Sharpening Intensity", 50, true};
 			cfg::_enum<vk_gpu_scheduler_mode> asynchronous_scheduler{this, "Asynchronous Queue Scheduler", vk_gpu_scheduler_mode::safe};
 			cfg::uint<256, 65536> vram_allocation_limit{this, "VRAM allocation limit (MB)", 65536, false};
+			cfg::_bool use_rebar_upload_heap{this, "Use Re-BAR for GPU uploads", true, false};
 #ifdef ANDROID
 			struct driver : cfg::node
 			{
@@ -337,6 +332,7 @@ struct cfg_root : cfg::node
 	struct node_sys : cfg::node
 	{
 		static std::string get_random_system_name();
+		static u128 get_random_psid();
 
 		node_sys(cfg::node* _this) : cfg::node(_this, "System") {}
 
@@ -348,8 +344,7 @@ struct cfg_root : cfg::node
 		cfg::_enum<time_format> time_fmt{ this, "Time Format", time_format::clock24 };
 		cfg::_int<-60 * 60 * 24 * 365 * 100LL, 60 * 60 * 24 * 365 * 100LL> console_time_offset{this, "Console time offset (s)", 0}; // console time offset, limited to +/-100years
 		cfg::string system_name{this, "System Name", get_random_system_name()};
-		cfg::uint<0, umax> console_psid_high{this, "PSID high"};
-		cfg::uint<0, umax> console_psid_low{this, "PSID low"};
+		cfg::uint128 console_psid{this, "Console PSID", get_random_psid()};
 		cfg::string hdd_model{this, "HDD Model Name", ""};
 		cfg::string hdd_serial{this, "HDD Serial Number", ""};
 		cfg::node_map_entry sup_argv{this, "Process ARGV"};
@@ -368,6 +363,7 @@ struct cfg_root : cfg::node
 
 		cfg::_enum<np_psn_status> psn_status{this, "PSN status", np_psn_status::disabled};
 		cfg::string country{this, "PSN Country", "us"};
+		cfg::_bool clans_enabled{this, "Clans Enabled", false};
 	} net{this};
 
 	struct node_savestate : cfg::node
@@ -379,6 +375,8 @@ struct cfg_root : cfg::node
 		cfg::_bool compatible_mode{this, "Compatible Savestate Mode", false};    // SPU emulation optimized for savestate compatibility (off by default for performance reasons)
 		cfg::_bool state_inspection_mode{this, "Inspection Mode Savestates"};    // Save memory stored in executable files, thus allowing to view state without any files (for debugging)
 		cfg::_bool save_disc_game_data{this, "Save Disc Game Data", false};
+		cfg::uint<0, 64> max_files{ this, "Maximum SaveState Files", 4 };
+		cfg::uint<0, 1024 * 512> max_files_size{ this, "Maximum SaveState Files Space (MiB)", 4096 };
 	} savestate{this};
 
 	struct node_misc : cfg::node

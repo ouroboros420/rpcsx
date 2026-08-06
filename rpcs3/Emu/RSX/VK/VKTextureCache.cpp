@@ -301,7 +301,7 @@ namespace vk
 			{
 				dma_sync(true);
 
-				std::vector<VkBufferCopy> copy;
+				rsx::simple_array<VkBufferCopy> copy;
 				copy.reserve(transfer_height);
 
 				u32 dst_offset = dma_mapping.first;
@@ -394,10 +394,12 @@ namespace vk
 		m_cached_memory_size = 0;
 	}
 
-	void texture_cache::copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst, const std::vector<copy_region_descriptor>& sections_to_transfer) const
+	void texture_cache::copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst, const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const
 	{
 		const auto dst_aspect = dst->aspect();
 		const auto dst_bpp = vk::get_format_texel_width(dst->format());
+
+		std::unordered_set<decltype(sections_to_transfer.front().src)> processed_input_images;
 
 		for (const auto& section : sections_to_transfer)
 		{
@@ -431,12 +433,16 @@ namespace vk
 			const bool typeless = section.src->aspect() != dst_aspect ||
 			                      !formats_are_bitcast_compatible(dst, section.src);
 
+			if (!processed_input_images.contains(section.src))
+			{
 			// Avoid inserting unnecessary barrier GENERAL->TRANSFER_SRC->GENERAL in active render targets
 			const auto preferred_layout = (section.src->current_layout != VK_IMAGE_LAYOUT_GENERAL) ?
 			                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL :
 			                                  VK_IMAGE_LAYOUT_GENERAL;
 
 			section.src->push_layout(cmd, preferred_layout);
+				processed_input_images.insert(section.src);
+			}
 
 			auto src_image = section.src;
 			auto src_x = section.src_x;
@@ -475,8 +481,6 @@ namespace vk
 					const areai src_rect = coordi{{src_x, src_y}, {src_w, src_h}};
 					const areai dst_rect = coordi{{section.dst_x, section.dst_y}, {section.dst_w, section.dst_h}};
 					vk::copy_image_typeless(cmd, section.src, dst, src_rect, dst_rect, 1);
-
-					section.src->pop_layout(cmd);
 					continue;
 				}
 
@@ -537,8 +541,12 @@ namespace vk
 					VK_GET_SYMBOL(vkCmdCopyImage)(cmd, _dst->value, _dst->current_layout, dst->value, dst->current_layout, 1, &copy_rgn);
 				}
 			}
+		}
 
-			section.src->pop_layout(cmd);
+		// Pop unique image layouts here
+		for (auto& image : processed_input_images)
+		{
+			image->pop_layout(cmd);
 		}
 	}
 
@@ -581,7 +589,7 @@ namespace vk
 		return mapping;
 	}
 
-	vk::image* texture_cache::get_template_from_collection_impl(const std::vector<copy_region_descriptor>& sections_to_transfer) const
+	vk::image* texture_cache::get_template_from_collection_impl(const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const
 	{
 		if (sections_to_transfer.size() == 1) [[likely]]
 		{
@@ -710,7 +718,7 @@ namespace vk
 
 		if (copy)
 		{
-			std::vector<copy_region_descriptor> region =
+			rsx::simple_array<copy_region_descriptor> region =
 				{{.src = source,
 					.xform = rsx::surface_transform::coordinate_transform,
 					.src_x = x,
@@ -744,7 +752,7 @@ namespace vk
 	}
 
 	vk::image_view* texture_cache::generate_cubemap_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 size,
-		const std::vector<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
+		const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
 	{
 		auto _template = get_template_from_collection_impl(sections_to_copy);
 		auto result = create_temporary_subresource_view_impl(cmd, _template, VK_IMAGE_TYPE_2D,
@@ -779,7 +787,7 @@ namespace vk
 	}
 
 	vk::image_view* texture_cache::generate_3d_from_2d_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height, u16 depth,
-		const std::vector<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
+		const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
 	{
 		auto _template = get_template_from_collection_impl(sections_to_copy);
 		auto result = create_temporary_subresource_view_impl(cmd, _template, VK_IMAGE_TYPE_3D,
@@ -814,7 +822,7 @@ namespace vk
 	}
 
 	vk::image_view* texture_cache::generate_atlas_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height,
-		const std::vector<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
+		const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
 	{
 		auto _template = get_template_from_collection_impl(sections_to_copy);
 		auto result = create_temporary_subresource_view_impl(cmd, _template, VK_IMAGE_TYPE_2D,
@@ -852,7 +860,7 @@ namespace vk
 	}
 
 	vk::image_view* texture_cache::generate_2d_mipmaps_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height,
-		const std::vector<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
+		const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector)
 	{
 		const auto mipmaps = ::narrow<u8>(sections_to_copy.size());
 		auto _template = get_template_from_collection_impl(sections_to_copy);
@@ -899,7 +907,7 @@ namespace vk
 
 	void texture_cache::update_image_contents(vk::command_buffer& cmd, vk::image_view* dst_view, vk::image* src, u16 width, u16 height)
 	{
-		std::vector<copy_region_descriptor> region =
+		rsx::simple_array<copy_region_descriptor> region =
 			{{.src = src,
 				.xform = rsx::surface_transform::identity,
 				.src_w = width,
@@ -1107,7 +1115,7 @@ namespace vk
 		const bool upload_async = rsx::get_current_renderer()->get_backend_config().supports_asynchronous_compute;
 		rsx::flags32_t create_flags = 0;
 
-		if (upload_async && g_fxo->get<AsyncTaskScheduler>().is_host_mode())
+		if (upload_async && ensure(g_fxo->try_get<AsyncTaskScheduler>())->is_host_mode())
 		{
 			create_flags |= texture_create_flags::do_not_reuse;
 			if (m_device->get_graphics_queue() != m_device->get_transfer_queue())
@@ -1331,7 +1339,7 @@ namespace vk
 			cmd.submit(submit_info, VK_TRUE);
 			vk::wait_for_fence(&submit_fence, GENERAL_WAIT_TIMEOUT);
 
-			CHECK_RESULT(VK_GET_SYMBOL(vkResetCommandBuffer)(cmd, 0));
+			cmd.reset();
 			cmd.begin();
 		}
 		else

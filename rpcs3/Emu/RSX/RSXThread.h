@@ -262,6 +262,10 @@ namespace rsx
 		void get_framebuffer_layout(rsx::framebuffer_creation_context context, framebuffer_layout& layout);
 		bool get_scissor(areau& region, bool clip_viewport);
 
+		// Notify framebuffer layout has been committed.
+		// FIXME: This should not be here
+		void on_framebuffer_layout_updated();
+
 		RSXVertexProgram current_vertex_program = {};
 		RSXFragmentProgram current_fragment_program = {};
 
@@ -382,6 +386,7 @@ namespace rsx
 		// sync
 		void sync();
 		flags32_t read_barrier(u32 memory_address, u32 memory_range, bool unconditional);
+		virtual void write_barrier(u32 /*memory_address*/, u32 /*memory_range*/) {}
 		virtual void sync_hint(FIFO::interrupt_hint hint, reports::sync_hint_payload_t payload);
 		virtual bool release_GCM_label(u32 /*address*/, u32 /*value*/)
 		{

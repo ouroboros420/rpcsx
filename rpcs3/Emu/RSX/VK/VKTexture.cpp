@@ -765,6 +765,10 @@ namespace vk
 	{
 		switch (block_size)
 		{
+		case 1:
+			return vk::get_compute_task<cs_deswizzle_3d<u8, u8, false>>();
+		case 2:
+			return vk::get_compute_task<cs_deswizzle_3d<u16, WordType, SwapBytes>>();
 		case 4:
 			return vk::get_compute_task<cs_deswizzle_3d<u32, WordType, SwapBytes>>();
 		case 8:
@@ -782,21 +786,27 @@ namespace vk
 		vk::cs_deswizzle_base* job = nullptr;
 		const auto block_size = (word_size * word_count);
 
-		ensure(word_size == 4 || word_size == 2);
-
 		if (!swap_bytes)
 		{
-			if (word_size == 4)
+			switch (word_size)
 			{
-				job = get_deswizzle_transformation<u32, false>(block_size);
-			}
-			else
-			{
+			case 1:
+				job = get_deswizzle_transformation<u8, false>(block_size);
+				break;
+			case 2:
 				job = get_deswizzle_transformation<u16, false>(block_size);
+				break;
+			case 4:
+				job = get_deswizzle_transformation<u32, false>(block_size);
+				break;
+			default:
+				fmt::throw_exception("Unimplemented deswizzle for format.");
 			}
 		}
 		else
 		{
+			ensure(word_size == 2 || word_size == 4);
+
 			if (word_size == 4)
 			{
 				job = get_deswizzle_transformation<u32, true>(block_size);
@@ -872,7 +882,7 @@ namespace vk
 
 	static const vk::command_buffer& prepare_for_transfer(const vk::command_buffer& primary_cb, vk::image* dst_image, rsx::flags32_t& flags)
 	{
-		AsyncTaskScheduler* async_scheduler = (flags & image_upload_options::upload_contents_async) ? std::addressof(g_fxo->get<AsyncTaskScheduler>()) : nullptr;
+		AsyncTaskScheduler* async_scheduler = (flags & image_upload_options::upload_contents_async) ? g_fxo->try_get<AsyncTaskScheduler>() : nullptr;
 
 		if (async_scheduler && (dst_image->aspect() & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)))
 		{

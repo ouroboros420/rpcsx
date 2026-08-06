@@ -838,7 +838,7 @@ namespace rsx
 	{
 		while (Emu.IsReady())
 		{
-			thread_ctrl::wait_for(1000);
+			Emu.WaitReady();
 		}
 
 		do
@@ -1678,10 +1678,24 @@ namespace rsx
 			return;
 		}
 
+		auto set_zeta_write_enabled = [&](bool state)
+		{
+			if (state == m_framebuffer_layout.zeta_write_enabled)
+			{
+				return;
+			}
+
+			if (m_graphics_state & rsx::zeta_address_is_cyclic)
+			{
+				m_graphics_state |= rsx::fragment_program_state_dirty;
+			}
+			m_framebuffer_layout.zeta_write_enabled = state;
+		};
+
 		auto evaluate_depth_buffer_state = [&]()
 		{
-			m_framebuffer_layout.zeta_write_enabled =
-				(rsx::method_registers.depth_test_enabled() && rsx::method_registers.depth_write_enabled());
+			const bool zeta_write_en = (rsx::method_registers.depth_test_enabled() && rsx::method_registers.depth_write_enabled());
+			set_zeta_write_enabled(zeta_write_en);
 		};
 
 		auto evaluate_stencil_buffer_state = [&]()
@@ -1704,7 +1718,7 @@ namespace rsx
 										rsx::method_registers.back_stencil_op_zfail() != rsx::stencil_op::keep);
 				}
 
-				m_framebuffer_layout.zeta_write_enabled = (mask && active_write_op);
+				set_zeta_write_enabled(mask && active_write_op);
 			}
 		};
 
@@ -1723,14 +1737,7 @@ namespace rsx
 				}
 			}
 
-			if (::size32(mrt_buffers) != current_fragment_program.mrt_buffers_count &&
-				!m_graphics_state.test(rsx::pipeline_state::fragment_program_dirty) &&
-				!is_current_program_interpreted())
-			{
-				// Notify that we should recompile the FS
-				m_graphics_state |= rsx::pipeline_state::fragment_program_state_dirty;
-			}
-
+			on_framebuffer_layout_updated();
 			return any_found;
 		};
 
@@ -1827,6 +1834,22 @@ namespace rsx
 		default:
 			rsx_log.fatal("Unhandled framebuffer option changed 0x%x", opt);
 		}
+	}
+
+	void thread::on_framebuffer_layout_updated()
+	{
+		if (m_graphics_state.test(rsx::fragment_program_state_dirty))
+		{
+			return;
+		}
+
+		const auto target = m_ctx->register_state->surface_color_target();
+		if (rsx::utility::get_mrt_buffers_count(target) == current_fragment_program.mrt_buffers_count)
+		{
+			return;
+		}
+
+		m_graphics_state |= rsx::fragment_program_state_dirty;
 	}
 
 	bool thread::get_scissor(areau& region, bool clip_viewport)
@@ -2052,36 +2075,85 @@ namespace rsx
 
 		m_graphics_state.clear(rsx::pipeline_state::fragment_program_dirty);
 
-		current_fragment_program.ctrl = m_ctx->register_state->shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT);
+		current_fragment_program.ctrl = m_ctx->register_state->shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_USES_KIL);
 		current_fragment_program.texcoord_control_mask = m_ctx->register_state->texcoord_control_mask();
 		current_fragment_program.two_sided_lighting = m_ctx->register_state->two_side_light_en();
 		current_fragment_program.mrt_buffers_count = rsx::utility::get_mrt_buffers_count(m_ctx->register_state->surface_color_target());
 
-		if (method_registers.current_draw_clause.classify_mode() == primitive_class::polygon)
+		if (m_ctx->register_state->current_draw_clause.classify_mode() == primitive_class::polygon)
 		{
 			if (!backend_config.supports_normalized_barycentrics)
 			{
 				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_ATTRIBUTE_INTERPOLATION;
 			}
+
+			if (m_ctx->register_state->alpha_test_enabled())
+			{
+				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TEST;
+			}
+
+			if (m_ctx->register_state->polygon_stipple_enabled())
+			{
+				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_POLYGON_STIPPLE;
+			}
+
+			if (m_ctx->register_state->msaa_alpha_to_coverage_enabled())
+			{
+				const bool is_multiple_samples = m_ctx->register_state->surface_antialias() != rsx::surface_antialiasing::center_1_sample;
+				if (!backend_config.supports_hw_a2c || (!is_multiple_samples && !backend_config.supports_hw_a2c_1spp))
+				{
+					// Emulation required
+					current_fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE;
+				}
+			}
 		}
-		else if (method_registers.point_sprite_enabled() &&
-				 method_registers.current_draw_clause.primitive == primitive_type::points)
+		else if (m_ctx->register_state->point_sprite_enabled() &&
+			m_ctx->register_state->current_draw_clause.primitive == primitive_type::points)
 		{
 			// Set high word of the control mask to store point sprite control
-			current_fragment_program.texcoord_control_mask |= u32(method_registers.point_sprite_control_mask()) << 16;
+			current_fragment_program.texcoord_control_mask |= u32(m_ctx->register_state->point_sprite_control_mask()) << 16;
 		}
+
+		// Check if framebuffer is actually an XRGB format and not a WZYX format
+		switch (m_ctx->register_state->surface_color())
+		{
+		case rsx::surface_color_format::w16z16y16x16:
+		case rsx::surface_color_format::w32z32y32x32:
+		case rsx::surface_color_format::x32:
+			// These behave very differently from "normal" formats.
+			break;
+		default:
+			// Integer framebuffer formats. These can support sRGB output as well as some special rules for output quantization.
+			current_fragment_program.ctrl |= RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER;
+			if (!(current_fragment_program.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) && // Cannot output sRGB from 32-bit registers
+				m_ctx->register_state->framebuffer_srgb_enabled())
+			{
+				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_SRGB_FRAMEBUFFER;
+			}
+			break;
+		}
+
+		const bool zeta_was_cyclic = m_graphics_state & rsx::zeta_address_is_cyclic;
+		m_graphics_state.clear(rsx::zeta_address_is_cyclic);
 
 		for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
 			if (!(textures_ref & 1))
 				continue;
 
-			auto& tex = rsx::method_registers.fragment_textures[i];
+			auto &tex = m_ctx->register_state->fragment_textures[i];
 			current_fp_texture_state.clear(i);
 
-			if (tex.enabled() && sampler_descriptors[i]->format_class != RSX_FORMAT_CLASS_UNDEFINED)
+			if (!tex.enabled() || sampler_descriptors[i]->format_class == RSX_FORMAT_CLASS_UNDEFINED)
 			{
-				std::memcpy(current_fragment_program.texture_params[i].scale, sampler_descriptors[i]->texcoord_xform.scale, 6 * sizeof(f32));
+				continue;
+			}
+
+			std::memcpy(
+				current_fragment_program.texture_params[i].scale,
+				sampler_descriptors[i]->texcoord_xform.scale,
+				sizeof(sampler_descriptors[i]->texcoord_xform.scale) * 2); // Copy scale and bias together
+
 				current_fragment_program.texture_params[i].remap = tex.remap();
 
 				m_graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
@@ -2091,7 +2163,11 @@ namespace rsx
 
 				if (sampler_descriptors[i]->texcoord_xform.clamp)
 				{
-					std::memcpy(current_fragment_program.texture_params[i].clamp_min, sampler_descriptors[i]->texcoord_xform.clamp_min, 4 * sizeof(f32));
+				std::memcpy(
+					current_fragment_program.texture_params[i].clamp_min,
+					sampler_descriptors[i]->texcoord_xform.clamp_min,
+					sizeof(sampler_descriptors[i]->texcoord_xform.clamp_min) * 2); // Copy clamp_min and clamp_max together
+
 					texture_control |= (1 << rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT);
 				}
 
@@ -2099,6 +2175,7 @@ namespace rsx
 				{
 					// alphakill can be ignored unless a valid comparison function is set
 					texture_control |= (1 << texture_control_bits::ALPHAKILL);
+				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_ALPHA_KILL;
 				}
 
 				// const u32 texaddr = rsx::get_address(tex.offset(), tex.location());
@@ -2190,6 +2267,20 @@ namespace rsx
 					default:
 						rsx_log.error("Depth texture bound to pipeline with unexpected format 0x%X", format);
 					}
+
+				if (sampler_descriptors[i]->is_cyclic_reference &&
+					m_framebuffer_layout.zeta_address != 0 &&
+					!g_cfg.video.strict_rendering_mode &&
+					g_cfg.video.shader_precision != gpu_preset_level::low)
+				{
+					m_graphics_state |= rsx::zeta_address_is_cyclic;
+
+					if (!(current_fragment_program.ctrl & (CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_META_USES_DISCARD)) &&
+						m_framebuffer_layout.zeta_write_enabled)
+					{
+						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_DISABLE_EARLY_Z;
+					}
+				}
 				}
 				else if (!backend_config.supports_hw_renormalization /* &&
 				    tex.min_filter() == rsx::texture_minify_filter::nearest &&
@@ -2272,7 +2363,6 @@ namespace rsx
 
 				current_fragment_program.texture_params[i].control = texture_control;
 			}
-		}
 
 		// Update texture configuration
 		current_fragment_program.texture_state.import(current_fp_texture_state, current_fp_metadata.referenced_textures_mask);
@@ -2281,13 +2371,20 @@ namespace rsx
 		if (current_fragment_program.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
 		{
 			// Check that the depth stage is not disabled
-			if (!rsx::method_registers.depth_test_enabled())
+			if (!m_ctx->register_state->depth_test_enabled())
 			{
 				rsx_log.trace("FS exports depth component but depth test is disabled (INVALID_OPERATION)");
 			}
 		}
 
 		m_program_cache_hint.invalidate_fragment_program(current_fragment_program);
+
+		if (zeta_was_cyclic && zeta_was_cyclic != m_graphics_state.test(rsx::zeta_address_is_cyclic))
+		{
+			// Forced "fall-out" barrier. This is a special case for Z buffers because they can be cyclic without writes.
+			// That condition can cause early-Z in a later call to introduce data hazard in previous cyclic draws.
+			m_graphics_state |= rsx::zeta_address_cyclic_barrier;
+		}
 	}
 
 	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
@@ -2863,7 +2960,7 @@ namespace rsx
 
 			for (u32 ea = address >> 20, end = ea + (size >> 20); ea < end; ea++)
 			{
-				const u32 io = rx::rol32(iomap_table.io[ea], 32 - 20);
+				const u32 io = std::rotl<u32>(iomap_table.io[ea], 32 - 20);
 
 				if (io + 1)
 				{
@@ -2893,7 +2990,7 @@ namespace rsx
 
 						while (to_unmap)
 						{
-							bit = (std::countr_zero<u64>(rx::rol64(to_unmap, 0 - bit)) + bit);
+							bit = (std::countr_zero<u64>(std::rotl<u64>(to_unmap, 0 - bit)) + bit);
 							to_unmap &= ~(1ull << bit);
 
 							constexpr u16 null_entry = 0xFFFF;
@@ -3079,7 +3176,7 @@ namespace rsx
 		{
 			capture_current_frame = false;
 
-			std::string file_path = fs::get_config_dir() + "captures/" + Emu.GetTitleID() + "_" + date_time::current_time_narrow() + "_capture.rrc.gz";
+			const std::string file_path = fs::get_config_dir() + "captures/" + (Emu.GetTitleID().empty() ? Emu.GetTitle() : Emu.GetTitleID()) + "_" + date_time::current_time_narrow() + "_capture.rrc.gz";
 
 			fs::pending_file temp(file_path);
 

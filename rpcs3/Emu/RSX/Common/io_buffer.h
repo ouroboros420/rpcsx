@@ -81,6 +81,7 @@ namespace rsx
 		std::span<T> as_span() const
 		{
 			auto bytes = data();
+			ensure((reinterpret_cast<uintptr_t>(bytes) & (sizeof(T) - 1)) == 0, "IO buffer span cast requires naturally aligned pointers.");
 			return {utils::bless<T>(bytes), m_size / sizeof(T)};
 		}
 

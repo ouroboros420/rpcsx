@@ -19,6 +19,15 @@ namespace rsx
 		template <typename T>
 		message_item::message_item(const T& msg_id, u64 expiration, std::shared_ptr<atomic_t<u32>> refs, std::shared_ptr<overlay_element> icon)
 		{
+			if constexpr (std::is_same_v<T, localized_string_id>)
+			{
+				m_loc_id = msg_id;
+			}
+			else if constexpr (std::is_same_v<T, localized_string>)
+			{
+				m_loc_id = msg_id.id;
+			}
+
 			m_visible_duration = expiration;
 			m_refs = std::move(refs);
 
@@ -54,6 +63,7 @@ namespace rsx
 		}
 		template message_item::message_item(const std::string& msg_id, u64, std::shared_ptr<atomic_t<u32>>, std::shared_ptr<overlay_element>);
 		template message_item::message_item(const localized_string_id& msg_id, u64, std::shared_ptr<atomic_t<u32>>, std::shared_ptr<overlay_element>);
+		template message_item::message_item(const localized_string& msg_id, u64, std::shared_ptr<atomic_t<u32>>, std::shared_ptr<overlay_element>);
 
 		void message_item::reset_expiration()
 		{
@@ -75,9 +85,20 @@ namespace rsx
 			}
 		}
 
+		bool message_item::id_matches(localized_string_id id) const
+		{
+			return m_loc_id == id;
+		}
+
 		bool message_item::text_matches(const std::u32string& text) const
 		{
 			return m_text.text == text;
+		}
+
+		void message_item::set_label_text(const std::string& text)
+		{
+			m_text.set_text(text);
+			m_is_compiled = false;
 		}
 
 		void message_item::set_pos(s16 _x, s16 _y)
@@ -275,33 +296,9 @@ namespace rsx
 			return cr;
 		}
 
-		bool message::message_exists(message_pin_location location, localized_string_id id, bool allow_refresh)
+		bool message::check_lists(message_pin_location location, std::function<bool(std::deque<message_item>& list)> check_list)
 		{
-			return message_exists(location, get_localized_u32string(id), allow_refresh);
-		}
-
-		bool message::message_exists(message_pin_location location, const std::string& msg, bool allow_refresh)
-		{
-			return message_exists(location, utf8_to_u32string(msg), allow_refresh);
-		}
-
-		bool message::message_exists(message_pin_location location, const std::u32string& msg, bool allow_refresh)
-		{
-			auto check_list = [&](std::deque<message_item>& list)
-			{
-				return std::any_of(list.begin(), list.end(), [&](message_item& item)
-					{
-						if (item.text_matches(msg))
-						{
-							if (allow_refresh)
-							{
-								item.reset_expiration();
-							}
-							return true;
-						}
-						return false;
-					});
-			};
+			if (!check_list) return false;
 
 			switch (location)
 			{
@@ -316,6 +313,80 @@ namespace rsx
 			}
 
 			return false;
+		}
+
+		bool message::message_exists(message_pin_location location, localized_string_id id, bool allow_refresh, bool /*compare_id*/)
+		{
+			const auto check_list = [&](std::deque<message_item>& list)
+			{
+				return std::any_of(list.begin(), list.end(), [&](message_item& item)
+				{
+					if (item.id_matches(id))
+					{
+						if (allow_refresh)
+						{
+							item.reset_expiration();
+						}
+						return true;
+					}
+					return false;
+				});
+			};
+
+			return check_lists(location, check_list);
+		}
+
+		bool message::message_exists(message_pin_location location, const std::string& msg, bool allow_refresh, bool compare_id)
+		{
+			return message_exists(location, utf8_to_u32string(msg), allow_refresh, compare_id);
+		}
+
+		bool message::message_exists(message_pin_location location, const std::u32string& msg, bool allow_refresh, bool /*compare_id*/)
+		{
+			const auto check_list = [&](std::deque<message_item>& list)
+			{
+				return std::any_of(list.begin(), list.end(), [&](message_item& item)
+				{
+					if (item.text_matches(msg))
+					{
+						if (allow_refresh)
+						{
+							item.reset_expiration();
+						}
+						return true;
+					}
+					return false;
+				});
+			};
+
+			return check_lists(location, check_list);
+		}
+
+		bool message::message_exists(message_pin_location location, const localized_string& container, bool allow_refresh, bool compare_id)
+		{
+			if (compare_id)
+			{
+				const auto check_list = [&](std::deque<message_item>& list)
+				{
+					return std::any_of(list.begin(), list.end(), [&](message_item& item)
+					{
+						if (item.id_matches(container.id))
+						{
+							if (allow_refresh)
+							{
+								item.set_label_text(container.str);
+								item.reset_expiration();
+							}
+							return true;
+						}
+						return false;
+					});
+				};
+
+				return check_lists(location, check_list);
+			}
+
+			return message_exists(location, utf8_to_u32string(container.str), allow_refresh, compare_id);
 		}
 
 		void refresh_message_queue()

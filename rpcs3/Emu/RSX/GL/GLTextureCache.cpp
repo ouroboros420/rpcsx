@@ -163,7 +163,7 @@ namespace gl
 
 		if (copy)
 		{
-			std::vector<copy_region_descriptor> region =
+			rsx::simple_array<copy_region_descriptor> region =
 				{{.src = src,
 					.xform = rsx::surface_transform::coordinate_transform,
 					.src_x = x,
@@ -186,7 +186,7 @@ namespace gl
 		return dst->get_view(remap);
 	}
 
-	void texture_cache::copy_transfer_regions_impl(gl::command_context& cmd, gl::texture* dst_image, const std::vector<copy_region_descriptor>& sources) const
+	void texture_cache::copy_transfer_regions_impl(gl::command_context& cmd, gl::texture* dst_image, const rsx::simple_array<copy_region_descriptor>& sources) const
 	{
 		const auto dst_bpp = dst_image->pitch() / dst_image->width();
 		const auto dst_aspect = dst_image->aspect();

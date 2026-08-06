@@ -3,6 +3,7 @@
 #include "device.h"
 #include "image.h"
 #include "image_helpers.h"
+#include "sampler.h"
 
 #include "../VKResourceManager.h"
 #include <memory>
@@ -126,7 +127,16 @@ namespace vk
 			fmt::throw_exception("No compatible memory type was found!");
 		}
 
-		memory = std::make_shared<vk::memory_block>(m_device, memory_req.size, memory_req.alignment, allocation_type_info, allocation_pool, nullable);
+		memory_allocation_request alloc_request
+		{
+			.size = memory_req.size,
+			.alignment = memory_req.alignment,
+			.memory_type = &allocation_type_info,
+			.pool = allocation_pool,
+			.throw_on_fail = !nullable
+		};
+		memory = std::make_shared<vk::memory_block>(m_device, alloc_request);
+
 		if (auto device_mem = memory->get_vk_device_memory();
 			device_mem != VK_NULL_HANDLE) [[likely]]
 		{

@@ -352,6 +352,10 @@ public:
 	{
 		return m_is_valid;
 	}
+	const PKGHeader& get_header() const
+	{
+		return m_header;
+	}
 	package_install_result check_target_app_version() const;
 	static package_install_result extract_data(std::deque<package_reader>& readers, std::deque<std::string>& bootable_paths);
 	const psf::registry& get_psf() const

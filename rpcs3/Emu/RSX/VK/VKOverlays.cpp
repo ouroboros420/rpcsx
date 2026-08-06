@@ -42,12 +42,12 @@ namespace vk
 	{
 		if (!m_vao.heap)
 		{
-			m_vao.create(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, 1 * 0x100000, "overlays VAO", 128);
+			m_vao.create(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, 1 * 0x100000, vk::heap_pool_default, "overlays VAO", 128);
 		}
 
 		if (!m_ubo.heap && m_num_uniform_buffers > 0)
 		{
-			m_ubo.create(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 8 * 0x100000, "overlays UBO", 128);
+			m_ubo.create(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 8 * 0x100000, vk::heap_pool_default, "overlays UBO", 128);
 		}
 	}
 
@@ -183,14 +183,13 @@ namespace vk
 
 		if (m_num_uniform_buffers > 0)
 		{
-			program->bind_uniform({ m_ubo.heap->value, m_ubo_offset, std::max(m_ubo_length, 4u) }, 0, 0);
+			program->bind_uniform({ *m_ubo.heap, m_ubo_offset, std::max(m_ubo_length, 4u) }, 0, 0);
 		}
 
 		for (uint n = 0; n < src.size(); ++n)
 		{
-			VkDescriptorImageInfo info = {m_sampler->value, src[n]->value, src[n]->image()->current_layout};
 			const auto [set, location] = program->get_uniform_location(::glsl::glsl_fragment_program, glsl::input_type_texture, "fs" + std::to_string(n));
-			program->bind_uniform(info, set, location);
+			program->bind_uniform({ *src[n], *m_sampler }, set, location);
 		}
 
 		program->bind(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -538,7 +537,7 @@ namespace vk
 		push_buf[14] = m_clip_region.x2;
 		push_buf[15] = m_clip_region.y2;
 
-		rsx::overlays::vertex_options vert_opts;
+		rsx::overlays::vertex_options vert_opts {};
 		const auto vert_config = vert_opts
 		                             .disable_vertex_snap(m_disable_vertex_snap)
 		                             .get();
@@ -547,7 +546,7 @@ namespace vk
 		VK_GET_SYMBOL(vkCmdPushConstants)(cmd, program->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, 68, push_buf);
 
 		// 2. Fragment stuff
-		rsx::overlays::fragment_options frag_opts;
+		rsx::overlays::fragment_options frag_opts {};
 		const auto frag_config = frag_opts
 		                             .texture_mode(m_texture_type)
 		                             .clip_fragments(m_clip_enabled)

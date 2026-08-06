@@ -25,7 +25,7 @@ struct cfg_pad final : cfg::node
 	cfg_pad() {};
 	cfg_pad(node* owner, const std::string& name) : cfg::node(owner, name) {}
 
-	static std::vector<std::string> get_buttons(const std::string& str);
+	static std::vector<std::string> get_buttons(std::string_view str);
 	static std::string get_buttons(std::vector<std::string> vec);
 
 	u8 get_motor_speed(VibrateMotor& motor, f32 multiplier) const;
@@ -88,8 +88,8 @@ struct cfg_pad final : cfg::node
 	cfg::uint<0, 1000000> rstick_anti_deadzone{this, "Right Stick Anti-Deadzone", 0};
 	cfg::uint<0, 1000000> ltriggerthreshold{this, "Left Trigger Threshold", 0};
 	cfg::uint<0, 1000000> rtriggerthreshold{this, "Right Trigger Threshold", 0};
-	cfg::uint<0, 1000000> lpadsquircling{this, "Left Pad Squircling Factor", 8000};
-	cfg::uint<0, 1000000> rpadsquircling{this, "Right Pad Squircling Factor", 8000};
+	cfg::uint<0, 1000000> lpadsquircling{ this, "Left Pad Squircling Factor", 4000 };
+	cfg::uint<0, 1000000> rpadsquircling{ this, "Right Pad Squircling Factor", 4000 };
 
 	cfg::uint<0, 255> colorR{this, "Color Value R", 0};
 	cfg::uint<0, 255> colorG{this, "Color Value G", 0};

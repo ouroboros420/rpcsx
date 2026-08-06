@@ -2,6 +2,7 @@
 
 #include "Emu/VFS.h"
 #include "Emu/System.h"
+#include "Emu/Cell/timers.hpp"
 
 #include "Crypto/unself.h"
 
@@ -13,6 +14,7 @@
 
 #include <charconv>
 #include <span>
+#include <thread>
 
 LOG_CHANNEL(tar_log, "TAR");
 
@@ -196,8 +198,7 @@ std::unique_ptr<utils::serial> tar_object::get_file(const std::string& path, std
 
 bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 {
-	std::vector<u8> filedata_buffer(0x80'0000);
-	std::span<u8> filedata_span{filedata_buffer.data(), filedata_buffer.size()};
+	std::vector<std::vector<u8>> filedata_buffers;
 
 	auto iter = m_map.begin();
 
@@ -290,6 +291,13 @@ bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 
 			fs::file file;
 
+			const u64 current_time = get_system_time();
+
+			const usz filesize = file_data->get_size() - file_data->pos;
+
+			constexpr usz chunk_size = 0x8 * 0x100000;
+			constexpr usz chunk_count = 16;
+
 			if (should_ignore)
 			{
 				file = fs::make_stream<std::vector<u8>>();
@@ -297,29 +305,85 @@ bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 			else
 			{
 				file.open(result, fs::rewrite);
+
+				filedata_buffers.clear();
+
+				for (usz i = 0; i < std::min<usz>(utils::aligned_div<usz>(filesize, chunk_size), chunk_count); i++)
+				{
+					if (filedata_buffers.size() <= i)
+					{
+						filedata_buffers.resize(i + 1);
+					}
+
+					filedata_buffers[i].resize(std::min<usz>(filesize - i * chunk_size, chunk_size));
+				}
 			}
 
 			if (file && file_data)
 			{
+				std::unique_ptr<named_thread<std::function<void()>>> async_reader;
+
+				atomic_t<usz> filedata_read_pos = 0, filedata_write_pos = 0;
+
+				while (!should_ignore && filesize)
+				{
+					auto get_span_at = [&](usz pos)
+					{
+						auto& span = filedata_buffers[pos % filedata_buffers.size()];
+						return std::span<u8>(span.data(), std::min<usz>(filesize - pos * chunk_size, chunk_size));
+					};
+
+					// Feed itself if smaller than one chunk
+					if (filedata_buffers.size() == 1)
+					{
+						file_data->try_read(get_span_at(filedata_read_pos));
+						filedata_read_pos++;
+					}
+					else if (!async_reader)
+					{
+						async_reader = std::make_unique<named_thread<std::function<void()>>>("TAR Extract File Thread", [&]()
+						{
 				while (true)
 				{
-					const usz unread_size = file_data->try_read(filedata_span);
-
-					if (unread_size == 0)
+								while (filedata_read_pos - filedata_write_pos == filedata_buffers.size())
 					{
-						file.write(filedata_span.data(), should_ignore ? 0 : filedata_span.size());
-						continue;
+									thread_ctrl::wait_for(1000);
 					}
 
-					// Tail data
+								const usz unread_size = file_data->try_read(get_span_at(filedata_read_pos));
 
-					if (usz read_size = filedata_span.size() - unread_size)
+								if (unread_size)
 					{
-						ensure(file_data->try_read(filedata_span.first(read_size)) == 0);
-						file.write(filedata_span.data(), should_ignore ? 0 : read_size);
+									ensure(unread_size == filedata_buffers[filedata_read_pos.load() % filedata_buffers.size()].size());
+									break;
+								}
+
+								filedata_read_pos++;
+							}
+						});
+					}
+
+					while (filedata_read_pos == filedata_write_pos)
+					{
+						std::this_thread::yield();
+					}
+
+					const auto data_span = get_span_at(filedata_write_pos);
+
+					file.write(data_span.data(), data_span.size());
+					filedata_write_pos++;
+
+					if (filedata_write_pos == utils::aligned_div<usz>(filesize, filedata_buffers[0].size()))
+					{
+						if (async_reader)
+						{
+							// Join thread
+							(*async_reader)();
+							async_reader.reset();
 					}
 
 					break;
+				}
 				}
 
 				file.close();
@@ -344,7 +408,7 @@ bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 					return false;
 				}
 
-				tar_log.notice("TAR Loader: written file %s", name);
+				(m_ar && filesize > 1024 ? tar_log.success : tar_log.notice)("TAR Loader: written file %s (took: %f seconds)", name, (get_system_time() - current_time) / 1'000'000.);
 				break;
 			}
 

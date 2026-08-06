@@ -255,7 +255,7 @@ namespace rpcn
 		rpcn_log.notice("online: %s, pr_com_id: %s, pr_title: %s, pr_status: %s, pr_comment: %s, pr_data: %s", online ? "true" : "false", pr_com_id.data, pr_title, pr_status, pr_comment, fmt::buf_to_hexstring(pr_data.data(), pr_data.size()));
 	}
 
-	constexpr u32 RPCN_PROTOCOL_VERSION = 26;
+	constexpr u32 RPCN_PROTOCOL_VERSION = 27;
 	constexpr usz RPCN_HEADER_SIZE = 15;
 
 	const char* error_to_explanation(rpcn::ErrorType error)
@@ -1495,7 +1495,7 @@ namespace rpcn
 		return notifs;
 	}
 
-	std::unordered_map<u32, std::pair<rpcn::CommandType, std::vector<u8>>> rpcn_client::get_replies()
+	std::map<u32, std::pair<rpcn::CommandType, std::vector<u8>>> rpcn_client::get_replies()
 	{
 		std::lock_guard lock(mutex_replies);
 		auto ret_replies = std::move(replies);
@@ -2019,9 +2019,13 @@ namespace rpcn
 			}
 			final_grouppasswordconfig_vec = builder.CreateVector(davec);
 		}
-		u64 final_passwordSlotMask = 0;
+
+		flatbuffers::Offset<flatbuffers::Vector<u64>> final_passwordSlotMask;
 		if (req->passwordSlotMask)
-			final_passwordSlotMask = *req->passwordSlotMask;
+		{
+			const u64 value = *req->passwordSlotMask;
+			final_passwordSlotMask = builder.CreateVector(&value, 1);
+		}
 
 		flatbuffers::Offset<flatbuffers::Vector<u16>> final_ownerprivilege_vec;
 		if (req->ownerPrivilegeRankNum && req->ownerPrivilegeRank)
@@ -2752,7 +2756,7 @@ namespace rpcn
 
 	void rpcn_client::write_communication_id(const SceNpCommunicationId& com_id, std::vector<u8>& data)
 	{
-		ensure(com_id.data[9] == 0 && com_id.num <= 99, "rpcn_client::write_communication_id: Invalid SceNpCommunicationId");
+		ensure(np::validate_communication_id(com_id), "rpcn_client::write_communication_id: Invalid SceNpCommunicationId");
 		const std::string com_id_str = np::communication_id_to_string(com_id);
 		ensure(com_id_str.size() == 12, "rpcn_client::write_communication_id: Error formatting SceNpCommunicationId");
 		memcpy(data.data(), com_id_str.data(), COMMUNICATION_ID_SIZE);

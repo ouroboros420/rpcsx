@@ -11,7 +11,6 @@
 #include "rpcsx/fw/ps3/sceNpTrophy.h"
 
 extern atomic_t<bool> g_user_asked_for_recording;
-extern atomic_t<bool> g_user_asked_for_screenshot;
 
 namespace rsx
 {
@@ -102,8 +101,7 @@ namespace rsx
 						return page_navigation::stay;
 
 					rsx_log.notice("User selected screenshot in home menu");
-					g_user_asked_for_screenshot = true;
-					return page_navigation::exit;
+				return page_navigation::exit_for_screenshot;
 				});
 
 			std::unique_ptr<overlay_element> recording = std::make_unique<home_menu_entry>(get_localized_string(localized_string_id::HOME_MENU_RECORDING));

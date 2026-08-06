@@ -115,4 +115,5 @@ error_code sys_usbd_unregister_extra_ldd(ppu_thread &ppu, u32 handle,
                                          u16 slen_product);
 
 void connect_usb_controller(u8 index, input::product_type);
+void reconnect_usb(u32 assigned_number);
 void handle_hotplug_event(bool connected);

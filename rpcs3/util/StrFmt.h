@@ -391,7 +391,7 @@ namespace fmt
 		}
 
 #if !defined(_MSC_VER) || defined(__clang__)
-		[[noreturn]] ~throw_exception();
+		[[noreturn]] ~throw_exception() = default;
 #endif
 	};
 

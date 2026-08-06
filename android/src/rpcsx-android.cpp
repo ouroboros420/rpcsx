@@ -1253,7 +1253,8 @@ extern bool ppu_load_exec(const ppu_exec_object &, bool virtual_load,
 extern void spu_load_exec(const spu_exec_object &);
 extern void spu_load_rel_exec(const spu_rel_object &);
 extern void ppu_precompile(std::vector<std::string> &dir_queue,
-                           std::vector<ppu_module<lv2_obj> *> *loaded_prx);
+                           std::vector<ppu_module<lv2_obj> *> *loaded_prx,
+                           bool is_fast_compilation);
 extern bool ppu_initialize(const ppu_module<lv2_obj> &, bool check_only = false,
                            u64 file_size = 0);
 extern void ppu_finalize(const ppu_module<lv2_obj> &);
@@ -1415,7 +1416,9 @@ private:
       }
     }
 
-    ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list);
+    // false = upstream's non-fast path: precompile everything rather than
+    // stopping early, which is what this batch precompile step wants.
+    ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list, false);
 
     rpcsx_android.error("Finalization");
     g_fxo->reset();

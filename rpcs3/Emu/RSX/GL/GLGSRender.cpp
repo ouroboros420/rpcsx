@@ -915,16 +915,16 @@ void GLGSRender::load_program_env()
 	if (update_vertex_env)
 	{
 		// Vertex state
-		auto mapping = m_vertex_env_buffer->alloc_from_heap(144, m_uniform_buffer_offset_align);
+		auto mapping = m_vertex_env_buffer->alloc_from_heap(96, m_uniform_buffer_offset_align);
 		auto buf = static_cast<u8*>(mapping.first);
 		m_draw_processor.fill_scale_offset_data(buf, false);
 		m_draw_processor.fill_user_clip_data(buf + 64);
-		*(reinterpret_cast<u32*>(buf + 128)) = rsx::method_registers.transform_branch_bits();
-		*(reinterpret_cast<f32*>(buf + 132)) = rsx::method_registers.point_size() * rsx::get_resolution_scale();
-		*(reinterpret_cast<f32*>(buf + 136)) = rsx::method_registers.clip_min();
-		*(reinterpret_cast<f32*>(buf + 140)) = rsx::method_registers.clip_max();
+		*(reinterpret_cast<u32*>(buf + 68)) = rsx::method_registers.transform_branch_bits();
+		*(reinterpret_cast<f32*>(buf + 72)) = rsx::method_registers.point_size() * rsx::get_resolution_scale();
+		*(reinterpret_cast<f32*>(buf + 76)) = rsx::method_registers.clip_min();
+		*(reinterpret_cast<f32*>(buf + 80)) = rsx::method_registers.clip_max();
 
-		m_vertex_env_buffer->bind_range(GL_VERTEX_PARAMS_BIND_SLOT, mapping.second, 144);
+		m_vertex_env_buffer->bind_range(GL_VERTEX_PARAMS_BIND_SLOT, mapping.second, 96);
 	}
 
 	if (update_instancing_data)
@@ -1428,6 +1428,12 @@ void GLGSRender::on_guest_texture_read()
 	u64 event_id = m_host_dma_ctrl->host_ctx()->inc_counter();
 	m_host_dma_ctrl->host_ctx()->texture_load_request_event = event_id;
 	enqueue_host_context_write(OFFSET_OF(rsx::host_gpu_context_t, texture_load_complete_event), 8, &event_id);
+}
+
+void GLGSRender::write_barrier(u32 address, u32 range)
+{
+	ensure(is_current_thread());
+	m_rtts.invalidate_range(utils::address_range32::start_length(address, range));
 }
 
 void GLGSRender::begin_occlusion_query(rsx::reports::occlusion_query_info* query)

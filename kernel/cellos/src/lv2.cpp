@@ -2422,11 +2422,9 @@ void lv2_obj::notify_all() noexcept {
       break;
     }
 
-    if (cpu != &g_to_notify) {
-      // Note: by the time of notification the thread could have been
-      // deallocated which is why the direct function is used
-      atomic_wait_engine::notify_all(cpu);
-    }
+    // Note: by the time of notification the thread could have been
+    // deallocated which is why the direct function is used
+    atomic_wait_engine::notify_all(cpu);
   }
 
   g_to_notify[0] = nullptr;
@@ -2454,7 +2452,7 @@ void lv2_obj::notify_all() noexcept {
   // Instead, check 2 at max, but use the CPU ID index to tell which index to
   // start checking so the work would be distributed across all threads
 
-  atomic_t<u64, 64> *range_lock = nullptr;
+  atomic_t<u64, 128> *range_lock = nullptr;
 
   if (cpu->get_class() == thread_class::spu) {
     range_lock = static_cast<spu_thread *>(cpu)->range_lock;

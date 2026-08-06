@@ -63,12 +63,13 @@ namespace rsx
 				codepage* page = nullptr;
 			} codepage_cache;
 
+			static char32_t get_page_id(char32_t c) { return c >> 8; }
 			static language_class classify(char32_t codepage_id);
 			glyph_load_setup get_glyph_files(language_class class_) const;
-			codepage* initialize_codepage(char32_t codepage_id);
+			codepage* initialize_codepage(char32_t c);
 
 		public:
-			font(const char* ttf_name, f32 size);
+			font(std::string_view ttf_name, f32 size);
 
 			stbtt_aligned_quad get_char(char32_t c, f32& x_advance, f32& y_advance);
 
@@ -78,7 +79,7 @@ namespace rsx
 
 			std::pair<f32, f32> get_char_offset(const char32_t* text, usz max_length, u16 max_width = -1, bool wrap = false);
 
-			bool matches(const char* name, int size) const
+			bool matches(std::string_view name, int size) const
 			{
 				return static_cast<int>(size_pt) == size && font_name == name;
 			}
@@ -114,7 +115,7 @@ namespace rsx
 			std::vector<std::unique_ptr<font>> fonts;
 			static fontmgr* m_instance;
 
-			font* find(const char* name, int size)
+			font* find(std::string_view name, int size)
 			{
 				for (const auto& f : fonts)
 				{
@@ -137,7 +138,7 @@ namespace rsx
 				}
 			}
 
-			static font* get(const char* name, int size)
+			static font* get(std::string_view name, int size)
 			{
 				if (m_instance == nullptr)
 					m_instance = new fontmgr;

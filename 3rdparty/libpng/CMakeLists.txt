@@ -11,14 +11,14 @@ if (NOT USE_SYSTEM_LIBPNG)
 	endif()
 
 	add_subdirectory(libpng EXCLUDE_FROM_ALL)
-	target_include_directories(png_static INTERFACE "${libpng_BINARY_DIR}" "${libpng_SOURCE_DIR}")
+	target_include_directories(png_static SYSTEM INTERFACE "${libpng_BINARY_DIR}" "${libpng_SOURCE_DIR}")
 
 	set(LIBPNG_TARGET png_static PARENT_SCOPE)
 else()
 	find_package(PNG REQUIRED)
 
 	add_library(3rdparty_system_libpng INTERFACE)
-	target_include_directories(3rdparty_system_libpng INTERFACE ${PNG_INCLUDE_DIR})
+	target_include_directories(3rdparty_system_libpng SYSTEM INTERFACE ${PNG_INCLUDE_DIR})
 	target_link_libraries(3rdparty_system_libpng INTERFACE ${PNG_LIBRARY})
 	target_compile_definitions(3rdparty_system_libpng INTERFACE ${PNG_DEFINITIONS})
 

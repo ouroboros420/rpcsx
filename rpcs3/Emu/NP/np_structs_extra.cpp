@@ -577,4 +577,16 @@ namespace extra_nps
 		}
 	}
 
+	void print_SceNpMatching2RoomSlotInfo(const SceNpMatching2RoomSlotInfo* data)
+	{
+		sceNp.warning("SceNpMatching2RoomSlotInfo:");
+		sceNp.warning("roomId: %d", data->roomId);
+		sceNp.warning("joinedSlotMask: %x", data->joinedSlotMask);
+		sceNp.warning("passwordSlotMask: %x", data->passwordSlotMask);
+		sceNp.warning("publicSlotNum: %d", data->publicSlotNum);
+		sceNp.warning("privateSlotNum: %d", data->privateSlotNum);
+		sceNp.warning("openPublicSlotNum: %d", data->openPublicSlotNum);
+		sceNp.warning("openPrivateSlotNum: %d", data->openPrivateSlotNum);
+	}
+
 } // namespace extra_nps

@@ -3,6 +3,9 @@
 #include "util/logs.hpp"
 #include "Emu/system_config.h"
 #include <vulkan/vulkan_core.h>
+#ifdef __APPLE__
+#include <vulkan/vulkan_beta.h>
+#endif
 
 namespace vk
 {
@@ -122,6 +125,9 @@ namespace vk
 		optional_features_support.external_memory_host = device_extensions.is_supported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 		optional_features_support.synchronization_2 = device_extensions.is_supported(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
 		optional_features_support.unrestricted_depth_range = device_extensions.is_supported(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+#ifdef __APPLE__
+		optional_features_support.portability              = device_extensions.is_supported(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
 
 		optional_features_support.debug_utils = instance_extensions.is_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		optional_features_support.surface_capabilities_2 = instance_extensions.is_supported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
@@ -567,6 +573,13 @@ namespace vk
 		{
 			requested_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 		}
+
+#ifdef __APPLE__
+		if (pgpu->optional_features_support.portability)
+		{
+			requested_extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+		}
+#endif
 
 		enabled_features.robustBufferAccess = ensure(pgpu->features.robustBufferAccess, "robustBufferAccess is unsupported");
 		enabled_features.fullDrawIndexUint32 = VK_TRUE;
@@ -1023,6 +1036,8 @@ namespace vk
 			memory_heap_map.push_back(
 				{.heap = memory_properties.memoryHeaps[i],
 					.types = {}});
+
+			result.heaps.push_back({i, memory_properties.memoryHeaps[i].flags, memory_properties.memoryHeaps[i].size});
 		}
 
 		for (u32 i = 0; i < memory_properties.memoryTypeCount; i++)

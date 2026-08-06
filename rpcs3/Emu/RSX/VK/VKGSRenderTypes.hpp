@@ -74,7 +74,7 @@ namespace vk
 			}
 
 			++reset_id;
-			CHECK_RESULT(VK_GET_SYMBOL(vkResetCommandBuffer)(commands, 0));
+			vk::command_buffer::reset();
 		}
 
 		bool poke()

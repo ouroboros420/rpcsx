@@ -308,8 +308,8 @@ error_code sys_mutex_unlock(ppu_thread &ppu, u32 mutex_id) {
       [&, notify = lv2_obj::notify_all_t()](lv2_mutex &mutex) -> CellError {
         // At unlock, we have some time to do other jobs when the thread is
         // unlikely to be in other critical sections
-        notify.enqueue_on_top(
-            vm::reservation_notifier_notify(ppu.res_notify, ppu.res_notify_time));
+        notify.enqueue_on_top(vm::reservation_notifier_notify(
+            ppu.res_notify, ppu.res_notify_time, true));
 
         auto result = mutex.try_unlock(ppu);
 

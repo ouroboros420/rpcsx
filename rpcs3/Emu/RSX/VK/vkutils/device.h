@@ -30,6 +30,8 @@ namespace vk
 
 	struct memory_type_mapping
 	{
+		std::vector<memory_heap_info> heaps;
+
 		memory_type_info host_visible_coherent;
 		memory_type_info device_local;
 		memory_type_info device_bar;
@@ -106,6 +108,7 @@ namespace vk
 			bool unrestricted_depth_range = false;
 			bool extended_device_fault = false;
 			bool texture_compression_bc = false;
+			bool portability = false;
 		} optional_features_support;
 
 		friend class render_device;

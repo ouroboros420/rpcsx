@@ -170,7 +170,7 @@ u16 PadHandlerBase::ConvertAxis(f32 value)
 
 // The DS3, (and i think xbox controllers) give a 'square-ish' type response, so that the corners will give (almost)max x/y instead of the ~30x30 from a perfect circle
 // using a simple scale/sensitivity increase would *work* although it eats a chunk of our usable range in exchange
-// this might be the best for now, in practice it seems to push the corners to max of 20x20, with a squircle_factor of 8000
+// this might be the best for now, in practice it seems to push the corners to max of 20x20, with a squircle_factor of ~4000
 // This function assumes inX and inY is already in 0-255
 void PadHandlerBase::ConvertToSquirclePoint(u16& inX, u16& inY, u32 squircle_factor)
 {
@@ -206,6 +206,21 @@ void PadHandlerBase::init_configs()
 		// Set and apply actual defaults depending on pad handler
 		init_config(&m_pad_configs[i]);
 	}
+}
+
+pad_capabilities PadHandlerBase::get_capabilities(const std::string& /*pad_id*/)
+{
+	return pad_capabilities
+	{
+		.has_led = b_has_rgb,
+		.has_mono_led = b_has_led,
+		.has_player_led = b_has_player_led,
+		.has_battery_led = b_has_battery_led,
+		.has_rumble = b_has_rumble,
+		.has_accel = b_has_motion,
+		.has_gyro = b_has_motion,
+		.has_pressure_sensitivity = b_has_pressure_intensity_button
+	};
 }
 
 cfg_pad* PadHandlerBase::get_config(const std::string& pad_id)
@@ -331,12 +346,13 @@ PadHandlerBase::connection PadHandlerBase::get_next_button_press(const std::stri
 	if (callback)
 	{
 		pad_preview_values preview_values = get_preview_values(data);
+		pad_capabilities capabilities = get_capabilities(pad_id);
 		const u32 battery_level = get_battery_level(pad_id);
 
 		if (pressed_button.value > 0)
-			callback(pressed_button.value, pressed_button.name, pad_id, battery_level, std::move(preview_values));
+			callback(pressed_button.value, pressed_button.name, pad_id, battery_level, std::move(preview_values), std::move(capabilities));
 		else
-			callback(0, "", pad_id, battery_level, std::move(preview_values));
+			callback(0, "", pad_id, battery_level, std::move(preview_values), std::move(capabilities));
 	}
 
 	return status;
@@ -856,12 +872,12 @@ void PadHandlerBase::set_raw_orientation(ps_move_data& move_data, f32 accel_x, f
 	// The default position is flat on the ground, pointing forward.
 	// The accelerometers constantly measure G forces.
 	// The gyros measure changes in orientation and will reset when the device isn't moved anymore.
-	move_data.accelerometer_x = -accel_x;      // move_data: Increases if the device is rolled to the left
-	move_data.accelerometer_y = accel_z;       // move_data: Increases if the device is pitched upwards
-	move_data.accelerometer_z = accel_y;       // move_data: Increases if the device is moved upwards
-	move_data.gyro_x = degree_to_rad(-gyro_x); // move_data: Increases if the device is pitched upwards
-	move_data.gyro_y = degree_to_rad(gyro_z);  // move_data: Increases if the device is rolled to the right
-	move_data.gyro_z = degree_to_rad(-gyro_y); // move_data: Increases if the device is yawed to the left
+	move_data.accelerometer.x() = -accel_x;      // move_data: Increases if the device is rolled to the left
+	move_data.accelerometer.y() = accel_z;       // move_data: Increases if the device is pitched upwards
+	move_data.accelerometer.z() = accel_y;       // move_data: Increases if the device is moved upwards
+	move_data.gyro.x() = degree_to_rad(-gyro_x); // move_data: Increases if the device is pitched upwards
+	move_data.gyro.y() = degree_to_rad(gyro_z);  // move_data: Increases if the device is rolled to the right
+	move_data.gyro.z() = degree_to_rad(-gyro_y); // move_data: Increases if the device is yawed to the left
 }
 
 void PadHandlerBase::set_raw_orientation(Pad& pad)
@@ -934,7 +950,7 @@ void PadDevice::update_orientation(ps_move_data& move_data)
 
 	// Get elapsed time since last update
 	const u64 now_us = get_system_time();
-	const float elapsed_sec = (last_ahrs_update_time_us == 0) ? 0.0f : ((now_us - last_ahrs_update_time_us) / 1'000'000.0f);
+	const f32 elapsed_sec = (last_ahrs_update_time_us == 0) ? 0.0f : ((now_us - last_ahrs_update_time_us) / 1'000'000.0f);
 	last_ahrs_update_time_us = now_us;
 
 	// The ps move handler's axis may differ from the Fusion axis, so we have to map them correctly.
@@ -943,15 +959,15 @@ void PadDevice::update_orientation(ps_move_data& move_data)
 
 	const FusionVector accelerometer{
 		.axis{
-			.x = -move_data.accelerometer_x,
-			.y = +move_data.accelerometer_y,
-			.z = +move_data.accelerometer_z}};
+			.x = -move_data.accelerometer.x(),
+			.y = +move_data.accelerometer.y(),
+			.z = +move_data.accelerometer.z()}};
 
 	const FusionVector gyroscope{
 		.axis{
-			.x = +PadHandlerBase::rad_to_degree(move_data.gyro_x),
-			.y = +PadHandlerBase::rad_to_degree(move_data.gyro_z),
-			.z = -PadHandlerBase::rad_to_degree(move_data.gyro_y)}};
+			.x = +PadHandlerBase::rad_to_degree(move_data.gyro.x()),
+			.y = +PadHandlerBase::rad_to_degree(move_data.gyro.z()),
+			.z = -PadHandlerBase::rad_to_degree(move_data.gyro.y())}};
 
 	FusionVector magnetometer{};
 
@@ -959,9 +975,9 @@ void PadDevice::update_orientation(ps_move_data& move_data)
 	{
 		magnetometer = FusionVector{
 			.axis{
-				.x = move_data.magnetometer_x,
-				.y = move_data.magnetometer_y,
-				.z = move_data.magnetometer_z}};
+				.x = move_data.magnetometer.x(),
+				.y = move_data.magnetometer.y(),
+				.z = move_data.magnetometer.z()}};
 	}
 
 	// Update Fusion
@@ -973,4 +989,5 @@ void PadDevice::update_orientation(ps_move_data& move_data)
 	move_data.quaternion[1] = quaternion.array[2];
 	move_data.quaternion[2] = quaternion.array[3];
 	move_data.quaternion[3] = quaternion.array[0];
+	move_data.update_orientation(elapsed_sec);
 }

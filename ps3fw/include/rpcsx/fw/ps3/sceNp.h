@@ -32,6 +32,7 @@ using SceNpBasicMessageRecvAction = u32;
 
 using SceNpClanId = u32;
 using SceNpClansMessageId = u32;
+using SceNpClansMemberRole = u32;
 using SceNpClansMemberStatus = s32;
 
 using SceNpCustomMenuIndexMask = u32;
@@ -1264,7 +1265,7 @@ struct SceNpCommunicationId
 // OnlineId structure
 struct SceNpOnlineId
 {
-	char data[16 + 1]; // char term;
+	char data[SCE_NET_NP_ONLINEID_MAX_LENGTH + 1]; // char term;
 	char dummy[3];
 };
 
@@ -1582,6 +1583,16 @@ struct SceNpSignalingNetInfo
 	be_t<s32> upnp_status;
 	be_t<s32> npport_status;
 	be_t<u16> npport;
+};
+
+struct SceNpSignalingNetInfoDeprecated
+{
+	be_t<u32> size;
+	be_t<u32> local_addr; // in_addr
+	be_t<u32> mapped_addr; // in_addr
+	be_t<s32> nat_status;
+	be_t<s32> upnp_status;
+	be_t<s32> npport_status;
 };
 
 struct SceNpCustomMenuAction
