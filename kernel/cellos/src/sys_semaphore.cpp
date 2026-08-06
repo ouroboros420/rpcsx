@@ -73,7 +73,7 @@ error_code sys_semaphore_create(ppu_thread &ppu, vm::ptr<u32> sem_id,
 
   ppu.check_state();
 
-  *sem_id = idm::last_id();
+  *sem_id = idm::last_id<lv2_sema>();
   return CELL_OK;
 }
 

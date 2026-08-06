@@ -11,17 +11,18 @@ namespace rsx
 		{
 			std::unique_ptr<overlay_element> image;
 #ifndef ANDROID
+			const std::string audio_path; // no audio here
 			if (resource_id != image_resource_id::raw_image)
 			{
-				image = std::make_unique<video_view>(video_path, resource_id);
+				image = std::make_unique<video_view>(video_path, audio_path, resource_id);
 			}
 			else if (!icon_buf.empty())
 			{
-				image = std::make_unique<video_view>(video_path, icon_buf);
+				image = std::make_unique<video_view>(video_path, audio_path, icon_buf);
 			}
 			else
 			{
-				image = std::make_unique<video_view>(video_path, resource_config::standard_image_resource::save); // Fallback
+				image = std::make_unique<video_view>(video_path, audio_path, resource_config::standard_image_resource::save); // Fallback
 			}
 #else
 			image = std::make_unique<image_view>();

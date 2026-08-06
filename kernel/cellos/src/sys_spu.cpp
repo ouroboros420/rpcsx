@@ -161,22 +161,52 @@ void sys_spu_image::deploy(u8 *loc, std::span<const sys_spu_segment> segs,
     sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.type),
                 sizeof(seg.type));
 
+    // Prevent possible segfault
+    const u32 masked_ls = seg.ls % SPU_LS_SIZE;
+    u32 masked_size =
+        std::min<u32>(SPU_LS_SIZE - masked_ls, seg.size % SPU_LS_SIZE);
+
     // Hash big-endian values
     if (seg.type == SYS_SPU_SEGMENT_TYPE_COPY) {
-      std::memcpy(loc + seg.ls, vm::base(seg.addr), seg.size);
+      if (!vm::check_addr(seg.addr, 0, seg.size)) {
+        // Further clamp size to fit 4GB address space, preventing segfault
+        masked_size =
+            masked_size
+                ? std::min<u32>(u32{umax} - seg.addr, masked_size - 1) + 1
+                : 0;
+        spu_log.error("Dumping sys_spu_image log - illgal address:\n\n%s",
+                      dump);
+      }
+
+      if ((seg.ls | seg.size) % 4) {
+        spu_log.error("Unaligned SPU COPY type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      if (masked_ls != seg.ls || masked_size != seg.size) {
+        spu_log.error("Illegal SPU COPY type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      std::memcpy(loc + masked_ls, vm::base(seg.addr), masked_size);
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.size),
                   sizeof(seg.size));
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.ls),
                   sizeof(seg.ls));
-      sha1_update(&sha, vm::_ptr<uchar>(seg.addr), seg.size);
+      sha1_update(&sha, loc + masked_ls, masked_size);
     } else if (seg.type == SYS_SPU_SEGMENT_TYPE_FILL) {
       if ((seg.ls | seg.size) % 4) {
         spu_log.error("Unaligned SPU FILL type segment (ls=0x%x, size=0x%x)",
                       seg.ls, seg.size);
       }
 
-      std::fill_n(reinterpret_cast<be_t<u32> *>(loc + seg.ls), seg.size / 4,
-                  seg.addr);
+      if (masked_ls != seg.ls || masked_size != seg.size) {
+        spu_log.error("Illegal SPU FILL type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      std::fill_n(reinterpret_cast<be_t<u32> *>(loc + masked_ls),
+                  masked_size / 4, seg.addr);
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.size),
                   sizeof(seg.size));
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.ls),
@@ -222,15 +252,16 @@ lv2_spu_group::lv2_spu_group(utils::serial &ar) noexcept
     : name(ar.pop<std::string>()), id(idm::last_id()), max_num(ar),
       mem_size(ar), type(ar) // SPU Thread Group Type
       ,
-      ct(lv2_memory_container::search(ar)), has_scheduler_context(ar.pop<u8>()),
-      max_run(ar), init(ar), prio([&ar]() {
+      ct(lv2_memory_container::search(ar.pop<u32>())),
+      has_scheduler_context(ar.pop<u8>()), max_run(ar), init(ar.pop<u32>()),
+      prio([&ar]() {
         std::common_type_t<decltype(lv2_spu_group::prio)> prio{};
 
         ar(prio.all);
 
         return prio;
       }()),
-      run_state(ar.pop<spu_group_status>()), exit_status(ar) {
+      run_state(ar.pop<spu_group_status>()), exit_status(ar.pop<s32>()) {
   for (auto &thread : threads) {
     if (ar.pop<bool>()) {
       ar(id_manager::g_id);
@@ -774,7 +805,7 @@ error_code sys_spu_thread_initialize(ppu_thread &ppu, vm::ptr<u32> thread,
   if (auto state = +group->run_state;
       state != SPU_THREAD_GROUP_STATUS_NOT_INITIALIZED) {
     lock.unlock();
-    idm::remove<named_thread<spu_thread>>(idm::last_id());
+    ensure(idm::remove<named_thread<spu_thread>>(idm::last_id<spu_thread>()));
 
     if (state == SPU_THREAD_GROUP_STATUS_DESTROYED) {
       return CELL_ESRCH;
@@ -785,7 +816,7 @@ error_code sys_spu_thread_initialize(ppu_thread &ppu, vm::ptr<u32> thread,
 
   if (group->threads_map[spu_num] != -1) {
     lock.unlock();
-    idm::remove<named_thread<spu_thread>>(idm::last_id());
+    ensure(idm::remove<named_thread<spu_thread>>(idm::last_id<spu_thread>()));
     return CELL_EBUSY;
   }
 
@@ -1066,7 +1097,7 @@ error_code sys_spu_thread_group_create(
       group->name, idm::last_id());
 
   ppu.check_state();
-  *id = idm::last_id();
+  *id = idm::last_id<lv2_spu_group>();
   return CELL_OK;
 }
 
@@ -2373,6 +2404,10 @@ error_code sys_isolated_spu_create(ppu_thread &ppu, vm::ptr<u32> id,
 
   const auto thread =
       idm::make_ptr<named_thread<spu_thread>>(nullptr, index, "", index, true);
+
+  ensure(vm::get(vm::spu)->falloc(thread->vm_offset(), SPU_LS_SIZE,
+                                  &thread->shm, vm::page_size_64k));
+  thread->map_ls(*thread->shm, thread->ls);
 
   thread->gpr[3] = v128::from64(0, arg1);
   thread->gpr[4] = v128::from64(0, arg2);

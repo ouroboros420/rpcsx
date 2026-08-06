@@ -377,7 +377,7 @@ namespace vk
 		const auto min_scratch_size = calculate_working_buffer_size(src_length, src->aspect() | dst->aspect());
 
 		// Initialize scratch memory
-		auto scratch_buf = vk::get_scratch_buffer(cmd, min_scratch_size);
+		auto scratch_buf = vk::get_scratch_buffer(cmd, min_scratch_size, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 		for (u32 mip_level = 0; mip_level < mipmaps; ++mip_level)
 		{
@@ -604,7 +604,7 @@ namespace vk
 					const auto dst_w = dst_rect.width();
 					const auto dst_h = dst_rect.height();
 
-					auto scratch_buf = vk::get_scratch_buffer(cmd, std::max(src_w, dst_w) * std::max(src_h, dst_h) * 4);
+					auto scratch_buf = vk::get_scratch_buffer(cmd, std::max(src_w, dst_w) * std::max(src_h, dst_h) * 4, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 					// 1. Copy unscaled to typeless surface
 					VkBufferImageCopy info{};
@@ -760,21 +760,31 @@ namespace vk
 			dst->pop_layout(cmd);
 	}
 
-	template <typename WordType, bool SwapBytes>
-	cs_deswizzle_base* get_deswizzle_transformation(u32 block_size)
+	template <typename BaseType, typename BlockType>
+	cs_deswizzle_base* get_deswizzle_transformation_swapped(bool swap_bytes)
+	{
+		if (swap_bytes) [[ likely ]]
+		{
+			return vk::get_compute_task<cs_deswizzle_3d<BaseType, BlockType, true>>();
+		}
+
+		return vk::get_compute_task<cs_deswizzle_3d<BaseType, BlockType, false>>();
+	}
+
+	template <typename WordType>
+	cs_deswizzle_base* get_deswizzle_transformation(u32 block_size, bool swap_bytes)
 	{
 		switch (block_size)
 		{
 		case 1:
-			return vk::get_compute_task<cs_deswizzle_3d<u8, u8, false>>();
+			return get_deswizzle_transformation_swapped<u8, u8>(swap_bytes);
 		case 2:
-			return vk::get_compute_task<cs_deswizzle_3d<u16, WordType, SwapBytes>>();
+			return get_deswizzle_transformation_swapped<u16, WordType>(swap_bytes);
 		case 4:
-			return vk::get_compute_task<cs_deswizzle_3d<u32, WordType, SwapBytes>>();
 		case 8:
-			return vk::get_compute_task<cs_deswizzle_3d<u64, WordType, SwapBytes>>();
 		case 16:
-			return vk::get_compute_task<cs_deswizzle_3d<u128, WordType, SwapBytes>>();
+			// Maximum block size on RSX is 4 bytes. Wider blocks are stored as multiple texels.
+			return get_deswizzle_transformation_swapped<u32, WordType>(swap_bytes);
 		default:
 			fmt::throw_exception("Unreachable");
 		}
@@ -784,38 +794,23 @@ namespace vk
 	{
 		// NOTE: This has to be done individually for every LOD
 		vk::cs_deswizzle_base* job = nullptr;
-		const auto block_size = (word_size * word_count);
+		const u32 block_size = (word_size * word_count);
+		const u32 scale_x = std::max(block_size / 4u, 1u); // Virtual width multiplier. RSX only does texel sizes upto 32 bits.
 
-		if (!swap_bytes)
-		{
 			switch (word_size)
 			{
 			case 1:
-				job = get_deswizzle_transformation<u8, false>(block_size);
+			job = get_deswizzle_transformation<u8>(block_size, swap_bytes);
 				break;
 			case 2:
-				job = get_deswizzle_transformation<u16, false>(block_size);
+			job = get_deswizzle_transformation<u16>(block_size, swap_bytes);
 				break;
 			case 4:
-				job = get_deswizzle_transformation<u32, false>(block_size);
+			job = get_deswizzle_transformation<u32>(block_size, swap_bytes);
 				break;
 			default:
 				fmt::throw_exception("Unimplemented deswizzle for format.");
 			}
-		}
-		else
-		{
-			ensure(word_size == 2 || word_size == 4);
-
-			if (word_size == 4)
-			{
-				job = get_deswizzle_transformation<u32, true>(block_size);
-			}
-			else
-			{
-				job = get_deswizzle_transformation<u16, true>(block_size);
-			}
-		}
 
 		ensure(job);
 
@@ -874,7 +869,7 @@ namespace vk
 			const u32 src_off32 = static_cast<u32>(src_offset);
 
 			job->run(cmd, scratch_buf, buf_off32, scratch_buf, src_off32, data_length,
-				section.imageExtent.width, section.imageExtent.height, section.imageExtent.depth, packet.second);
+				section.imageExtent.width * scale_x, section.imageExtent.height, section.imageExtent.depth, packet.second);
 		}
 
 		ensure(dst_offset <= scratch_buf->size());
@@ -994,7 +989,7 @@ namespace vk
 		auto pdev = vk::get_current_renderer();
 		rsx::texture_uploader_capabilities caps{.supports_dxt = pdev->get_texture_compression_bc_support(), .alignment = heap_align};
 		rsx::texture_memory_info opt{};
-		bool check_caps = true;
+		bool check_hw_caps = !(image_setup_flags & source_is_userptr);
 
 		vk::buffer* scratch_buf = nullptr;
 		u32 scratch_offset = 0;
@@ -1019,13 +1014,13 @@ namespace vk
 			image_linear_size = row_pitch * layout.depth * (rsx::is_compressed_host_format(caps, format) ? layout.height_in_block : layout.height_in_texel);
 
 			// Only do GPU-side conversion if occupancy is good
-			if (check_caps)
+			if (check_hw_caps)
 			{
 				caps.supports_byteswap = (image_linear_size >= 1024) || (image_setup_flags & source_is_gpu_resident);
 				caps.supports_hw_deswizzle = caps.supports_byteswap;
 				caps.supports_zero_copy = caps.supports_byteswap;
 				caps.supports_vtc_decoding = false;
-				check_caps = false;
+				check_hw_caps = false;
 			}
 
 			auto buf_allocator = [&](usz) -> std::tuple<void*, usz>
@@ -1128,7 +1123,7 @@ namespace vk
 						scratch_buf_size += (image_linear_size * 5) / 4;
 					}
 
-					scratch_buf = vk::get_scratch_buffer(cmd2, scratch_buf_size);
+					scratch_buf = vk::get_scratch_buffer(cmd2, scratch_buf_size, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 					buffer_copies.reserve(subresource_layout.size());
 				}
 
@@ -1187,13 +1182,6 @@ namespace vk
 		{
 			ensure(scratch_buf);
 
-			// WAW hazard - complete previous work before executing any transfers
-			insert_buffer_memory_barrier(
-				cmd2, scratch_buf->value, 0, scratch_offset,
-				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-				VK_ACCESS_TRANSFER_WRITE_BIT);
-
 			if (upload_commands.size() > 1)
 			{
 				auto range_ptr = buffer_copies.data();
@@ -1203,8 +1191,9 @@ namespace vk
 					range_ptr += op.second;
 				}
 			}
-			else if (!buffer_copies.empty())
+			else
 			{
+				ensure(!buffer_copies.empty());
 				VK_GET_SYMBOL(vkCmdCopyBuffer)(cmd2, upload_buffer->value, scratch_buf->value, static_cast<u32>(buffer_copies.size()), buffer_copies.data());
 			}
 
@@ -1283,7 +1272,10 @@ namespace vk
 		vk::load_dma(range.start, section_length);
 
 		// Allocate scratch and prepare for the GPU job
-		const auto scratch_buf = vk::get_scratch_buffer(cmd, section_length * 3); // 0 = linear data, 1 = padding (deswz), 2 = tiled data
+		const auto scratch_buf = vk::get_scratch_buffer(cmd, section_length * 3,       // 0 = linear data, 1 = padding (deswz), 2 = tiled data
+			VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
 		const auto tiled_data_scratch_offset = section_length * 2;
 		const auto linear_data_scratch_offset = 0u;
 
@@ -1314,16 +1306,16 @@ namespace vk
 			.size = section_length};
 		VK_GET_SYMBOL(vkCmdCopyBuffer)(cmd, dma_mapping.second->value, scratch_buf->value, 1, &copy_rgn);
 
-		// Barrier
+		// Post-Transfer barrier
 		vk::insert_buffer_memory_barrier(
-			cmd, scratch_buf->value, linear_data_scratch_offset, section_length,
+			cmd, scratch_buf->value, tiled_data_scratch_offset, section_length,
 			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
 		// Detile
 		vk::get_compute_task<vk::cs_tile_memcpy<RSX_detiler_op::decode>>()->run(cmd, config);
 
-		// Barrier
+		// Post-Compute barrier
 		vk::insert_buffer_memory_barrier(
 			cmd, scratch_buf->value, linear_data_scratch_offset, static_cast<u32>(width) * height * bpp,
 			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

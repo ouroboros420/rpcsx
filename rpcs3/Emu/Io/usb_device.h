@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cellos/sys_usbd.h"
+
 #ifdef _MSC_VER
 #pragma warning(push, 0)
 #else
@@ -14,8 +16,6 @@
 #else
 #pragma GCC diagnostic pop
 #endif
-
-#include "cellos/sys_usbd.h"
 
 struct UsbTransfer;
 
@@ -239,6 +239,9 @@ public:
 	virtual void isochronous_transfer(UsbTransfer* transfer) = 0;
 
 public:
+	// Look up an endpoint descriptor by address in the descriptor tree
+	const UsbDeviceEndpoint* find_endpoint(u8 endpoint_addr) const;
+
 	// device ID if the device has been ldded(0 otherwise)
 	u32 assigned_number = 0;
 	// base device descriptor, every other descriptor is a subnode

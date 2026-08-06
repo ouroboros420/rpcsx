@@ -85,7 +85,7 @@ if(WIN32)
         Audio/XAudio2/xaudio2_enumerator.cpp
     )
     target_compile_definitions(rpcs3_emu PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00)
-    target_link_libraries(rpcs3_emu PRIVATE pdh bcrypt)
+    target_link_libraries(rpcs3_emu PRIVATE pdh bcrypt dbghelp)
 endif()
 
 # Cell
@@ -139,6 +139,7 @@ target_sources(rpcs3_emu PRIVATE
     Io/Dimensions.cpp
     Io/evdev_gun_handler.cpp
     Io/GameTablet.cpp
+    Io/gem_config.cpp
     Io/GHLtar.cpp
     Io/GunCon3.cpp
     Io/Infinity.cpp
@@ -227,6 +228,7 @@ target_sources(rpcs3_emu PRIVATE
     RSX/NV47/HW/nv406e.cpp
     RSX/NV47/HW/nv4097.cpp
     RSX/Overlays/FriendsList/overlay_friends_list_dialog.cpp
+    RSX/Overlays/HomeMenu/overlay_home_icons.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu_components.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu_main_menu.cpp
@@ -240,6 +242,8 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Overlays/overlays.cpp
     RSX/Overlays/overlay_animated_icon.cpp
     RSX/Overlays/overlay_animation.cpp
+    RSX/Overlays/overlay_audio.cpp
+    RSX/Overlays/overlay_checkbox.cpp
     RSX/Overlays/overlay_compile_notification.cpp
     RSX/Overlays/overlay_controls.cpp
     RSX/Overlays/overlay_cursor.cpp
@@ -256,6 +260,9 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Overlays/overlay_perf_metrics.cpp
     RSX/Overlays/overlay_progress_bar.cpp
     RSX/Overlays/overlay_save_dialog.cpp
+    RSX/Overlays/overlay_select.cpp
+    RSX/Overlays/overlay_slider.cpp
+    RSX/Overlays/overlay_tabs.cpp
     RSX/Overlays/overlay_trophy_notification.cpp
     RSX/Overlays/overlay_user_list_dialog.cpp
     RSX/Overlays/overlay_utils.cpp
@@ -273,6 +280,7 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Program/GLSLCommon.cpp
     RSX/Program/ProgramStateCache.cpp
     RSX/Program/program_util.cpp
+    RSX/Program/ShaderInterpreter.cpp
     RSX/Program/SPIRVCommon.cpp
     RSX/Program/VertexProgramDecompiler.cpp
     RSX/GSFrameBase.cpp
@@ -378,6 +386,9 @@ if(TARGET 3rdparty_vulkan)
     endif()
 endif()
 
+if(NOT WIN32)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+endif()
 find_package(Threads REQUIRED)
 
 target_link_libraries(rpcs3_emu

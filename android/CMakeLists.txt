@@ -119,7 +119,14 @@ set(USE_DISCORD_RPC off)
 set(USE_SYSTEM_OPENCV off)
 set(USE_SYSTEM_FFMPEG off)
 set(USE_FAUDIO off)
+# USE_SDL2 is a stale name nothing reads any more - the option is USE_SDL, and
+# v0.0.41 flipped its upstream default OFF->ON. The root CMakeLists only forces
+# it off inside `if(NOT WITH_PS3)`, which Android never enters (WITH_PS3 is on
+# above), so without this the Android build starts compiling SDL3 and enabling
+# Input/sdl_pad_handler.cpp - code that has always been dead here.
 set(USE_SDL2 off)
+set(USE_SDL off)
+set(USE_SYSTEM_SDL off)
 set(BUILD_LLVM on)
 set(STATIC_LINK_LLVM on)
 set(DISABLE_LTO off)

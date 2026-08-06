@@ -135,8 +135,10 @@ private:
 	vk::data_heap m_raster_env_ring_info;              // Raster control such as polygon and line stipple
 	vk::data_heap m_instancing_buffer_ring_info;       // Instanced rendering data (constants indirection table + instanced constants)
 
-	vk::data_heap m_fragment_instructions_buffer;
-	vk::data_heap m_vertex_instructions_buffer;
+	vk::data_heap m_fragment_instructions_buffer;             // Interpreter FP block
+	vk::data_heap m_vertex_instructions_buffer;               // Interpreter VP block
+
+	rsx::simple_array<vk::data_heap*> m_flushable_data_heaps; // List of heaps that can be 'dirty' and need manual flush
 
 	VkDescriptorBufferInfoEx m_vertex_env_buffer_info {};
 	VkDescriptorBufferInfoEx m_fragment_env_buffer_info {};
@@ -159,6 +161,10 @@ private:
 	u64 m_fragment_env_dynamic_offset = 0;
 	u64 m_texture_parameters_dynamic_offset = 0;
 	u64 m_stipple_array_dynamic_offset = 0;
+
+	std::unique_ptr<rsx::data_heap::bulk_allocator<256, 96>> m_vertex_env_allocator;
+	std::unique_ptr<rsx::data_heap::bulk_allocator<256, 16>> m_transform_constants_allocator;
+	std::unique_ptr<rsx::data_heap::bulk_allocator<256, 16>> m_fragment_constants_allocator;
 
 	std::vector<vk::frame_context_t> m_frame_context_storage;
 	u32 m_max_async_frames = 0u;

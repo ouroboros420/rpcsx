@@ -39,6 +39,17 @@ static std::unique_ptr<wchar_t[]> to_wchar(std::string_view source)
 	// Buffer for max possible output length
 	std::unique_ptr<wchar_t[]> buffer(new wchar_t[buf_size + 8 + 32768]);
 
+	// If path points to an optical raw device, copy it AS IS
+	if (fs::is_optical_raw_device(std::string(source)))
+	{
+		ensure(MultiByteToWideChar(CP_UTF8, 0, source.data(), size, buffer.get() + 32768, size)); // "to_wchar"
+
+		// Canonicalize wide path (replace '/', ".", "..", \\ repetitions, etc)
+		ensure(GetFullPathNameW(buffer.get() + 32768, 32768, buffer.get(), nullptr) - 1 < 32768 - 1); // "to_wchar"
+
+		return buffer;
+	}
+
 	// Prepend wide path prefix (4 characters)
 	std::memcpy(buffer.get() + 32768, L"\\\\\?\\", 4 * sizeof(wchar_t));
 
@@ -167,6 +178,7 @@ static fs::error to_error(int e)
 	case ENOTEMPTY: return fs::error::notempty;
 	case EROFS: return fs::error::readonly;
 	case EISDIR: return fs::error::isdir;
+	case ENOTDIR: return fs::error::notdir;
 	case ENOSPC: return fs::error::nospace;
 	case EXDEV: return fs::error::xdev;
 	default: return fs::error::unknown;
@@ -400,11 +412,12 @@ namespace fs
 	class windows_file final : public file_base
 	{
 		HANDLE m_handle;
+		bool m_raw_device;
 		atomic_t<u64> m_pos {0};
 
 	public:
-		windows_file(HANDLE handle)
-			: m_handle(handle)
+		windows_file(HANDLE handle, bool raw_device = false)
+			: m_handle(handle), m_raw_device(raw_device)
 		{
 		}
 
@@ -593,11 +606,20 @@ namespace fs
 
 		u64 size() override
 		{
+			if (!m_raw_device)
+			{
 			// NOTE: this can fail if we access a mounted empty drive (e.g. after unmounting an iso).
 			LARGE_INTEGER size;
-			ensure(GetFileSizeEx(m_handle, &size)); // "file::size"
 
+				ensure(GetFileSizeEx(m_handle, &size)); // "file::size"
 			return size.QuadPart;
+		}
+
+			// For a raw device, we need to use DeviceIoControl.
+			DISK_GEOMETRY_EX geometry;
+
+			ensure(DeviceIoControl(m_handle, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, &geometry, sizeof(geometry), nullptr, nullptr));
+			return geometry.DiskSize.QuadPart;
 		}
 
 		native_handle get_handle() override
@@ -1145,6 +1167,55 @@ bool fs::is_symlink(const std::string& path)
 	}
 
 	return true;
+}
+
+bool fs::is_optical_raw_device([[maybe_unused]] const std::string& path)
+{
+#ifdef _WIN32
+	if (path.starts_with("\\\\.\\"))
+	{
+		return true;
+	}
+#endif
+	return false;
+}
+
+bool fs::get_optical_raw_device(const std::string& path, std::string* raw_device)
+{
+	if (fs::is_optical_raw_device(path))
+	{
+		if (raw_device)
+		{
+			*raw_device = path;
+		}
+
+		return true;
+	}
+
+#ifdef _WIN32
+	// Skip a useless check to detect an optical raw device if navigating on subfolders (e.g. C:\subfolder_1\subfolder_2\),
+	// it means we are on a HDD/SSD. A path for an optical drive should include only the drive letter (e.g. E:\)
+	const size_t drive_delim_pos = path.find_first_of(":");
+
+	if (drive_delim_pos != 1 || drive_delim_pos != path.find_last_not_of(delim))
+	{
+		return false;
+	}
+
+	const std::string drive_letter = path.substr(0, drive_delim_pos + 1); // e.g. "E:"
+	const std::string drive_path = drive_letter + "\\"; // e.g. "E:\"
+
+	if (GetDriveTypeA(drive_path.c_str()) == DRIVE_CDROM)
+	{
+		if (raw_device)
+		{
+			*raw_device = "\\\\.\\" + drive_letter;
+		}
+
+		return true;
+	}
+#endif
+	return false;
 }
 
 bool fs::statfs(const std::string& path, fs::device_stat& info)
@@ -1719,9 +1790,29 @@ fs::file::file(const std::string& path, rx::EnumBitSet<open_mode> mode)
 		return;
 	}
 
+	// If path points to an optical raw device, complete the file opening
+	// (the following GetFileInformationByHandle() would always fail on a raw device).
+	if (is_optical_raw_device(path))
+	{
+		DISK_GEOMETRY_EX geometry;
+
+		// Try to retrieve information on content. If it fails, no disc is probably mounted so abort the file opening
+		if (!DeviceIoControl(handle, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, &geometry, sizeof(geometry), nullptr, nullptr))
+		{
+			const DWORD last_error = GetLastError();
+			CloseHandle(handle);
+			g_tls_error = to_error(last_error);
+			return;
+		}
+
+		m_file = std::make_unique<windows_file>(handle, true);
+		return;
+	}
+
 	// Check if the handle is actually valid.
 	// This can fail on empty mounted drives (e.g. with ERROR_NOT_READY or ERROR_INVALID_FUNCTION).
 	BY_HANDLE_FILE_INFORMATION info{};
+
 	if (!GetFileInformationByHandle(handle, &info))
 	{
 		const DWORD last_error = GetLastError();
@@ -2898,6 +2989,7 @@ void fmt_class_string<fs::error>::format(std::string& out, u64 arg)
 			case fs::error::notempty: return "Not empty";
 			case fs::error::readonly: return "Read only";
 			case fs::error::isdir: return "Is a directory";
+		case fs::error::notdir: return "Not a directory";
 			case fs::error::toolong: return "Path too long";
 			case fs::error::nospace: return "Not enough space on the device";
 			case fs::error::xdev: return "Device mismatch";

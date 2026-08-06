@@ -180,7 +180,7 @@ void ds3_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, DS3KeyCodes::RSYPos);
 	cfg->start.def = ::at32(button_list, DS3KeyCodes::Start);
 	cfg->select.def = ::at32(button_list, DS3KeyCodes::Select);
-	cfg->ps.def = ::at32(button_list, DS3KeyCodes::PSButton);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{DS3KeyCodes::PSButton}, {DS3KeyCodes::Start, DS3KeyCodes::Select}});
 	cfg->square.def = ::at32(button_list, DS3KeyCodes::Square);
 	cfg->cross.def = ::at32(button_list, DS3KeyCodes::Cross);
 	cfg->circle.def = ::at32(button_list, DS3KeyCodes::Circle);
@@ -348,9 +348,9 @@ ds3_pad_handler::DataStatus ds3_pad_handler::get_data(ds3_device* ds3dev)
 	return DataStatus::NoNewData;
 }
 
-std::unordered_map<u64, u16> ds3_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> ds3_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	std::unordered_map<u64, u16> key_buf;
+	std::unordered_map<u32, u16> key_buf;
 	ds3_device* dev = static_cast<ds3_device*>(device.get());
 	if (!dev)
 		return key_buf;
@@ -397,7 +397,7 @@ std::unordered_map<u64, u16> ds3_pad_handler::get_button_values(const std::share
 	return key_buf;
 }
 
-pad_preview_values ds3_pad_handler::get_preview_values(const std::unordered_map<u64, u16>& data)
+pad_preview_values ds3_pad_handler::get_preview_values(const std::unordered_map<u32, u16>& data, const std::vector<std::string>& /*buttons*/)
 {
 	return {
 		::at32(data, L2),
@@ -459,17 +459,17 @@ void ds3_pad_handler::get_extended_info(const pad_ensemble& binding)
 	set_raw_orientation(*pad);
 }
 
-bool ds3_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == DS3KeyCodes::L2;
 }
 
-bool ds3_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == DS3KeyCodes::R2;
 }
 
-bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -483,7 +483,7 @@ bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*devi
 	}
 }
 
-bool ds3_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{

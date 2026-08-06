@@ -226,7 +226,7 @@ void GLGSRender::update_draw_state()
 	case rsx::primitive_type::lines:
 	case rsx::primitive_type::line_loop:
 	case rsx::primitive_type::line_strip:
-		gl_state.line_width(rsx::method_registers.line_width() * rsx::get_resolution_scale());
+		gl_state.line_width(rsx::method_registers.line_width() * resolution_scaling_config.scale_factor());
 		gl_state.enable(rsx::method_registers.line_smooth_enabled(), GL_LINE_SMOOTH);
 		break;
 	default:
@@ -383,7 +383,21 @@ void GLGSRender::load_texture_env()
 			}
 		}
 
-		m_fs_sampler_states[i].apply(tex, fs_sampler_state[i].get());
+		u32 actual_mipcount = 1;
+		if (sampler_state->upload_context == rsx::texture_upload_context::shader_read)
+		{
+			actual_mipcount = tex.get_exact_mipmap_count();
+		}
+		else if (sampler_state->external_subresource_desc.op == rsx::deferred_request_command::mipmap_gather)
+		{
+			actual_mipcount = sampler_state->external_subresource_desc.sections_to_copy.size();
+		}
+		else if (sampler_state->external_subresource_desc.op == rsx::deferred_request_command::cubemap_unwrap)
+		{
+			actual_mipcount = sampler_state->external_subresource_desc.mipmaps;
+		}
+
+		m_fs_sampler_states[i].apply(tex, fs_sampler_state[i].get(), actual_mipcount > 1);
 
 		const auto texture_format = sampler_state->format_ex.format();
 		// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
@@ -527,6 +541,102 @@ void GLGSRender::bind_texture_env()
 		{
 			cmd->bind_texture(GL_VERTEX_TEXTURES_START + i, GL_TEXTURE_2D, GL_NONE);
 		}
+	}
+
+	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
+	{
+		ensure(m_rtts.m_bound_depth_stencil.first, "Invalid FBO setup");
+		gl::insert_texture_barrier();
+
+		auto view = m_rtts.m_bound_depth_stencil.second->get_view(rsx::default_remap_vector, gl::image_aspect::depth);
+		view->bind(cmd, GL_TEMP_IMAGE_SLOT(0));
+	}
+}
+
+void GLGSRender::bind_interpreter_texture_env()
+{
+	// Bind textures and resolve external copy operations
+	gl::command_context cmd{ gl_state };
+	const bool is_interpreter = m_shader_interpreter.is_interpreter(m_program);
+
+	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	{
+		if (!(textures_ref & 1))
+		{
+			continue;
+		}
+
+		gl::texture_view* primary_view = nullptr;
+		gl::texture_view* stencil_mirror = nullptr;
+		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
+
+		if (rsx::method_registers.fragment_textures[i].enabled() &&
+			sampler_state->validate())
+		{
+			if (primary_view = sampler_state->image_handle; !primary_view) [[unlikely]]
+			{
+				primary_view = m_gl_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc);
+			}
+		}
+
+		if (!primary_view)
+		{
+			const auto target = gl::get_target(current_fragment_program.get_texture_dimension(i));
+			primary_view = m_null_textures[target]->get_view(rsx::default_remap_vector);
+			stencil_mirror = primary_view;
+		}
+		else if (current_fragment_program.texture_state.redirected_textures & (1 << i))
+		{
+			auto root_texture = static_cast<gl::viewable_image*>(primary_view->image());
+			stencil_mirror = root_texture->get_view(rsx::default_remap_vector.with_encoding(gl::GL_REMAP_IDENTITY), gl::image_aspect::stencil);
+		}
+
+		if (is_interpreter) [[ unlikely ]]
+		{
+			m_shader_interpreter.bind_fragment_texture(i, primary_view->handle(), *sampler_state);
+			continue;
+		}
+
+		primary_view->bind(cmd, GL_FRAGMENT_TEXTURES_START + i);
+
+		if (stencil_mirror)
+		{
+			stencil_mirror->bind(cmd, GL_STENCIL_MIRRORS_START + i);
+		}
+	}
+
+	for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	{
+		if (!(textures_ref & 1))
+		{
+			continue;
+		}
+
+		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
+		gl::texture_view* view = nullptr;
+
+		if (rsx::method_registers.vertex_textures[i].enabled() &&
+			sampler_state->validate())
+		{
+			if (view = sampler_state->image_handle; !view)
+			{
+				view = m_gl_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc);
+			}
+		}
+
+		if (view) [[likely]]
+		{
+			view->bind(cmd, GL_VERTEX_TEXTURES_START + i);
+		}
+		else
+		{
+			cmd->bind_texture(GL_VERTEX_TEXTURES_START + i, GL_TEXTURE_2D, GL_NONE);
+		}
+	}
+
+	if (is_interpreter)
+	{
+		m_shader_interpreter.flush_texture_bindings();
 	}
 }
 

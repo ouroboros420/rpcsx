@@ -88,6 +88,22 @@ void fmt_class_string<msaa_level>::format(std::string& out, u64 arg)
 }
 
 template <>
+void fmt_class_string<framebuffer_aliasing_bias>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](framebuffer_aliasing_bias value)
+	{
+		switch (value)
+		{
+		case framebuffer_aliasing_bias::_auto: return "Auto";
+		case framebuffer_aliasing_bias::prefer_color: return "Prefer Color";
+		case framebuffer_aliasing_bias::prefer_depth: return "Prefer Depth";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
 void fmt_class_string<keyboard_handler>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](keyboard_handler value)
@@ -523,9 +539,9 @@ void fmt_class_string<shader_mode>::format(std::string& out, u64 arg)
 		{
 			switch (value)
 			{
-			case shader_mode::recompiler: return "Shader Recompiler";
-			case shader_mode::async_recompiler: return "Async Shader Recompiler";
-			case shader_mode::async_with_interpreter: return "Async with Shader Interpreter";
+		case shader_mode::recompiler: return "Legacy Recompiler (single-threaded)";
+		case shader_mode::async_recompiler: return "Async Recompiler (multi-threaded)";
+		case shader_mode::async_with_interpreter: return "Async Recompiler with Shader Interpreter";
 			case shader_mode::interpreter_only: return "Shader Interpreter only";
 			}
 
@@ -666,6 +682,7 @@ void fmt_class_string<stereo_render_mode_options>::format(std::string& out, u64 
 			case stereo_render_mode_options::anaglyph_magenta_cyan: return "Anaglyph Magenta-Cyan";
 			case stereo_render_mode_options::anaglyph_trioscopic: return "Anaglyph Trioscopic";
 			case stereo_render_mode_options::anaglyph_amber_blue: return "Anaglyph Amber-Blue";
+			case stereo_render_mode_options::anaglyph_custom: return "Anaglyph Custom";
 			}
 
 			return unknown;
@@ -730,6 +747,22 @@ void fmt_class_string<time_format>::format(std::string& out, u64 arg)
 		{
 		case time_format::clock12: return "clock12";
 		case time_format::clock24: return "clock24";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vsync_mode>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vsync_mode value)
+	{
+		switch (value)
+		{
+		case vsync_mode::off: return "Disabled";
+		case vsync_mode::adaptive: return "Adaptive";
+		case vsync_mode::full: return "Full";
 		}
 
 		return unknown;

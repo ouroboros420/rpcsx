@@ -91,6 +91,7 @@ add_library(rpcs3_core STATIC
     util/sema.cpp
     util/simple_ringbuf.cpp
     util/stack_trace.cpp
+    util/stereo_config.cpp
     util/StrFmt.cpp
     util/Thread.cpp
     util/version.cpp
@@ -152,6 +153,8 @@ add_library(rpcs3 STATIC
     Loader/PUP.cpp
     Loader/TAR.cpp
     Loader/ISO.cpp
+    Loader/iso_cache.cpp
+    Loader/iso_validation.cpp
     Loader/TROPUSR.cpp
     Loader/TRP.cpp
 

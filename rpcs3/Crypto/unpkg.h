@@ -127,7 +127,7 @@ struct PKGEntry
 struct PKGMetaData
 {
 private:
-	static std::string to_hex_string(u8 buf[], usz size)
+	static std::string to_hex_string(const u8* buf, usz size)
 	{
 		std::stringstream sstream;
 		for (usz i = 0; i < size; i++)
@@ -136,7 +136,7 @@ private:
 		}
 		return sstream.str();
 	}
-	static std::string to_hex_string(u8 buf[], usz size, usz dotpos)
+	static std::string to_hex_string(const u8* buf, usz size, usz dotpos)
 	{
 		std::string result = to_hex_string(buf, size);
 		if (result.size() > dotpos)

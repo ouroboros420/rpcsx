@@ -231,11 +231,15 @@ public:
 
   lv2_fs_object &operator=(const lv2_fs_object &) = delete;
 
-  // Normalize a virtual path
-  static std::string get_normalized_path(std::string_view path);
+  // Get the device's root path (e.g. "/dev_hdd0") from a given path
+  // Cut the trail and return it in seccond argument
+  static std::pair<std::string_view, std::string>
+  get_path_root_and_trail(std::string_view path);
 
   // Get the device's root path (e.g. "/dev_hdd0") from a given path
-  static std::string get_device_root(std::string_view filename);
+  static std::string get_device_root(std::string_view filename) {
+    return std::string{get_path_root_and_trail(filename).first};
+  }
 
   // Filename can be either a path starting with '/' or a CELL_FS device name
   // This should be used only when handling devices that are not mounted
@@ -309,7 +313,7 @@ struct lv2_file final : lv2_fs_object {
 
   // Open a file with wrapped logic of sys_fs_open
   static open_raw_result_t
-  open_raw(const std::string &path, s32 flags, s32 mode,
+  open_raw(const std::string &path, s32 flags, bool has_write_access,
            lv2_file_type type = lv2_file_type::regular,
            const lv2_fs_mount_info &mp = g_mi_sys_not_found);
   static open_result_t open(std::string_view vpath, s32 flags, s32 mode,

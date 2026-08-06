@@ -260,8 +260,8 @@ namespace np
 		ticket get_clan_ticket() const;
 		void add_player_to_history(const SceNpId* npid, const char* description);
 		u32 add_players_to_history(const SceNpId* npids, const char* description, u32 count);
-		u32 get_players_history_count(u32 options);
-		bool get_player_history_entry(u32 options, u32 index, SceNpId* npid);
+		u32 get_players_history_count(u32 options) const;
+		bool get_player_history_entry(u32 options, u32 index, SceNpId* npid) const;
 		SceNpMatching2MemoryInfo get_memory_info() const;
 		error_code abort_request(u32 req_id);
 
@@ -419,7 +419,7 @@ namespace np
 
 		// IP & DNS info
 		std::string hostname = "localhost";
-		std::array<u8, 6> ether_address{};
+		std::array<u8, 6> ether_address{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 		be_t<u32> local_ip_addr{};
 		be_t<u32> public_ip_addr{};
 		be_t<u32> dns_ip = 0x08080808;
@@ -517,7 +517,7 @@ namespace np
 		player_history& get_player_and_set_timestamp(const SceNpId& npid, u64 timestamp);
 		void save_players_history();
 
-		shared_mutex mutex_history;
+		mutable shared_mutex mutex_history;
 		std::map<std::string, player_history> players_history; // npid / history
 
 		struct

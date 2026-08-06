@@ -78,7 +78,7 @@ error_code sys_event_flag_create(ppu_thread &ppu, vm::ptr<u32> id,
   }
 
   ppu.check_state();
-  *id = idm::last_id();
+  *id = idm::last_id<lv2_event_flag>();
   return CELL_OK;
 }
 

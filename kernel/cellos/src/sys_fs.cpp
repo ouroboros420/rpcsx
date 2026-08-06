@@ -15,7 +15,6 @@
 #include "Emu/vfs_config.h"
 #include "cellos/sys_process.h"
 
-#include <filesystem>
 #include <shared_mutex>
 #include <span>
 
@@ -100,16 +99,25 @@ template <> void fmt_class_string<lv2_dir>::format(std::string &out, u64 arg) {
 
 bool has_fs_write_rights(std::string_view vpath) {
   // VSH has access to everything
-  if (g_ps3_process_info.has_root_perm())
-    return true;
+  const bool has_root_perm = g_ps3_process_info.has_root_perm();
 
-  const auto norm_vpath = lv2_fs_object::get_normalized_path(vpath);
-  const auto parent_dir = fs::get_parent_dir_view(norm_vpath);
+  const auto parent_dir = fs::get_parent_dir_view(vpath);
+  const auto [dev_root, trail] =
+      lv2_fs_object::get_path_root_and_trail(parent_dir);
 
   // This is not exhaustive, PS3 has a unix filesystem with rights for each
   // directory and files This is mostly meant to protect against games doing
-  // insane things(ie NPUB30003 => NPUB30008)
-  if (parent_dir == "/dev_hdd0" || parent_dir == "/dev_hdd0/game")
+  // insane things (ie NPUB30003 => NPUB30008)
+  if (dev_root == "dev_hdd0"sv && (trail.empty() || trail == "game"sv))
+    return has_root_perm;
+
+  // This is read-only for games
+  if (dev_root.starts_with("dev_flash"sv))
+    return has_root_perm;
+
+  // Technically should not reach here, but handle it anyways
+  if (dev_root == "dev_bdvd"sv || dev_root == "dev_ps2disc"sv ||
+      dev_root.empty())
     return false;
 
   return true;
@@ -141,6 +149,28 @@ bool verify_mself(const fs::file &mself_file) {
   mself_file.seek(0);
 
   return true;
+}
+
+// TODO: May not be thread-safe (or even, process-safe)
+bool has_non_directory_components(std::string_view path) {
+  std::string path0{path};
+
+  while (true) {
+    const std::string sub_path = fs::get_parent_dir(path0);
+
+    if (sub_path.size() >= path0.size()) {
+      break;
+    }
+
+    fs::stat_t stat{};
+    if (fs::get_stat(sub_path, stat)) {
+      return !stat.is_directory;
+    }
+
+    path0 = std::move(sub_path);
+  }
+
+  return false;
 }
 
 lv2_fs_mount_info_map::lv2_fs_mount_info_map() {
@@ -180,30 +210,29 @@ bool lv2_fs_mount_info_map::remove(std::string_view path) {
 const lv2_fs_mount_info &
 lv2_fs_mount_info_map::lookup(std::string_view path, bool no_cell_fs_path,
                               std::string *mount_path) const {
-  if (path.starts_with("/"sv)) {
-    constexpr std::string_view cell_fs_path = "CELL_FS_PATH:"sv;
-    const std::string normalized_path =
-        lv2_fs_object::get_normalized_path(path);
-    std::string_view parent_dir;
-    u32 parent_level = 0;
+  const auto [dev_root, trail] = lv2_fs_object::get_path_root_and_trail(path);
 
-    do {
-      parent_dir = fs::get_parent_dir_view(normalized_path, parent_level++);
-      if (const auto iterator = map.find(parent_dir); iterator != map.end()) {
-        if (iterator->second == &g_mp_sys_dev_root && parent_level > 1)
-          break;
-        if (no_cell_fs_path &&
-            iterator->second.device.starts_with(cell_fs_path))
-          return lookup(
-              iterator->second.device.substr(cell_fs_path.size()),
-              no_cell_fs_path,
-              mount_path); // Recursively look up the parent mount info
-        if (mount_path)
-          *mount_path = iterator->first;
-        return iterator->second;
-      }
-    } while (parent_dir.length() >
-             1); // Exit the loop when parent_dir == "/" or empty
+  if (dev_root.empty()) {
+    if (trail.empty()) {
+      return map.find("/")->second;
+    }
+
+    return g_mi_sys_not_found;
+  }
+
+  if (const auto iterator = map.find("/" + std::string{dev_root});
+      iterator != map.end()) {
+    constexpr std::string_view cell_fs_path = "CELL_FS_PATH:"sv;
+
+    if (no_cell_fs_path && iterator->second.device.starts_with(cell_fs_path))
+      return lookup(iterator->second.device.substr(cell_fs_path.size()),
+                    no_cell_fs_path,
+                    mount_path); // Recursively look up the parent mount info
+
+    if (mount_path)
+      *mount_path = iterator->first;
+
+    return iterator->second;
   }
 
   return g_mi_sys_not_found;
@@ -262,35 +291,75 @@ bool lv2_fs_mount_info_map::vfs_unmount(std::string_view vpath,
   return result;
 }
 
-std::string lv2_fs_object::get_normalized_path(std::string_view path) {
-  std::string normalized_path =
-      std::filesystem::path(path).lexically_normal().string();
-
-#ifdef _WIN32
-  std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
-#endif
-
-  if (normalized_path.ends_with('/'))
-    normalized_path.pop_back();
-
-  return normalized_path.empty() ? "/" : normalized_path;
-}
-
-std::string lv2_fs_object::get_device_root(std::string_view filename) {
-  std::string path =
-      get_normalized_path(filename); // Prevent getting fooled by ".." trick
-                                     // such as "/dev_usb000/../dev_flash"
-
-  if (const auto first = path.find_first_not_of("/"sv); first != umax) {
-    if (const auto pos = path.substr(first).find_first_of("/"sv); pos != umax)
-      path = path.substr(0, first + pos);
-    path = path.substr(std::max<std::make_signed_t<usz>>(
-        0, first - 1)); // Remove duplicate leading '/' while keeping only one
-  } else {
-    path = path.substr(0, 1);
+std::pair<std::string_view, std::string>
+lv2_fs_object::get_path_root_and_trail(std::string_view filename) {
+  if (filename.empty()) {
+    // Should CELL_ENOENT later - root cannot have a trail
+    return {""sv, "ENOENT"};
   }
 
-  return path;
+  std::string_view root;
+  std::string trail;
+
+  usz level = 0;
+  usz pos = 0;
+
+  while (pos != umax) {
+    const usz ndl_pos = filename.find_first_not_of("/", pos);
+
+    if (ndl_pos == pos) {
+      // Should CELL_ENOENT later - root cannot have a trail
+      return {""sv, "ENOENT"};
+    }
+
+    if (ndl_pos == umax) {
+      break;
+    }
+
+    const usz dl_pos =
+        ndl_pos == umax ? usz{umax} : filename.find_first_of("/", ndl_pos);
+    std::string_view component = filename.substr(ndl_pos, dl_pos - ndl_pos);
+
+    if (component == "."sv) {
+      // No change
+      // level += 0;
+      pos = dl_pos;
+      continue;
+    }
+
+    if (component == ".."sv) {
+      if (level > 1) {
+        ensure(!trail.empty());
+        trail.resize(trail.find_last_of("/") + 1);
+        trail.resize(trail.find_last_not_of("/") + 1);
+      } else if (level == 1) {
+        // Reset root
+        root = {};
+      } else // if (level == 0)
+      {
+        // Should CELL_ENOENT later - root cannot have a trail
+        return {""sv, "ENOENT"};
+      }
+
+      ensure(level)--;
+      pos = dl_pos;
+      continue;
+    }
+
+    if (level == 0) {
+      root = component;
+    } else if (trail.empty()) {
+      trail = std::string{component};
+    } else {
+      trail += "/";
+      trail.append(component);
+    }
+
+    level++;
+    pos = dl_pos;
+  }
+
+  return {root, std::move(trail)};
 }
 
 lv2_fs_mount_point *lv2_fs_object::get_mp(std::string_view filename,
@@ -302,8 +371,10 @@ lv2_fs_mount_point *lv2_fs_object::get_mp(std::string_view filename,
     filename.remove_prefix(cell_fs_path.size());
 
   const bool is_path = filename.starts_with("/"sv);
-  std::string mp_name =
-      is_path ? get_device_root(filename) : std::string(filename);
+  std::string mp_name = is_path
+                            ? std::string{get_path_root_and_trail(filename)
+                                              .first}
+                            : std::string(filename);
 
   const auto check_mp = [&]() {
     for (auto mp = &g_mp_sys_dev_root; mp; mp = mp->next) {
@@ -313,8 +384,14 @@ lv2_fs_mount_point *lv2_fs_object::get_mp(std::string_view filename,
             mp_name == "CELL_FS_IOS:PATA0_HDD_DRIVE"sv) ||
            (mp == &g_mp_sys_dev_hdd1 &&
             mp_name == "CELL_FS_IOS:PATA1_HDD_DRIVE"sv) ||
+           (mp == &g_mp_sys_dev_flash &&
+            mp_name == "CELL_FS_IOS:BUILTIN_FLASH"sv) ||
+           (mp == &g_mp_sys_dev_flash &&
+            mp_name == "CELL_FS_IOS:BUILTIN_FLSH1"sv) ||
            (mp == &g_mp_sys_dev_flash2 &&
-            mp_name == "CELL_FS_IOS:BUILTIN_FLASH"sv)); // TODO confirm
+            mp_name == "CELL_FS_IOS:BUILTIN_FLSH2"sv) ||
+           (mp == &g_mp_sys_dev_flash3 &&
+            mp_name == "CELL_FS_IOS:BUILTIN_FLSH3"sv)); // TODO confirm
 
       if (mp == &g_mp_sys_dev_usb) {
         if (mp_name.starts_with(is_path ? mp->root : mp->device)) {
@@ -381,7 +458,8 @@ lv2_fs_object::lv2_fs_object(std::string_view filename)
       mp(g_fxo->get<lv2_fs_mount_info_map>().lookup(name.data())) {}
 
 lv2_fs_object::lv2_fs_object(utils::serial &ar, bool)
-    : name(ar), mp(g_fxo->get<lv2_fs_mount_info_map>().lookup(name.data())) {}
+    : name(ar.pop<decltype(name)>()),
+      mp(g_fxo->get<lv2_fs_mount_info_map>().lookup(name.data())) {}
 
 u64 lv2_file::op_read(const fs::file &file, vm::ptr<void> buf, u64 size,
                       u64 opt_pos) {
@@ -486,7 +564,7 @@ lv2_file::lv2_file(utils::serial &ar)
 
   if (ar.pop<bool>()) // see lv2_file::save in_mem
   {
-    const fs::stat_t stat = ar;
+    const fs::stat_t stat = ar.pop<fs::stat_t>();
 
     std::vector<u8> buf(stat.size);
     ar(std::span<u8>(buf.data(), buf.size()));
@@ -507,7 +585,7 @@ lv2_file::lv2_file(utils::serial &ar)
                    name.data(), retrieve_real, type, flags, idm::last_id());
   }
 
-  file.seek(ar);
+  file.seek(ar.pop<s64>());
 }
 
 void lv2_file::save(utils::serial &ar) {
@@ -592,7 +670,7 @@ lv2_dir::lv2_dir(utils::serial &ar)
 
         return entries;
       }()),
-      pos(ar) {}
+      pos(ar.pop<u64>()) {}
 
 void lv2_dir::save(utils::serial &ar) {
   USING_SERIALIZATION_VERSION(lv2_fs);
@@ -742,7 +820,7 @@ error_code sys_fs_test(ppu_thread &, u32 arg1, u32 arg2, vm::ptr<u32> arg3,
 }
 
 lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
-                                               s32 flags, s32 /*mode*/,
+                                               s32 flags, bool has_write_access,
                                                lv2_file_type type,
                                                const lv2_fs_mount_info &mp) {
   // TODO: other checks for path
@@ -774,7 +852,7 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
     }
   }
 
-  if (flags & CELL_FS_O_CREAT) {
+  if (flags & CELL_FS_O_CREAT && !mp.read_only) {
     open_mode += fs::create;
 
     if (flags & CELL_FS_O_EXCL) {
@@ -782,12 +860,13 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
     }
   }
 
-  if (flags & CELL_FS_O_TRUNC) {
+  if (flags & CELL_FS_O_TRUNC && !mp.read_only) {
     open_mode += fs::trunc;
   }
 
   if (flags & CELL_FS_O_MSELF) {
     open_mode = fs::read;
+
     // mself can be mself or mself | rdonly
     if (flags & ~(CELL_FS_O_MSELF | CELL_FS_O_RDONLY)) {
       open_mode = {};
@@ -800,7 +879,7 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
         flags);
   }
 
-  if (mp.read_only) {
+  if (mp.read_only || !has_write_access) {
     // Deactivate mutating flags on read-only FS
     open_mode = fs::read;
   }
@@ -847,10 +926,10 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
   }
 
   if (!file) {
-    if (mp.read_only) {
+    if (mp.read_only || !has_write_access) {
       // Failed to create file on read-only FS (file doesn't exist)
-      if (flags & CELL_FS_O_ACCMODE && flags & CELL_FS_O_CREAT) {
-        return {CELL_EPERM};
+      if (flags & CELL_FS_O_CREAT) {
+        return {mp.read_only ? CELL_EPERM : CELL_EACCES};
       }
     }
 
@@ -859,14 +938,24 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
     }
 
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir:
+      return {CELL_ENOTDIR};
     case fs::error::noent:
       return {CELL_ENOENT};
-    default:
-      sys_fs.error("lv2_file::open(): unknown error %s", error);
-      break;
-    }
+    case fs::error::isdir:
+      return {CELL_EISDIR};
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR};
+      }
 
-    return {CELL_EIO};
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
+  }
+
+  if (flags & CELL_FS_O_TRUNC && (mp.read_only || !has_write_access)) {
+    return {mp.read_only ? CELL_EPERM : CELL_EACCES};
   }
 
   if (flags & CELL_FS_O_MSELF && !verify_mself(file)) {
@@ -951,7 +1040,8 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string &local_path,
 }
 
 lv2_file::open_result_t lv2_file::open(std::string_view vpath, s32 flags,
-                                       s32 mode, const void *arg, u64 size) {
+                                       s32 /*mode*/, const void *arg,
+                                       u64 size) {
   if (vpath.empty()) {
     return {CELL_ENOENT};
   }
@@ -967,11 +1057,6 @@ lv2_file::open_result_t lv2_file::open(std::string_view vpath, s32 flags,
 
   if (local_path.empty()) {
     return {CELL_ENOTMOUNTED, path};
-  }
-
-  if (flags & CELL_FS_O_CREAT && !has_fs_write_rights(vpath) &&
-      !fs::is_dir(local_path)) {
-    return {CELL_EACCES};
   }
 
   lv2_file_type type = lv2_file_type::regular;
@@ -990,7 +1075,8 @@ lv2_file::open_result_t lv2_file::open(std::string_view vpath, s32 flags,
     }
   }
 
-  auto [error, file] = open_raw(local_path, flags, mode, type, mp);
+  auto [error, file] =
+      open_raw(local_path, flags, has_fs_write_rights(vpath), type, mp);
 
   return {.error = error,
           .ppath = std::move(path),
@@ -1157,7 +1243,7 @@ error_code sys_fs_write(ppu_thread &ppu, u32 fd, vm::cptr<void> buf, u64 nbytes,
 
   if (file->type != lv2_file_type::regular) {
     sys_fs.error("%s type: Writing %u bytes to FD=%d (path=%s)", file->type,
-                 nbytes, file->name.data());
+                 nbytes, fd, file->name.data());
   }
 
   if (file->mp.read_only) {
@@ -1304,9 +1390,15 @@ error_code sys_fs_opendir(ppu_thread &ppu, vm::cptr<char> path,
 
       break;
     }
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     default: {
-      sys_fs.error("sys_fs_opendir(): unknown error %s", error);
-      return {CELL_EIO, path};
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
+
+      fmt::throw_exception("unknown error %s", error);
     }
     }
   }
@@ -1478,6 +1570,9 @@ error_code sys_fs_stat(ppu_thread &ppu, vm::cptr<char> path,
 
   if (!fs::get_stat(local_path, info)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       // Try to analyse split file (TODO)
       u64 total_size = 0;
@@ -1514,8 +1609,11 @@ error_code sys_fs_stat(ppu_thread &ppu, vm::cptr<char> path,
               CELL_ENOENT, path};
     }
     default: {
-      sys_fs.error("sys_fs_stat(): unknown error %s", error);
-      return {CELL_EIO, path};
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
+
+      fmt::throw_exception("unknown error %s", error);
     }
     }
   }
@@ -1620,14 +1718,17 @@ error_code sys_fs_mkdir(ppu_thread &ppu, vm::cptr<char> path, s32 mode) {
     return {CELL_EROFS, path};
   }
 
+  std::lock_guard lock(mp->mutex);
+
   if (!fs::exists(local_path) && !has_fs_write_rights(path.get_ptr())) {
     return {CELL_EACCES, path};
   }
 
-  std::lock_guard lock(mp->mutex);
-
   if (!fs::create_dir(local_path)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       return {mp == &g_mp_sys_dev_hdd1 ? sys_fs.warning : sys_fs.error,
               CELL_ENOENT, path};
@@ -1635,11 +1736,14 @@ error_code sys_fs_mkdir(ppu_thread &ppu, vm::cptr<char> path, s32 mode) {
     case fs::error::exist: {
       return {sys_fs.warning, CELL_EEXIST, path};
     }
-    default:
-      sys_fs.error("sys_fs_mkdir(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   sys_fs.notice("sys_fs_mkdir(): directory %s created", path);
@@ -1691,15 +1795,20 @@ error_code sys_fs_rename(ppu_thread &ppu, vm::cptr<char> from,
 
   if (!vfs::host::rename(local_from, local_to, mp.mp, false)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir:
+      return {CELL_ENOTDIR, from};
     case fs::error::noent:
       return {CELL_ENOENT, from};
     case fs::error::exist:
       return {CELL_EEXIST, to};
-    default:
-      sys_fs.error("sys_fs_rename(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_from)) {
+        return {CELL_ENOTDIR, from};
+      }
 
-    return {CELL_EIO, from}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   sys_fs.notice("sys_fs_rename(): %s renamed to %s", from, to);
@@ -1722,37 +1831,42 @@ error_code sys_fs_rmdir(ppu_thread &ppu, vm::cptr<char> path) {
   const auto &mp = g_fxo->get<lv2_fs_mount_info_map>().lookup(vpath);
 
   if (mp == &g_mp_sys_dev_root) {
-    return {CELL_EPERM, path};
+    return {CELL_EPERM, vpath};
   }
 
   if (local_path.empty()) {
-    return {CELL_ENOTMOUNTED, path};
+    return {CELL_ENOTMOUNTED, vpath};
   }
 
   if (mp.read_only) {
-    return {CELL_EROFS, path};
-  }
-
-  if (fs::is_dir(local_path) && !has_fs_write_rights(path.get_ptr())) {
-    return {CELL_EACCES};
+    return {CELL_EROFS, vpath};
   }
 
   std::lock_guard lock(mp->mutex);
 
+  if (fs::is_dir(local_path) && !has_fs_write_rights(vpath)) {
+    return {CELL_EACCES, vpath};
+  }
+
   if (!fs::remove_dir(local_path)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir:
+      return {CELL_ENOTDIR, path};
     case fs::error::noent:
       return {CELL_ENOENT, path};
     case fs::error::notempty:
       return {CELL_ENOTEMPTY, path};
-    default:
-      sys_fs.error("sys_fs_rmdir(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, vpath};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
-  sys_fs.notice("sys_fs_rmdir(): directory %s removed", path);
+  sys_fs.notice("sys_fs_rmdir(): directory %s removed", vpath);
   return CELL_OK;
 }
 
@@ -1794,15 +1908,21 @@ error_code sys_fs_unlink(ppu_thread &ppu, vm::cptr<char> path) {
 
   if (!vfs::host::unlink(local_path, vfs::get(mount_path))) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       return {mp == &g_mp_sys_dev_hdd1 ? sys_fs.warning : sys_fs.error,
               CELL_ENOENT, path};
     }
-    default:
-      sys_fs.error("sys_fs_unlink(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   sys_fs.notice("sys_fs_unlink(): file %s deleted", path);
@@ -2526,10 +2646,8 @@ error_code sys_fs_lseek(ppu_thread &ppu, u32 fd, s64 offset, s32 whence,
     case fs::error::inval:
       return {CELL_EINVAL, "fd=%u, offset=0x%x, whence=%d", fd, offset, whence};
     default:
-      sys_fs.error("sys_fs_lseek(): unknown error %s", error);
+      fmt::throw_exception("unknown error %s", error);
     }
-
-    return CELL_EIO; // ???
   }
 
   lock.unlock();
@@ -2645,11 +2763,14 @@ error_code sys_fs_get_block_size(ppu_thread &ppu, vm::cptr<char> path,
       return {CELL_EISDIR, path};
     case fs::error::noent:
       return {CELL_ENOENT, path};
-    default:
-      sys_fs.error("sys_fs_get_block_size(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   static_cast<void>(ppu.test_stopped());
@@ -2693,15 +2814,21 @@ error_code sys_fs_truncate(ppu_thread &ppu, vm::cptr<char> path, u64 size) {
 
   if (!fs::truncate_file(local_path, size)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       return {mp == &g_mp_sys_dev_hdd1 ? sys_fs.warning : sys_fs.error,
               CELL_ENOENT, path};
     }
-    default:
-      sys_fs.error("sys_fs_truncate(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   return CELL_OK;
@@ -2739,11 +2866,10 @@ error_code sys_fs_ftruncate(ppu_thread &ppu, u32 fd, u64 size) {
   if (!file->file.trunc(size)) {
     switch (auto error = fs::g_tls_error) {
     case fs::error::ok:
-    default:
-      sys_fs.error("sys_fs_ftruncate(): unknown error %s", error);
+    default: {
+      fmt::throw_exception("unknown error %s", error);
     }
-
-    return CELL_EIO; // ???
+    }
   }
 
   return CELL_OK;
@@ -2783,6 +2909,9 @@ error_code sys_fs_chmod(ppu_thread &, vm::cptr<char> path, s32 mode) {
 
   if (!fs::get_stat(local_path, info)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       // Try to locate split files
 
@@ -2793,8 +2922,11 @@ error_code sys_fs_chmod(ppu_thread &, vm::cptr<char> path, s32 mode) {
       return {CELL_ENOENT, path};
     }
     default: {
-      sys_fs.error("sys_fs_chmod(): unknown error %s", error);
-      return {CELL_EIO, path};
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
+
+      fmt::throw_exception("unknown error %s", error);
     }
     }
   }
@@ -2915,15 +3047,21 @@ error_code sys_fs_utime(ppu_thread &ppu, vm::cptr<char> path,
 
   if (!fs::utime(local_path, timep->actime, timep->modtime)) {
     switch (auto error = fs::g_tls_error) {
+    case fs::error::notdir: {
+      return {CELL_ENOTDIR, path};
+    }
     case fs::error::noent: {
       return {mp == &g_mp_sys_dev_hdd1 ? sys_fs.warning : sys_fs.error,
               CELL_ENOENT, path};
     }
-    default:
-      sys_fs.error("sys_fs_utime(): unknown error %s", error);
-    }
+    default: {
+      if (has_non_directory_components(local_path)) {
+        return {CELL_ENOTDIR, path};
+      }
 
-    return {CELL_EIO, path}; // ???
+      fmt::throw_exception("unknown error %s", error);
+    }
+    }
   }
 
   return CELL_OK;
@@ -3145,7 +3283,8 @@ error_code sys_fs_mount(ppu_thread &ppu, vm::cptr<char> dev_name,
     return {path_error, path_sv};
   }
 
-  const std::string vpath = lv2_fs_object::get_normalized_path(path_sv);
+  const auto [root_name, trail] =
+      lv2_fs_object::get_path_root_and_trail(path_sv);
 
   std::string vfs_path;
   const auto mp = lv2_fs_object::get_mp(device_name, &vfs_path);
@@ -3164,8 +3303,8 @@ error_code sys_fs_mount(ppu_thread &ppu, vm::cptr<char> dev_name,
   if (vfs_path.empty())
     return {CELL_ENOTSUP, device_name};
 
-  if (vpath.find_first_not_of('/') == umax || !vfs::get(vpath).empty())
-    return {CELL_EEXIST, vpath};
+  if (root_name.empty() || !vfs::get(path_sv).empty())
+    return {CELL_EEXIST, path_sv};
 
   if (mp == &g_mp_sys_dev_hdd1) {
     const std::string_view appname = g_ps3_process_info.get_cellos_appname();
@@ -3198,7 +3337,7 @@ error_code sys_fs_mount(ppu_thread &ppu, vm::cptr<char> dev_name,
     }
   }
 
-  if (!vfs::mount(vpath, vfs_path, !is_simplefs)) {
+  if (!vfs::mount("/" + std::string{root_name}, vfs_path, !is_simplefs)) {
     if (is_simplefs) {
       if (fs::remove_file(vfs_path)) {
         sys_fs.notice("Removed simplefs file \"%s\"", vfs_path);
@@ -3210,8 +3349,8 @@ error_code sys_fs_mount(ppu_thread &ppu, vm::cptr<char> dev_name,
     return CELL_EIO;
   }
 
-  g_fxo->get<lv2_fs_mount_info_map>().add(vpath, mp, device_name, filesystem,
-                                          prot);
+  g_fxo->get<lv2_fs_mount_info_map>().add("/" + std::string{root_name}, mp,
+                                          device_name, filesystem, prot);
 
   return CELL_OK;
 }

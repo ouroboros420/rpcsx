@@ -199,7 +199,7 @@ void usb_device_gametablet::interrupt_transfer(u32 buf_size, u8* buf, u32 /*endp
 		const auto& pad = ::at32(pads, m_controller_index);
 		if (pad->is_connected() && !pad->is_copilot())
 		{
-			for (Button& button : pad->m_buttons_external)
+			for (ButtonExternal& button : pad->m_buttons_external)
 			{
 				if (!button.m_pressed)
 				{
@@ -228,6 +228,9 @@ void usb_device_gametablet::interrupt_transfer(u32 buf_size, u8* buf, u32 /*endp
 					case CELL_PAD_CTRL_LEFT:
 						left = true;
 						break;
+					case CELL_PAD_CTRL_PS:
+						gt.btn_ps |= 1;
+						break;
 					default:
 						break;
 					}
@@ -247,9 +250,6 @@ void usb_device_gametablet::interrupt_transfer(u32 buf_size, u8* buf, u32 /*endp
 						break;
 					case CELL_PAD_CTRL_TRIANGLE:
 						gt.btn_triangle |= 1;
-						break;
-					case CELL_PAD_CTRL_PS:
-						gt.btn_ps |= 1;
 						break;
 					default:
 						break;

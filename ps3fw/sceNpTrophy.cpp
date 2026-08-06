@@ -163,7 +163,7 @@ struct sce_np_trophy_manager
 
 	sce_np_trophy_manager() = default;
 
-	sce_np_trophy_manager(utils::serial& ar) : is_initialized(ar) {}
+	sce_np_trophy_manager(utils::serial& ar) : is_initialized(ar.pop<bool>()) {}
 
 	void save(utils::serial& ar)
 	{

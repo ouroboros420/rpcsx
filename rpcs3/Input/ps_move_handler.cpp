@@ -13,37 +13,6 @@ namespace
 	constexpr id_pair MOVE_ID_ZCM1 = {0x054C, 0x03D5};
 	constexpr id_pair MOVE_ID_ZCM2 = {0x054C, 0x0c5e};
 
-	enum button_flags : u16
-	{
-		select = 0x01,
-		start = 0x08,
-		triangle = 0x10,
-		circle = 0x20,
-		cross = 0x40,
-		square = 0x80,
-		ps = 0x0001,
-		move = 0x4008,
-		t = 0x8010,
-		ext_dev = 0x1000,
-
-		// Sharpshooter
-		ss_firing_mode_1 = 0x01,
-		ss_firing_mode_2 = 0x02,
-		ss_firing_mode_3 = 0x04,
-		ss_trigger = 0x40,
-		ss_reload = 0x80,
-
-		// Racing Wheel
-		rw_d_pad_up = 0x10,
-		rw_d_pad_right = 0x20,
-		rw_d_pad_down = 0x40,
-		rw_d_pad_left = 0x80,
-		rw_l1 = 0x04,
-		rw_r1 = 0x08,
-		rw_paddle_l = 0x01,
-		rw_paddle_r = 0x02,
-	};
-
 	enum battery_status : u8
 	{
 		charge_empty = 0x00,
@@ -153,7 +122,7 @@ void ps_move_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, ps_move_key_codes::none);
 	cfg->start.def = ::at32(button_list, ps_move_key_codes::start);
 	cfg->select.def = ::at32(button_list, ps_move_key_codes::select);
-	cfg->ps.def = ::at32(button_list, ps_move_key_codes::ps);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{ps_move_key_codes::ps}, {ps_move_key_codes::start, ps_move_key_codes::select}});
 	cfg->square.def = ::at32(button_list, ps_move_key_codes::square);
 	cfg->cross.def = ::at32(button_list, ps_move_key_codes::cross);
 	cfg->circle.def = ::at32(button_list, ps_move_key_codes::circle);
@@ -581,21 +550,21 @@ void ps_move_handler::handle_external_device(const pad_ensemble& binding)
 	move_data.external_device_write_requested = false;
 }
 
-bool ps_move_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ps_move_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	// We also report the T button as left trigger
 	return keyCode == ps_move_key_codes::L2 || keyCode == ps_move_key_codes::t;
 }
 
-bool ps_move_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ps_move_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	// We also report the Throttle button as right trigger
 	return keyCode == ps_move_key_codes::R2 || keyCode == ps_move_key_codes::throttle;
 }
 
-std::unordered_map<u64, u16> ps_move_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> ps_move_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	std::unordered_map<u64, u16> key_buf;
+	std::unordered_map<u32, u16> key_buf;
 	ps_move_device* dev = static_cast<ps_move_device*>(device.get());
 	if (!dev)
 		return key_buf;
@@ -761,7 +730,7 @@ void ps_move_handler::get_extended_info(const pad_ensemble& binding)
 	handle_external_device(binding);
 }
 
-pad_preview_values ps_move_handler::get_preview_values(const std::unordered_map<u64, u16>& data)
+pad_preview_values ps_move_handler::get_preview_values(const std::unordered_map<u32, u16>& data, const std::vector<std::string>& /*buttons*/)
 {
 	return {
 		std::max(::at32(data, ps_move_key_codes::L2), ::at32(data, ps_move_key_codes::t)),

@@ -166,7 +166,7 @@ option(USE_LIBEVDEV "libevdev-based joystick support" ON)
 option(USE_DISCORD_RPC "Discord rich presence integration" OFF)
 option(USE_VULKAN "Vulkan render backend" ON)
 option(USE_PRECOMPILED_HEADERS "Use precompiled headers" OFF)
-option(USE_SDL "Enables SDL input handler" OFF)
+option(USE_SDL "Enables SDL input handler" ON)
 option(USE_SYSTEM_CUBEB "Prefer system cubeb instead of the builtin one" OFF)
 option(USE_SYSTEM_CURL "Prefer system Curl instead of the prebuild one" ON)
 option(USE_SYSTEM_FAUDIO "Prefer system FAudio instead of the builtin one" OFF)
@@ -249,6 +249,9 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug" AND NOT MSVC)
 endif()
 
 if(MSVC)
+    # NOTE: kept in RPCSX (upstream dropped it in v0.0.41) because
+    # 3rdparty/llvm/CMakeLists.txt still selects the MT/MD prebuilt LLVM archive
+    # based on USE_MSVC_STATIC_CRT.
     option(USE_MSVC_STATIC_CRT "Use static MSVC C runtime" OFF)
 
     if(NOT IS_MULTI_CONFIG)
@@ -263,16 +266,16 @@ if(MSVC)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
     endif()
 
-    add_compile_options(/MP)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/MP>")
 endif()
 
 if(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
-    include_directories(/opt/homebrew/include)
-    link_directories(/opt/homebrew/lib)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+    list(APPEND CMAKE_SYSTEM_PREFIX_PATH "/opt/homebrew")
 endif()
 
 if(MSVC)
-    add_compile_options(/wd4530 /utf-8) # C++ exception handler used, but unwind semantics are not enabled
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/wd4530;/utf-8>") # C++ exception handler used, but unwind semantics are not enabled
 endif()
 
 include(CheckFunctionExists)

@@ -43,6 +43,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <source_location>
 
 // Helper function
 llvm::Value* peek_through_bitcasts(llvm::Value*);
@@ -560,6 +561,32 @@ struct llvm_placeholder_t
 		if (value && value->getType() == llvm_value_t<T>::get_type(value->getContext()))
 		{
 			return {{value}};
+		}
+
+		value = nullptr;
+		return {};
+	}
+};
+
+template <typename T, typename U = llvm_common_t<llvm_value_t<T>>>
+struct llvm_place_stealer_t
+{
+	// TODO: placeholder extracting actual constant values (u64, f64, vector, etc)
+
+	using type = T;
+
+	static constexpr bool is_ok = true;
+
+	llvm::Value* eval(llvm::IRBuilder<>*) const
+	{
+		return nullptr;
+	}
+
+	std::tuple<> match(llvm::Value*& value, llvm::Module*) const
+	{
+		if (value && value->getType() == llvm_value_t<T>::get_type(value->getContext()))
+		{
+			return {};
 		}
 
 		value = nullptr;
@@ -3097,6 +3124,12 @@ protected:
 	// For now, setting this flag will speed up SPU verification
 	// but I will remove this later with explicit parralelism - Whatcookie
 	bool m_use_avx = true;
+
+	// ARMv8 SDOT/UDOT
+	bool m_use_dotprod = false;
+
+	// Allow direct TBL2/TBX2 emission.
+	bool m_use_tbl2 = true;
 #else
 	// Allow FMA
 	bool m_use_fma = false;
@@ -3218,7 +3251,7 @@ public:
 	}
 
 	// Bitcast with immediate constant folding
-	llvm::Value* bitcast(llvm::Value* val, llvm::Type* type) const;
+	llvm::Value* bitcast(llvm::Value* val, llvm::Type* type, std::source_location src_loc = std::source_location::current()) const;
 
 	template <typename T>
 	llvm::Value* bitcast(llvm::Value* val)
@@ -3228,6 +3261,12 @@ public:
 
 	template <typename T>
 	static llvm_placeholder_t<T> match()
+	{
+		return {};
+	}
+
+	template <typename T>
+	static llvm_place_stealer_t<T> match_stealer()
 	{
 		return {};
 	}
@@ -3655,9 +3694,82 @@ public:
 		const auto data0 = a.eval(m_ir);
 		const auto data1 = b.eval(m_ir);
 		const auto data2 = c.eval(m_ir);
+
+#if LLVM_VERSION_MAJOR >= 22
+		// LLVM 22+ changed the intrinsic signature from v4i32 to v16i8 for operands 2 and 3
+		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpdpbusd_128),
+			{data0, m_ir->CreateBitCast(data1, get_type<u8[16]>()), m_ir->CreateBitCast(data2, get_type<u8[16]>())});
+#else
 		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpdpbusd_128), {data0, data1, data2});
+#endif
 		return result;
 	}
+
+#ifdef ARCH_ARM64
+template <typename T1, typename T2, typename T3>
+	value_t<u32[4]> udot(T1 a, T2 b, T3 c)
+	{
+		value_t<u32[4]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+		const auto data2 = c.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic<u32[4], u8[16]>(llvm::Intrinsic::aarch64_neon_udot), {data0, data1, data2});
+		return result;
+	}
+
+	template <typename T1, typename T2, typename T3>
+	value_t<u32[4]> sdot(T1 a, T2 b, T3 c)
+	{
+		value_t<u32[4]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+		const auto data2 = c.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic<u32[4], u8[16]>(llvm::Intrinsic::aarch64_neon_sdot), {data0, data1, data2});
+		return result;
+	}
+
+	template <typename T1, typename T2>
+	value_t<s32[4]> smull(T1 a, T2 b)
+	{
+		value_t<s32[4]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic<s32[4]>(llvm::Intrinsic::aarch64_neon_smull), {data0, data1});
+		return result;
+	}
+
+	template <typename T1, typename T2>
+	value_t<u32[4]> umull(T1 a, T2 b)
+	{
+		value_t<u32[4]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_umull), {data0, data1});
+		return result;
+	}
+	
+template <typename T1, typename T2>
+	auto addp(T1 a, T2 b)
+	{
+		using T_vector = typename is_llvm_expr<T1>::type;
+		const auto data1 = a.eval(m_ir);
+		const auto data2 = b.eval(m_ir);
+
+		const auto func = get_intrinsic<T_vector>(llvm::Intrinsic::aarch64_neon_addp);
+
+		value_t<T_vector> result;
+		result.value = m_ir->CreateCall(func, {data1, data2});
+		return result;
+	}
+#endif
 
 	template <typename T1, typename T2>
 	value_t<u8[16]> vpermb(T1 a, T2 b)
@@ -3907,6 +4019,15 @@ public:
 		erase_stores({args.value...});
 	}
 
+	// Debug breakpoint
+	void debugtrap()
+	{
+		const auto _rty = llvm::Type::getVoidTy(m_context);
+		const auto type = llvm::FunctionType::get(_rty, {}, false);
+		const auto func = llvm::cast<llvm::Function>(m_ir->GetInsertBlock()->getParent()->getParent()->getOrInsertFunction("llvm.debugtrap", type).getCallee());
+		m_ir->CreateCall(func);
+	}
+
 	template <typename T, typename U>
 	static auto pshufb(T&& a, U&& b)
 	{
@@ -3943,6 +4064,131 @@ public:
 				return nullptr;
 			});
 	}
+
+#ifdef ARCH_ARM64
+	template <typename T1, typename T2>
+	value_t<u8[16]> tbl(T1 a, T2 b)
+	{
+		value_t<u8[16]> result;
+		const auto data0 = a.eval(m_ir);
+		const auto index = b.eval(m_ir);
+		const auto zeros = llvm::ConstantAggregateZero::get(get_type<u8[16]>());
+
+		if (auto c = llvm::dyn_cast<llvm::Constant>(index))
+		{
+			v128 mask{};
+			const auto cv = llvm::dyn_cast<llvm::ConstantDataVector>(c);
+
+			if (cv)
+			{
+				for (u32 i = 0; i < 16; i++)
+				{
+					const u64 b_val = cv->getElementAsInteger(i);
+					mask._u8[i] = (b_val < 16) ? static_cast<u8>(b_val) : static_cast<u8>(16);
+				}
+			}
+
+			if (cv || llvm::isa<llvm::ConstantAggregateZero>(c))
+			{
+				result.value = llvm::ConstantDataVector::get(m_context, llvm::ArrayRef(reinterpret_cast<const u8*>(&mask), 16));
+				result.value = m_ir->CreateZExt(result.value, get_type<u32[16]>());
+				result.value = m_ir->CreateShuffleVector(data0, zeros, result.value);
+				return result;
+			}
+		}
+
+		result.value = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbl1), { data0, index });
+		return result;
+	}
+
+	template <typename T1, typename T2, typename T3>
+	value_t<u8[16]> tbl2(T1 a, T2 b, T3 indices)
+	{
+		value_t<u8[16]> result;
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+		const auto index = indices.eval(m_ir);
+
+		if (m_use_tbl2)
+		{
+			if (auto c = llvm::dyn_cast<llvm::Constant>(index))
+			{
+				v128 mask{};
+				v128 bitmask{};
+				const auto cv = llvm::dyn_cast<llvm::ConstantDataVector>(c);
+
+				if (cv)
+				{
+					for (u32 i = 0; i < 16; i++)
+					{
+						const u64 b_val = cv->getElementAsInteger(i);
+						mask._u8[i] = (b_val < 32) ? static_cast<u8>(b_val) : static_cast<u8>(0);
+						bitmask._u8[i] = (b_val < 32) ? static_cast<u8>(0xFF) : static_cast<u8>(0x00);
+					}
+				}
+				else if (llvm::isa<llvm::ConstantAggregateZero>(c))
+				{
+					bitmask = v128::from8p(0xFF);
+				}
+
+				if (cv || llvm::isa<llvm::ConstantAggregateZero>(c))
+				{
+					auto m_val = llvm::ConstantDataVector::get(m_context, llvm::ArrayRef(reinterpret_cast<const u8*>(&mask), 16));
+					auto m_ext = m_ir->CreateZExt(m_val, get_type<u32[16]>());
+					auto lookup = m_ir->CreateShuffleVector(data0, data1, m_ext);
+
+					auto z_mask = llvm::ConstantDataVector::get(m_context, llvm::ArrayRef(reinterpret_cast<const u8*>(&bitmask), 16));
+					result.value = m_ir->CreateAnd(lookup, z_mask);
+					return result;
+				}
+			}
+
+			result.value = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbl2), { data0, data1, index });
+			return result;
+		}
+
+		const auto data0_lookup = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbl1), { data0, index });
+		const auto data1_index = m_ir->CreateSub(index, llvm::ConstantInt::get(get_type<u8[16]>(), 16));
+		const auto data1_lookup = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbl1), { data1, data1_index });
+
+		result.value = m_ir->CreateOr(data0_lookup, data1_lookup);
+		return result;
+	}
+
+	template <typename T1, typename T2, typename T3>
+	value_t<u8[16]> tbx(T1 fallback, T2 a, T3 indices)
+	{
+		value_t<u8[16]> result;
+		const auto v_fallback = fallback.eval(m_ir);
+		const auto data0 = a.eval(m_ir);
+		const auto index = indices.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbx1), { v_fallback, data0, index });
+		return result;
+	}
+
+	template <typename T1, typename T2, typename T3, typename T4>
+	value_t<u8[16]> tbx2(T1 fallback, T2 a, T3 b, T4 indices)
+	{
+		value_t<u8[16]> result;
+		const auto v_fallback = fallback.eval(m_ir);
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+		const auto index = indices.eval(m_ir);
+
+		if (m_use_tbl2)
+		{
+			result.value = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbx2), { v_fallback, data0, data1, index });
+			return result;
+		}
+
+		const auto first_lookup = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbx1), { v_fallback, data0, index });
+		const auto data1_index = m_ir->CreateSub(index, llvm::ConstantInt::get(get_type<u8[16]>(), 16));
+
+		result.value = m_ir->CreateCall(get_intrinsic<u8[16]>(llvm::Intrinsic::aarch64_neon_tbx1), { first_lookup, data1, data1_index });
+		return result;
+	}
+#endif
 
 	// (m << 3) >= 0 ? a : b
 	template <typename T, typename U, typename V>

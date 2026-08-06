@@ -4,6 +4,8 @@
 #include "rx/asm.hpp"
 #include "rx/align.hpp"
 
+namespace rsx
+{
 /**
  * Ring buffer memory helper :
  * There are 2 "pointers" (offset inside a memory buffer to be provided by class derivative)
@@ -168,4 +170,46 @@ public:
 	{
 		return m_size;
 	}
+
+		// Bulk static allocator. Allows to allocate one large block and subdivide
+		// [ 0, 1, 2, 3 ] <pad> [ 4, 5, 6, 7 ] ...
+		template <usz Alignment, usz ElementSize = Alignment>
+		struct bulk_allocator
+		{
+			bulk_allocator(data_heap& container, u32 batch_size = 1)
+				: m_container(container)
+				, m_batch_size(batch_size)
+			{}
+
+			usz alloc(u32 element_count = 1)
+			{
+				if (m_capacity < element_count)
+				{
+					ensure(element_count <= m_batch_size);
+					m_address = m_container.alloc<Alignment>(ElementSize * m_batch_size);
+					m_capacity = m_batch_size;
+				}
+
+				m_capacity -= element_count;
+				return std::exchange(m_address, m_address + (ElementSize * element_count));
+			}
+
+			usz alloc_bytes(usz size = ElementSize)
+			{
+				return alloc(static_cast<u32>(size / ElementSize));
+			}
+
+			u32 capacity() const
+			{
+				return m_capacity;
+			}
+
+		private:
+			data_heap& m_container;
+			usz m_address = 0;
+
+			u32 m_capacity = 0;
+			u32 m_batch_size = 1;
 };
+	};
+}

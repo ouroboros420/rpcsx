@@ -227,6 +227,13 @@ enum class msaa_level
 	_auto
 };
 
+enum class framebuffer_aliasing_bias
+{
+	_auto,
+	prefer_color,
+	prefer_depth,
+};
+
 enum class detail_level
 {
 	none,
@@ -355,6 +362,7 @@ enum class stereo_render_mode_options
 	anaglyph_magenta_cyan,
 	anaglyph_trioscopic,
 	anaglyph_amber_blue,
+	anaglyph_custom,
 };
 
 enum class xfloat_accuracy
@@ -363,4 +371,11 @@ enum class xfloat_accuracy
 	approximate,
 	relaxed, // Approximate accuracy for only the "FCGT", "FNMS", "FREST" AND "FRSQEST" instructions
 	inaccurate
+};
+
+enum class vsync_mode
+{
+	off,
+	adaptive,
+	full,
 };

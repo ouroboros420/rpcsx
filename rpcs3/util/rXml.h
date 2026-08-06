@@ -20,6 +20,7 @@ struct rXmlNode
 {
 	rXmlNode();
 	rXmlNode(const pugi::xml_node& node);
+	std::shared_ptr<rXmlNode> GetChild(std::string_view name);
 	std::shared_ptr<rXmlNode> GetChildren();
 	std::shared_ptr<rXmlNode> GetNext();
 	std::string GetName();
@@ -33,7 +34,7 @@ struct rXmlDocument
 {
 	rXmlDocument();
 	rXmlDocument(const rXmlDocument& other) = delete;
-	rXmlDocument& operator=(const rXmlDocument& other) = delete;
+	rXmlDocument &operator=(const rXmlDocument& other) = delete;
 	pugi::xml_parse_result Read(std::string_view data);
 	virtual std::shared_ptr<rXmlNode> GetRoot();
 

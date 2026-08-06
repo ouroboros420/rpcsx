@@ -682,7 +682,7 @@ namespace rsx
 				ar(u32{0});
 			}
 		}
-		else if (u32 count = ar)
+		else if (u32 count{ar})
 		{
 			restore_fifo_count = count;
 			ar(restore_fifo_cmd);
@@ -713,6 +713,14 @@ namespace rsx
 		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
+
+			if (g_cfg.misc.play_music_during_boot)
+			{
+				if (const std::string audio_path = Emu.GetSfoDir(true) + "/SND0.AT3"; fs::is_file(audio_path))
+				{
+					m_overlay_manager->start_audio(audio_path);
+				}
+			}
 		}
 
 		if (!_ar)
@@ -989,6 +997,12 @@ namespace rsx
 		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
 		fifo_ctrl->set_get(ctrl->get);
 
+		resolution_scaling_config =
+		{
+			.scale_percent = static_cast<u16>(g_cfg.video.resolution_scale_percent),
+			.min_scalable_dimension = static_cast<u16>(g_cfg.video.min_scalable_dimension),
+		};
+
 		last_guest_flip_timestamp = get_system_time() - 1000000;
 
 		vblank_count = 0;
@@ -1097,6 +1111,11 @@ namespace rsx
 		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os)
 		{
 			thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
+		}
+
+		if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
+		{
+			manager->stop_audio();
 		}
 
 		while (!test_stopped())
@@ -1564,6 +1583,15 @@ namespace rsx
 
 				m_graphics_state.set(rsx::rtt_config_contested);
 
+				if (g_cfg.video.fb_aliasing_bias == framebuffer_aliasing_bias::prefer_color
+					&& layout.color_write_enabled[index]
+					&& !layout.zeta_write_enabled)
+				{
+					// Use address for color data
+					layout.zeta_address = 0;
+				}
+				else
+				{
 				// TODO: Research clearing both depth AND color
 				// TODO: If context is creation_draw, deal with possibility of a lost buffer clear
 				if (depth_test_enabled || stencil_test_enabled || (!layout.color_write_enabled[index] && layout.zeta_write_enabled))
@@ -1577,6 +1605,7 @@ namespace rsx
 					// Use address for color data
 					layout.zeta_address = 0;
 				}
+			}
 			}
 
 			ensure(layout.color_addresses[index]);
@@ -1850,6 +1879,7 @@ namespace rsx
 		}
 		default:
 			rsx_log.fatal("Unhandled framebuffer option changed 0x%x", opt);
+			break;
 		}
 	}
 
@@ -1928,10 +1958,40 @@ namespace rsx
 			m_graphics_state.set(rsx::rtt_config_valid);
 		}
 
-		std::tie(region.x1, region.y1) = rsx::apply_resolution_scale<false>(x1, y1, m_framebuffer_layout.width, m_framebuffer_layout.height);
-		std::tie(region.x2, region.y2) = rsx::apply_resolution_scale<true>(x2, y2, m_framebuffer_layout.width, m_framebuffer_layout.height);
+		std::tie(region.x1, region.y1) = rsx::apply_resolution_scale<false>(resolution_scaling_config, x1, y1, m_framebuffer_layout.width, m_framebuffer_layout.height);
+		std::tie(region.x2, region.y2) = rsx::apply_resolution_scale<true>(resolution_scaling_config, x2, y2, m_framebuffer_layout.width, m_framebuffer_layout.height);
 
 		return true;
+	}
+
+	rsx::flags32_t thread::get_fragment_program_export_config()
+	{
+		if (!g_cfg.video.emulate_depth_compare) [[ likely ]]
+		{
+			return 0;
+		}
+
+		if (m_ctx->register_state->current_draw_clause.classify_mode() != primitive_class::polygon)
+		{
+			return 0;
+		}
+
+		u32 expected_ctrl = 0;
+
+		if (m_framebuffer_layout.zeta_address &&
+			m_ctx->register_state->depth_test_enabled() &&
+			m_ctx->register_state->depth_func() == rsx::comparison_function::equal)
+		{
+			expected_ctrl |= RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE;
+
+			if (backend_config.supports_hw_msaa &&
+				m_ctx->register_state->surface_antialias() != rsx::surface_antialiasing::center_1_sample)
+			{
+				expected_ctrl |= RSX_SHADER_CONTROL_MULTISAMPLED_ZBUFFER;
+			}
+		}
+
+		return expected_ctrl;
 	}
 
 	void thread::prefetch_fragment_program()
@@ -2029,6 +2089,18 @@ namespace rsx
 	{
 		m_program_cache_hint.invalidate(m_graphics_state.load());
 
+		constexpr u32 fs_export_config_mask = (RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE | RSX_SHADER_CONTROL_MULTISAMPLED_ZBUFFER);
+		if (u32 export_ctrl = get_fragment_program_export_config();
+			(current_fragment_program.ctrl & fs_export_config_mask) != export_ctrl)
+		{
+			// Update control bits for immediate consumers
+			current_fragment_program.ctrl &= ~fs_export_config_mask;
+			current_fragment_program.ctrl |= export_ctrl;
+
+			// Signal backend to reload pipeline
+			m_graphics_state.set(rsx::pipeline_state::fragment_program_state_dirty);
+		}
+
 		prefetch_vertex_program();
 		prefetch_fragment_program();
 	}
@@ -2123,6 +2195,8 @@ namespace rsx
 					current_fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE;
 				}
 			}
+
+			current_fragment_program.ctrl |= get_fragment_program_export_config();
 		}
 		else if (m_ctx->register_state->point_sprite_enabled() &&
 			m_ctx->register_state->current_draw_clause.primitive == primitive_type::points)
@@ -2292,7 +2366,7 @@ namespace rsx
 				{
 					m_graphics_state |= rsx::zeta_address_is_cyclic;
 
-					if (!(current_fragment_program.ctrl & (CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_META_USES_DISCARD)) &&
+					if (!(current_fragment_program.ctrl & (CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_META_USES_DISCARD | RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)) &&
 						m_framebuffer_layout.zeta_write_enabled)
 					{
 						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_DISABLE_EARLY_Z;
@@ -2761,9 +2835,9 @@ namespace rsx
 		recovered_fifo_cmds_history.push({fifo_ctrl->last_cmd(), current_time});
 	}
 
-	std::string thread::dump_misc() const
+	void thread::dump_misc(std::string& ret, std::any& custom_data) const
 	{
-		std::string ret = cpu_thread::dump_misc();
+		cpu_thread::dump_misc(ret, custom_data);
 
 		const auto flags = +state;
 
@@ -2776,8 +2850,6 @@ namespace rsx
 		{
 			fmt::append(ret, "\n");
 		}
-
-		return ret;
 	}
 
 	std::vector<std::pair<u32, u32>> thread::dump_callstack_list() const
@@ -2955,7 +3027,7 @@ namespace rsx
 
 			auto& cfg = g_fxo->get<gcm_config>();
 
-			std::unique_lock<shared_mutex> hle_lock;
+			std::optional<std::unique_lock<shared_mutex>> hle_lock;
 
 			for (u32 i = 0; i < std::size(unmap_status); i++)
 			{
@@ -2996,7 +3068,7 @@ namespace rsx
 
 			if (hle_lock)
 			{
-				hle_lock.unlock();
+				hle_lock->unlock();
 			}
 
 			// Pause RSX thread momentarily to handle unmapping
@@ -3398,7 +3470,7 @@ namespace rsx
 		current_display_buffer = buffer;
 		m_queued_flip.emu_flip = true;
 		m_queued_flip.in_progress = true;
-		m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.perf_overlay_enabled;
+		m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.enabled;
 
 		flip(m_queued_flip);
 

@@ -166,7 +166,7 @@ bool serialize<ppu_thread::cr_bits>(utils::serial& ar, typename ppu_thread::cr_b
 	}
 	else
 	{
-		o.unpack(ar);
+		o.unpack(ar.pop<u32>());
 	}
 
 	return true;
@@ -1397,7 +1397,7 @@ extern bool ppu_patch(u32 addr, u32 value)
 {
 	if (addr % 4)
 	{
-		ppu_log.fatal("Patch failed at 0x%x: unanligned memory address.", addr);
+		ppu_log.fatal("Patch failed at 0x%x: unaligned memory address.", addr);
 		return false;
 	}
 
@@ -1475,9 +1475,7 @@ void ppu_thread::dump_regs(std::string& ret, std::any& custom_data) const
 		u32 preferred_cr_field_index = 7;
 	};
 
-	dump_registers_data_t* func_data = nullptr;
-
-	func_data = std::any_cast<dump_registers_data_t>(&custom_data);
+	dump_registers_data_t* func_data = std::any_cast<dump_registers_data_t>(&custom_data);
 
 	if (!func_data)
 	{
@@ -2152,9 +2150,9 @@ std::vector<std::pair<u32, u32>> ppu_thread::dump_callstack_list() const
 	return call_stack_list;
 }
 
-std::string ppu_thread::dump_misc() const
+void ppu_thread::dump_misc(std::string& ret, std::any& custom_data) const
 {
-	std::string ret = cpu_thread::dump_misc();
+	cpu_thread::dump_misc(ret, custom_data);
 
 	if (ack_suspend)
 	{
@@ -2209,7 +2207,6 @@ std::string ppu_thread::dump_misc() const
 	{
 		ret += '\n';
 	}
-	return ret;
 }
 
 void ppu_thread::dump_all(std::string& ret) const
@@ -2561,7 +2558,7 @@ ppu_thread::~ppu_thread()
 }
 
 ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u32 _prio, int detached)
-	: cpu_thread(idm::last_id()), stack_size(param.stack_size), stack_addr(param.stack_addr), joiner(detached != 0 ? ppu_join_status::detached : ppu_join_status::joinable), entry_func(param.entry), start_time(get_guest_system_time()), is_interrupt_thread(detached < 0), ppu_tname(make_single<std::string>(name))
+	: cpu_thread(idm::last_id<ppu_thread>()), stack_size(param.stack_size), stack_addr(param.stack_addr), joiner(detached != 0 ? ppu_join_status::detached : ppu_join_status::joinable), entry_func(param.entry), start_time(get_guest_system_time()), is_interrupt_thread(detached < 0), ppu_tname(make_single<std::string>(name))
 {
 	prio.raw().prio = _prio;
 
@@ -2654,9 +2651,9 @@ struct save_lv2_tag
 };
 
 ppu_thread::ppu_thread(utils::serial& ar)
-	: cpu_thread(idm::last_id()) // last_id() is showed to constructor on serialization
+	: cpu_thread(idm::last_id<ppu_thread>()) // last_id<>() is shown to constructor on serialization
 	  ,
-	  stack_size(ar), stack_addr(ar), joiner(ar.pop<ppu_join_status>()), entry_func(std::bit_cast<ppu_func_opd_t, u64>(ar)), is_interrupt_thread(ar)
+	  stack_size(ar), stack_addr(ar), joiner(ar.pop<ppu_join_status>()), entry_func(std::bit_cast<ppu_func_opd_t>(ar.pop<u64>())), is_interrupt_thread(ar)
 {
 	[[maybe_unused]] const s32 version = GET_SERIALIZATION_VERSION(ppu);
 
@@ -3970,11 +3967,11 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 
 					if (mself.read(hdr) && hdr.get_count(mself.size()))
 					{
+						std::set<u64> offs;
+
 						for (u32 j = 0; j < hdr.count; j++)
 						{
 							mself_record rec{};
-
-							std::set<u64> offs;
 
 							if (mself.read(rec) && rec.get_pos(mself.size()))
 							{

@@ -44,7 +44,7 @@ lv2_memory::lv2_memory(utils::serial &ar)
 
         return null_ptr;
       }(ar.pop<u32>())),
-      counter(ar) {}
+      counter(ar.pop<u32>()) {}
 
 CellError lv2_memory::on_id_create() {
   if (!exists && !ct->take(size)) {
@@ -210,7 +210,7 @@ error_code sys_mmapper_allocate_shared_memory(ppu_thread &ppu, u64 ipc_key,
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -265,7 +265,7 @@ sys_mmapper_allocate_shared_memory_from_container(ppu_thread &ppu, u64 ipc_key,
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -355,7 +355,7 @@ error_code sys_mmapper_allocate_shared_memory_ext(
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -449,7 +449,7 @@ error_code sys_mmapper_allocate_shared_memory_from_container_ext(
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 

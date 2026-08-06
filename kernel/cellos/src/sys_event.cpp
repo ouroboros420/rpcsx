@@ -17,12 +17,13 @@ LOG_CHANNEL(sys_event);
 
 lv2_event_queue::lv2_event_queue(u32 protocol, s32 type, s32 size, u64 name,
                                  u64 ipc_key) noexcept
-    : id(idm::last_id()), protocol{static_cast<u8>(protocol)},
+    : id(idm::last_id<lv2_event_queue>()), protocol{static_cast<u8>(protocol)},
       type(static_cast<u8>(type)), size(static_cast<u8>(size)), name(name),
       key(ipc_key) {}
 
 lv2_event_queue::lv2_event_queue(utils::serial &ar) noexcept
-    : id(idm::last_id()), protocol(ar), type(ar), size(ar), name(ar), key(ar) {
+    : id(idm::last_id<lv2_event_queue>()), protocol(ar), type(ar), size(ar),
+      name(ar), key(ar) {
   ar(events);
 }
 
@@ -234,7 +235,7 @@ error_code sys_event_queue_create(cpu_thread &cpu, vm::ptr<u32> equeue_id,
   }
 
   cpu.check_state();
-  *equeue_id = idm::last_id();
+  *equeue_id = idm::last_id<lv2_event_queue>();
   return CELL_OK;
 }
 

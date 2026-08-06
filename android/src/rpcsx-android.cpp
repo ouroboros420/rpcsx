@@ -1858,7 +1858,11 @@ extern "C" int _rpcsx_boot(std::string_view path_) {
     path.pop_back();
   }
 
-  return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::global));
+  // NOTE: upstream v0.0.41 renamed cfg_mode::global to cfg_mode::database_config.
+  // RPCSX installs no get_database_config callback, so this falls back to the
+  // global config exactly like the old cfg_mode::global did.
+  return static_cast<int>(
+      Emu.BootGame(path, "", false, cfg_mode::database_config));
 }
 
 extern "C" int _rpcsx_getState() {

@@ -72,8 +72,8 @@ extern const std::map<std::string_view, int> g_prx_list{
     {"libcelpenc.sprx", 0},
     {"libddpdec.sprx", 0},
     {"libdivxdec.sprx", 0},
-    {"libdmux.sprx", 0},
-    {"libdmuxpamf.sprx", 0},
+    {"libdmux.sprx", 1},
+    {"libdmuxpamf.sprx", 1},
     {"libdtslbrdec.sprx", 0},
     {"libfiber.sprx", 0},
     {"libfont.sprx", 0},
@@ -240,7 +240,7 @@ prx_load_module(const std::string &vpath, u64 flags,
 
     sys_prx.warning("Ignored module: \"%s\" (id=0x%x)", vpath, idm::last_id());
 
-    return not_an_error(idm::last_id());
+    return not_an_error(idm::last_id<lv2_prx>());
   };
 
   if (ignore) {
@@ -299,7 +299,7 @@ prx_load_module(const std::string &vpath, u64 flags,
 
   sys_prx.success("Loaded module: \"%s\" (id=0x%x)", vpath, idm::last_id());
 
-  return not_an_error(idm::last_id());
+  return not_an_error(idm::last_id<lv2_prx>());
 }
 
 fs::file make_file_view(fs::file &&file, u64 offset, u64 size);
@@ -309,8 +309,8 @@ std::function<void(void *)> lv2_prx::load(utils::serial &ar) {
       GET_SERIALIZATION_VERSION(lv2_prx_overlay);
 
   const std::string path = vfs::get(ar.pop<std::string>());
-  const s64 offset = ar;
-  const u32 state = ar;
+  const s64 offset{ar};
+  const u32 state{ar};
 
   usz seg_count = 0;
   ar.deserialize_vle(seg_count);
@@ -353,7 +353,7 @@ std::function<void(void *)> lv2_prx::load(utils::serial &ar) {
       // Partially recover information
       for (usz i = 0; i < seg_count; i++) {
         auto &seg = prx->segs.emplace_back();
-        seg.addr = ar;
+        ar(seg.addr);
         seg.size = 1; // TODO
       }
     }

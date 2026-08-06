@@ -612,6 +612,15 @@ namespace np
 
 	bool np_handler::discover_ether_address()
 	{
+		if (g_cfg.net.derive_mac_from_psid)
+		{
+			const u128 psid = g_cfg.sys.console_psid;
+			memcpy(ether_address.data(), &psid, 6);
+			ether_address[0] &= 0xFE;
+			ether_address[0] |= 0x02;
+			return true;
+		}
+
 #if defined(__FreeBSD__) || defined(__APPLE__)
 		ifaddrs* ifap;
 
@@ -1228,16 +1237,22 @@ namespace np
 				}
 
 				auto messages = rpcn->get_new_messages();
-				if (basic_handler_registered)
-				{
+
 					for (const auto msg_id : messages)
 					{
 						const auto opt_msg = rpcn->get_message(msg_id);
+
 						if (!opt_msg)
 						{
 							continue;
 						}
+
 						const auto& msg = opt_msg.value();
+					const localized_string_id loc_id = (msg->second.mainType == SCE_NP_BASIC_MESSAGE_MAIN_TYPE_INVITE) ? localized_string_id::CELL_NP_MESSAGE_INVITE_RECEIVED : localized_string_id::CELL_NP_MESSAGE_OTHER_RECEIVED;
+					rsx::overlays::queue_message(get_localized_string(loc_id, msg->first.c_str()), 6'000'000);
+
+					if (basic_handler_registered)
+					{
 						if (strncmp(msg->second.commId.data, basic_handler.context.data, sizeof(basic_handler.context.data) - 1) == 0)
 						{
 							u32 event;
@@ -1447,7 +1462,7 @@ namespace np
 		return req_id;
 	}
 
-	u32 np_handler::get_players_history_count(u32 options)
+	u32 np_handler::get_players_history_count(u32 options) const
 	{
 		const bool all_history = (options == SCE_NP_BASIC_PLAYERS_HISTORY_OPTIONS_ALL);
 
@@ -1465,7 +1480,7 @@ namespace np
 			}));
 	}
 
-	bool np_handler::get_player_history_entry(u32 options, u32 index, SceNpId* npid)
+	bool np_handler::get_player_history_entry(u32 options, u32 index, SceNpId* npid) const
 	{
 		const bool all_history = (options == SCE_NP_BASIC_PLAYERS_HISTORY_OPTIONS_ALL);
 
