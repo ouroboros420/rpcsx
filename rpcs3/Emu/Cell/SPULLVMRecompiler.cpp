@@ -2000,10 +2000,11 @@ public:
 				// Very cursed "checksumming" code
 				// 96 bytes per ARM checksum step
 				//vls[0] -> add
-				//vls[1], vls[2] -> uaba
+				//vls[1], vls[2] -> add
 				//vls[3] -> add
-				//vls[4], vls[5] -> uaba
-				//This allows us to save on some ALU ops relative to load instructions
+				//vls[4], vls[5] -> add
+				//These were uaba pairs upstream, to save ALU ops relative to load
+				//instructions. See update_checksum below for why they had to go.
 				const auto acc_init = ConstantAggregateZero::get(get_type<u32[4]>());
 				llvm::Value* checksum_parts[4] = {acc_init, acc_init, acc_init, acc_init};
 				u32 checksum[16] = {0};
@@ -2013,9 +2014,23 @@ public:
 					for (u32 i = 0; i < 4; i++)
 					{
 						checksum[i] += words[i];
-						checksum[4 + i] += words[4 + i] > words[8 + i] ? words[4 + i] - words[8 + i] : words[8 + i] - words[4 + i];
+						// SUM, not absolute difference. |a - b| is not injective:
+						// adding the same constant to both words leaves it
+						// unchanged, so two blocks differing that way checksum
+						// identically. That is not theoretical here - SPU job
+						// managers stream near-identical job binaries through the
+						// SAME local store address, which is exactly the shape
+						// that collides, and a false match runs one job's cached
+						// compiled block against another job's code.
+						//
+						// x86 sums every word into its accumulator lane and has no
+						// such class. Summing costs two ALU ops per 96-byte block
+						// over the UABD trick and restores equivalent collision
+						// resistance. The vector path below must match this.
+						// (Found and fixed by ARMSX3; upstream 35f65c224.)
+						checksum[4 + i] += words[4 + i] + words[8 + i];
 						checksum[8 + i] += words[12 + i];
-						checksum[12 + i] += words[16 + i] > words[20 + i] ? words[16 + i] - words[20 + i] : words[20 + i] - words[16 + i];
+						checksum[12 + i] += words[16 + i] + words[20 + i];
 			}
 				};
 
@@ -2064,9 +2079,9 @@ public:
 						}
 
 						next_acc[0] = m_ir->CreateAdd(next_acc[0], vls[0]);
-						next_acc[1] = m_ir->CreateAdd(next_acc[1], m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_uabd), {vls[1], vls[2]}));
+						next_acc[1] = m_ir->CreateAdd(next_acc[1], m_ir->CreateAdd(vls[1], vls[2]));
 						next_acc[2] = m_ir->CreateAdd(next_acc[2], vls[3]);
-						next_acc[3] = m_ir->CreateAdd(next_acc[3], m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_uabd), {vls[4], vls[5]}));
+						next_acc[3] = m_ir->CreateAdd(next_acc[3], m_ir->CreateAdd(vls[4], vls[5]));
 					}
 
 					const auto next_offset = m_ir->CreateAdd(offset, m_ir->getInt32(checksum_loop_size));
@@ -2140,9 +2155,9 @@ public:
 					}
 
 					checksum_parts[0] = m_ir->CreateAdd(checksum_parts[0], vls[0]);
-					checksum_parts[1] = m_ir->CreateAdd(checksum_parts[1], m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_uabd), {vls[1], vls[2]}));
+					checksum_parts[1] = m_ir->CreateAdd(checksum_parts[1], m_ir->CreateAdd(vls[1], vls[2]));
 					checksum_parts[2] = m_ir->CreateAdd(checksum_parts[2], vls[3]);
-					checksum_parts[3] = m_ir->CreateAdd(checksum_parts[3], m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_uabd), {vls[4], vls[5]}));
+					checksum_parts[3] = m_ir->CreateAdd(checksum_parts[3], m_ir->CreateAdd(vls[4], vls[5]));
 
 					update_checksum(words);
 
@@ -4673,7 +4688,25 @@ public:
 				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
 				const auto timestamp = m_ir->CreateLoad(get_type<u64>(), spu_ptr(OFFSET_OF(spu_thread, ch_dec_start_timestamp)));
 				const auto dec_value = m_ir->CreateLoad(get_type<u32>(), spu_ptr(OFFSET_OF(spu_thread, ch_dec_value)));
-				const auto tsc = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::readcyclecounter));
+				// RPCSX: upstream 61a260482 widened this path to ARM64 using
+				// llvm.readcyclecounter, but on AArch64 that lowers to
+				// MRS PMCCNTR_EL0 - the performance counter, which userspace cannot
+				// read on Android and which runs at the (DVFS-varying) core clock.
+				// The surrounding math divides by utils::get_tsc_freq(), which on
+				// ARM64 is cntfrq_el0 - the frequency of CNTVCT - and the C++ side of
+				// the decrementer reads cntvct_el0 via rx::get_tsc(). Reading a
+				// different counter than the divisor describes yields a meaningless
+				// delta. Emit the same register the rest of the emulator uses. No isb:
+				// rx::get_tsc() does not use one either, and matching it keeps the JIT
+				// and C++ paths consistent.
+				const auto tsc = m_ir->CreateCall(
+#if defined(ARCH_ARM64)
+					llvm::InlineAsm::get(llvm::FunctionType::get(get_type<u64>(), false),
+						"mrs $0, cntvct_el0", "=r", /*hasSideEffects=*/true)
+#else
+					get_intrinsic(llvm::Intrinsic::readcyclecounter)
+#endif
+				);
 				const auto tscx = m_ir->CreateMul(m_ir->CreateUDiv(tsc, m_ir->getInt64(utils::get_tsc_freq())), m_ir->getInt64(80000000));
 				const auto tscm = m_ir->CreateUDiv(m_ir->CreateMul(m_ir->CreateURem(tsc, m_ir->getInt64(utils::get_tsc_freq())), m_ir->getInt64(80000000)), m_ir->getInt64(utils::get_tsc_freq()));
 				const auto tsctb = m_ir->CreateSub(m_ir->CreateAdd(tscx, tscm), timebase_offs);
@@ -5493,7 +5526,25 @@ public:
 			if (utils::get_tsc_freq() && !(g_cfg.core.spu_loop_detection) && (g_cfg.core.clocks_scale == 100))
 			{
 				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
-				const auto tsc = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::readcyclecounter));
+				// RPCSX: upstream 61a260482 widened this path to ARM64 using
+				// llvm.readcyclecounter, but on AArch64 that lowers to
+				// MRS PMCCNTR_EL0 - the performance counter, which userspace cannot
+				// read on Android and which runs at the (DVFS-varying) core clock.
+				// The surrounding math divides by utils::get_tsc_freq(), which on
+				// ARM64 is cntfrq_el0 - the frequency of CNTVCT - and the C++ side of
+				// the decrementer reads cntvct_el0 via rx::get_tsc(). Reading a
+				// different counter than the divisor describes yields a meaningless
+				// delta. Emit the same register the rest of the emulator uses. No isb:
+				// rx::get_tsc() does not use one either, and matching it keeps the JIT
+				// and C++ paths consistent.
+				const auto tsc = m_ir->CreateCall(
+#if defined(ARCH_ARM64)
+					llvm::InlineAsm::get(llvm::FunctionType::get(get_type<u64>(), false),
+						"mrs $0, cntvct_el0", "=r", /*hasSideEffects=*/true)
+#else
+					get_intrinsic(llvm::Intrinsic::readcyclecounter)
+#endif
+				);
 				const auto tscx = m_ir->CreateMul(m_ir->CreateUDiv(tsc, m_ir->getInt64(utils::get_tsc_freq())), m_ir->getInt64(80000000));
 				const auto tscm = m_ir->CreateUDiv(m_ir->CreateMul(m_ir->CreateURem(tsc, m_ir->getInt64(utils::get_tsc_freq())), m_ir->getInt64(80000000)), m_ir->getInt64(utils::get_tsc_freq()));
 				const auto tsctb = m_ir->CreateSub(m_ir->CreateAdd(tscx, tscm), timebase_offs);

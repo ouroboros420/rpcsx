@@ -1823,6 +1823,14 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
 
   g_cfg.core.llvm_cpu.from_string("cortex-a34");
 
+  // v0.0.41 added the boot-sequence music overlay, defaulting ON. It reaches
+  // ensure(Emu.GetCallbacks().make_video_source()) in
+  // Emu/RSX/Overlays/overlay_audio.cpp, and setupCallbacks() above installs no
+  // make_video_source - Android has no video_source implementation - so the
+  // empty std::function throws std::bad_function_call for any title shipping
+  // SND0.AT3. Keep it off until a video_source exists here.
+  g_cfg.misc.play_music_during_boot.set(false);
+
   Emulator::SaveSettings(g_cfg.to_string(), Emu.GetTitleID());
   return true;
 }
