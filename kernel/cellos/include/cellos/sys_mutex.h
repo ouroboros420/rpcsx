@@ -142,7 +142,10 @@ struct lv2_mutex final : lv2_obj {
         res = schedule<T>(data.sq, protocol, false);
 
         if (sq == data.sq) {
-          atomic_storage<u32>::release(control.raw().owner, res->id);
+          if (cpu_flag::again - res->state) {
+            atomic_storage<u32>::release(control.raw().owner, res->id);
+          }
+
           return false;
         }
 

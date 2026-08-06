@@ -163,6 +163,7 @@ target_sources(rpcs3_emu PRIVATE
     Io/TopShotFearmaster.cpp
     Io/Turntable.cpp
     Io/usb_device.cpp
+    Io/usb_microphone.cpp
     Io/usb_vfs.cpp
     Io/usio.cpp
     Io/LogitechG27.cpp
@@ -171,7 +172,7 @@ target_sources(rpcs3_emu PRIVATE
 
 # Np
 target_sources(rpcs3_emu PRIVATE
-    NP/fb_helpers.cpp
+    NP/pb_helpers.cpp
     NP/np_cache.cpp
     NP/np_gui_cache.cpp
     NP/np_contexts.cpp
@@ -191,6 +192,7 @@ target_sources(rpcs3_emu PRIVATE
     NP/upnp_config.cpp
     NP/upnp_handler.cpp
     NP/ip_address.cpp
+    NP/generated/np2_structs.pb.cc
 )
 
 # Memory
@@ -395,7 +397,7 @@ target_link_libraries(rpcs3_emu
         3rdparty::soundtouch
         3rdparty::miniupnpc
         3rdparty::libevdev
-        3rdparty::flatbuffers
+        3rdparty::protobuf
         3rdparty::pugixml
         3rdparty::json
         3rdparty::vulkanmemoryallocator

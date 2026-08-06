@@ -1122,14 +1122,14 @@ error_code sceNpTrophyUnlockTrophy(ppu_thread& ppu, u32 context, u32 handle,
 
 	auto& trophy_manager = g_fxo->get<sce_np_trophy_manager>();
 
-	reader_lock lock(trophy_manager.mtx);
+	std::scoped_lock lock(trophy_manager.mtx);
 
 	if (!trophy_manager.is_initialized)
 	{
 		return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
 	}
 
-	const auto [ctxt, error] = trophy_manager.get_context_ex(context, handle);
+	const auto [ctxt, error] = trophy_manager.get_context_ex(context, handle, true);
 
 	if (error)
 	{
@@ -1299,9 +1299,9 @@ error_code sceNpTrophyGetTrophyUnlockState(u32 context, u32 handle,
 	for (u32 id = 0; id < count_; id++)
 	{
 		if (tropusr->GetTrophyUnlockState(id))
-			flags->flag_bits[id / 32] |= 1 << (id % 32);
+			flags->flag_bits[id / 32] |= 1u << (id % 32);
 		else
-			flags->flag_bits[id / 32] &= ~(1 << (id % 32));
+			flags->flag_bits[id / 32] &= ~(1u << (id % 32));
 	}
 
 	return CELL_OK;
@@ -1696,6 +1696,12 @@ error_code sceNpTrophyGetTrophyIcon(u32 context, u32 handle, s32 trophyId,
 	return CELL_OK;
 }
 
+error_code sceNpTrophyNetworkSync()
+{
+	UNIMPLEMENTED_FUNC(sceNpTrophy);
+	return CELL_OK;
+}
+
 DECLARE(ppu_module_manager::sceNpTrophy)("sceNpTrophy", []()
 	{
 		REG_FUNC(sceNpTrophy, sceNpTrophyGetGameProgress);
@@ -1719,4 +1725,5 @@ DECLARE(ppu_module_manager::sceNpTrophy)("sceNpTrophy", []()
 		REG_FUNC(sceNpTrophy, sceNpTrophyGetTrophyDetails);
 		REG_FUNC(sceNpTrophy, sceNpTrophyGetTrophyInfo);
 		REG_FUNC(sceNpTrophy, sceNpTrophyGetGameIcon);
+		REG_FUNC(sceNpTrophy, sceNpTrophyNetworkSync);
 	});

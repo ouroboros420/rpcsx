@@ -712,7 +712,7 @@ namespace vk
 			view_swizzle = source->native_component_map;
 		}
 
-		image->set_debug_name("Temp view");
+		image->set_debug_name(fmt::format("Temp view, fmt=0x%x", gcm_format));
 		image->set_native_component_layout(view_swizzle);
 		auto view = image->get_view(remap_vector);
 
@@ -1017,6 +1017,29 @@ namespace vk
 			const VkFormat vk_format = get_compatible_sampler_format(m_formats_support, gcm_format);
 			VkImageCreateFlags create_flags = is_cubemap ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
 			VkSharingMode sharing_mode = (flags & texture_create_flags::shareable) ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+			rsx::simple_array<VkFormat> mutable_format_list;
+
+			if (flags & texture_create_flags::mutable_format)
+			{
+				const VkFormat snorm_fmt = get_compatible_snorm_format(vk_format);
+				const VkFormat srgb_fmt = get_compatible_srgb_format(vk_format);
+
+				if (snorm_fmt != VK_FORMAT_UNDEFINED)
+				{
+					mutable_format_list.push_back(snorm_fmt);
+				}
+
+				if (srgb_fmt != VK_FORMAT_UNDEFINED)
+				{
+					mutable_format_list.push_back(srgb_fmt);
+				}
+
+				if (!mutable_format_list.empty())
+				{
+					create_flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+					mutable_format_list.push_back(vk_format);
+				}
+			}
 
 			if (auto found = find_cached_image(vk_format, width, height, depth, mipmaps, image_type, create_flags, usage_flags, sharing_mode))
 			{
@@ -1029,9 +1052,16 @@ namespace vk
 					create_flags |= VK_IMAGE_CREATE_SHAREABLE_RPCS3;
 				}
 
+				VkFormatEx create_format = vk_format;
+				if (!mutable_format_list.empty())
+				{
+					create_format.pViewFormats = mutable_format_list.data();
+					create_format.viewFormatCount = mutable_format_list.size();
+				}
+
 				image = new vk::viewable_image(*m_device,
 					m_memory_types.device_local, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-					image_type, vk_format,
+					image_type, create_format,
 					width, height, depth, mipmaps, layer, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 					VK_IMAGE_TILING_OPTIMAL, usage_flags, create_flags,
 					VMM_ALLOCATION_POOL_TEXTURE_CACHE, rsx::classify_format(gcm_format));
@@ -1114,6 +1144,12 @@ namespace vk
 
 		const bool upload_async = rsx::get_current_renderer()->get_backend_config().supports_asynchronous_compute;
 		rsx::flags32_t create_flags = 0;
+
+		if (context == rsx::texture_upload_context::shader_read &&
+			!g_cfg.video.disable_hardware_texel_remapping)
+		{
+			create_flags |= texture_create_flags::mutable_format;
+		}
 
 		if (upload_async && ensure(g_fxo->try_get<AsyncTaskScheduler>())->is_host_mode())
 		{
@@ -1250,7 +1286,7 @@ namespace vk
 		{
 		default:
 			// TODO
-			err_once("Format incompatibility detected, reporting failure to force data copy (VK_FORMAT=0x%X, GCM_FORMAT=0x%X)", static_cast<u32>(vk_format), gcm_format);
+			warn_once("Format incompatibility detected, reporting failure to force data copy (VK_FORMAT=0x%X, GCM_FORMAT=0x%X)", static_cast<u32>(vk_format), gcm_format);
 			return false;
 #ifndef __APPLE__
 		case CELL_GCM_TEXTURE_R5G6B5:

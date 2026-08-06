@@ -582,30 +582,28 @@ error_code sys_net_bnet_connect(ppu_thread &ppu, s32 s,
     return not_an_error(result);
   }
 
-  if (!sock.ret) {
-    while (auto state = ppu.state.fetch_sub(cpu_flag::signal)) {
-      if (is_stopped(state)) {
-        return {};
-      }
-
-      if (state & cpu_flag::signal) {
-        break;
-      }
-
-      ppu.state.wait(state);
+  while (auto state = ppu.state.fetch_sub(cpu_flag::signal)) {
+    if (is_stopped(state)) {
+      return {};
     }
 
-    if (ppu.gpr[3] == static_cast<u64>(-SYS_NET_EINTR)) {
-      return -SYS_NET_EINTR;
+    if (state & cpu_flag::signal) {
+      break;
     }
 
-    if (result) {
-      if (result < 0) {
-        return sys_net_error{result};
-      }
+    ppu.state.wait(state);
+  }
 
-      return not_an_error(result);
+  if (ppu.gpr[3] == static_cast<u64>(-SYS_NET_EINTR)) {
+    return -SYS_NET_EINTR;
+  }
+
+  if (result) {
+    if (result < 0) {
+      return sys_net_error{result};
     }
+
+    return not_an_error(result);
   }
 
   return CELL_OK;
@@ -989,7 +987,7 @@ error_code sys_net_bnet_sendto(ppu_thread &ppu, s32 s, vm::cptr<void> buf,
                          flags);
   }
 
-  if (addr && addrlen < 8) {
+  if (addr && addrlen < sizeof(sys_net_sockaddr)) {
     sys_net.error("sys_net_bnet_sendto(s=%d): bad addrlen (%u)", s, addrlen);
     return -SYS_NET_EINVAL;
   }
@@ -1289,13 +1287,12 @@ error_code sys_net_bnet_poll(ppu_thread &ppu, vm::ptr<sys_net_pollfd> fds,
       }
 
       if (auto sock = idm::check_unlocked<lv2_socket>(fds_buf[i].fd)) {
-        signaled += sock->poll(fds_buf[i], _fds[i]);
+        sock->poll(fds_buf[i], _fds[i]);
 #ifdef _WIN32
         connecting[i] = sock->is_connecting();
 #endif
       } else {
         fds_buf[i].revents |= SYS_NET_POLLNVAL;
-        signaled++;
       }
     }
 
@@ -1508,9 +1505,9 @@ error_code sys_net_bnet_select(ppu_thread &ppu, s32 nfds,
 #endif
     for (s32 i = 0; i < nfds; i++) {
       bool sig = false;
-      if (_fds[i].revents & (POLLIN | POLLHUP | POLLERR))
+      if ((_fds[i].revents & (POLLIN | POLLHUP | POLLERR)) && _readfds.bit(i))
         sig = true, rread.set(i);
-      if (_fds[i].revents & (POLLOUT | POLLERR))
+      if ((_fds[i].revents & (POLLOUT | POLLERR)) && _writefds.bit(i))
         sig = true, rwrite.set(i);
 
       if (sig) {

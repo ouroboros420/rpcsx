@@ -264,6 +264,8 @@ void GLGSRender::init_buffers(rsx::framebuffer_creation_context context, bool /*
 		}
 	}
 
+	ensure(m_draw_fbo);
+
 	switch (rsx::method_registers.surface_color_target())
 	{
 	case rsx::surface_target::none: break;

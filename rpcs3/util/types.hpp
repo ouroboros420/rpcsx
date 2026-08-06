@@ -1,6 +1,8 @@
 #pragma once
 #include <rx/types.hpp>
 
+#include <new>
+
 namespace stx
 {
 	template <typename T, bool Se, usz Align>

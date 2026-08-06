@@ -694,7 +694,7 @@ namespace rsx
 					0});
 		}
 
-		void texture_read_semaphore_release(context* ctx, u32 /*reg*/, u32 arg)
+		void texture_read_semaphore_release(context* ctx, u32 reg, u32 arg)
 		{
 			// Pipeline barrier seems to be equivalent to a SHADER_READ stage barrier.
 			// Ideally the GPU only needs to have cached all textures declared up to this point before writing the label.
@@ -719,15 +719,15 @@ namespace rsx
 
 			if (g_cfg.video.strict_rendering_mode) [[unlikely]]
 			{
-				util::write_gcm_label<true, true>(ctx, addr, arg);
+				util::write_gcm_label<true, true>(ctx, reg, addr, arg);
 			}
 			else
 			{
-				util::write_gcm_label<true, false>(ctx, addr, arg);
+				util::write_gcm_label<true, false>(ctx, reg, addr, arg);
 			}
 		}
 
-		void back_end_write_semaphore_release(context* ctx, u32 /*reg*/, u32 arg)
+		void back_end_write_semaphore_release(context* ctx, u32 reg, u32 arg)
 		{
 			// Full pipeline barrier. GPU must flush pipeline before writing the label
 
@@ -748,7 +748,7 @@ namespace rsx
 			}
 
 			const u32 val = (arg & 0xff00ff00) | ((arg & 0xff) << 16) | ((arg >> 16) & 0xff);
-			util::write_gcm_label<true, true>(ctx, addr, val);
+			util::write_gcm_label<true, true>(ctx, reg, addr, val);
 		}
 
 		void sync(context* ctx, u32, u32)

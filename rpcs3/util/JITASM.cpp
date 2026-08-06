@@ -15,6 +15,10 @@
 #define CAN_OVERCOMMIT
 #endif
 
+#if defined(__APPLE__)
+#include <mutex>
+#endif
+
 LOG_CHANNEL(jit_log, "JIT");
 
 void jit_announce(uptr func, usz size, std::string_view name)

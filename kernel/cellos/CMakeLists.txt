@@ -62,7 +62,8 @@ PRIVATE
 target_link_libraries(cellos-kernel PUBLIC
     rpcs3_core # FIXME: remove
     3rdparty::soundtouch # FIXME: remove
-    3rdparty::flatbuffers # FIXME: remove
+    # flatbuffers dropped: upstream v0.0.40 replaced it with protobuf for NP,
+    # deleting the generated headers and the 3rdparty::flatbuffers target.
     3rdparty::wolfssl  # FIXME: remove
     3rdparty::miniupnpc # FIXME: remove
     3rdparty::libusb  # FIXME: remove

@@ -1238,8 +1238,14 @@ public:
 
 		if (auto [is_const, value] = try_get_const_equal_value_array<u32>(+op.ra); is_const)
 		{
+			if (value % 0x200 != 0)
+			{
+				// si10 is overwritten - likely an analysis mistake
+				return;
+			}
+
 			// Comment constant formation
-			comment_constant(last_opcode, value | static_cast<u32>(op.si10));
+			comment_constant(last_opcode, value | static_cast<u32>(op.si10), false);
 		}
 	}
 	void ORHI(spu_opcode_t op)
@@ -1276,8 +1282,14 @@ public:
 
 		if (auto [is_const, value] = try_get_const_equal_value_array<u32>(op.ra); is_const)
 		{
+			if (value % 0x200 != 0)
+			{
+				// si10 is overwritten - likely an analysis mistake
+				return;
+			}
+
 			// Comment constant formation
-			comment_constant(last_opcode, value + static_cast<u32>(op.si10));
+			comment_constant(last_opcode, value + static_cast<u32>(op.si10), false);
 		}
 	}
 	void AHI(spu_opcode_t op)
@@ -1298,8 +1310,14 @@ public:
 
 		if (auto [is_const, value] = try_get_const_equal_value_array<u32>(op.ra); is_const)
 		{
+			if (value % 0x200 != 0)
+			{
+				// si10 is overwritten - likely an analysis mistake
+				return;
+			}
+
 			// Comment constant formation
-			comment_constant(last_opcode, value ^ static_cast<u32>(op.si10));
+			comment_constant(last_opcode, value ^ static_cast<u32>(op.si10), false);
 		}
 	}
 	void XORHI(spu_opcode_t op)

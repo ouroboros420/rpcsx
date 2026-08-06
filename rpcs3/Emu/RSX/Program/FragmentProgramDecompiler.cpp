@@ -827,7 +827,7 @@ std::string FragmentProgramDecompiler::GetSRC(T src)
 		break;
 
 	case RSX_FP_REGISTER_TYPE_UNKNOWN: // ??? Used by a few games, what is it?
-		rsx_log.error("Src type 3 used, opcode=0x%X, dst=0x%X s0=0x%X s1=0x%X s2=0x%X",
+		rsx_log.error("[FP] Invalid Src type 3 used, opcode=0x%X, dst=0x%X s0=0x%X s1=0x%X s2=0x%X",
 			dst.opcode, dst.HEX, src0.HEX, src1.HEX, src2.HEX);
 
 		// This is not some special type, it is a bug indicating memory corruption
@@ -1254,7 +1254,7 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 		if (dst.exp_tex)
 		{
 			properties.has_exp_tex_op = true;
-			AddCode("_enable_texture_expand();");
+			AddCode("_enable_texture_expand($_i);");
 		}
 
 		// Shadow proj
@@ -1351,6 +1351,7 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 std::string FragmentProgramDecompiler::Decompile()
 {
 	auto graph = deconstruct_fragment_program(m_prog);
+	m_is_valid_ucode = true;
 
 	if (!graph.blocks.empty())
 	{
@@ -1377,15 +1378,14 @@ std::string FragmentProgramDecompiler::Decompile()
 		FP::RegisterAnnotationPass annotation_pass{ m_prog, { .skip_delay_slots = true } };
 		FP::RegisterDependencyPass dependency_pass{};
 
-		annotation_pass.run(graph);
-		dependency_pass.run(graph);
+		m_is_valid_ucode = m_is_valid_ucode && annotation_pass.run(graph);
+		m_is_valid_ucode = m_is_valid_ucode && dependency_pass.run(graph);
 	}
 
 	m_size = 0;
 	m_location = 0;
 	m_loop_count = 0;
 	m_code_level = 1;
-	m_is_valid_ucode = true;
 	m_constant_offsets.clear();
 
 	// For GLSL scope wind/unwind. We store the min scope depth and loop count for each block and "unwind" to it.

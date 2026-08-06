@@ -72,11 +72,7 @@
 	path = 3rdparty/wolfssl/wolfssl
 	url = ../../wolfSSL/wolfssl.git
 	ignore = dirty
-[submodule "rpcs3/3rdparty/flatbuffers"]
-	path = 3rdparty/flatbuffers
-	url = ../../google/flatbuffers.git
-	ignore = dirty
-[submodule "rpcs3/3rdparty/cubeb/cubeb"]
+[submodule "3rdparty/cubeb/cubeb"]
 	path = 3rdparty/cubeb/cubeb
 	url = ../../mozilla/cubeb.git
 	ignore = dirty
@@ -144,3 +140,7 @@
 [submodule "3rdparty/glfw"]
 	path = 3rdparty/glfw
 	url = ../../glfw/glfw.git
+[submodule "3rdparty/protobuf/protobuf"]
+	path = 3rdparty/protobuf/protobuf
+	url = ../../protocolbuffers/protobuf.git
+	ignore = dirty

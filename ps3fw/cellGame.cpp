@@ -514,8 +514,8 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 				psf::get_string(psf, fmt::format("TITLE_%02d", i)));
 		}
 
-		cellGame.warning("cellHddGameCheck(): Data exists:\nATTRIBUTE: 0x%x, RESOLUTION: 0x%x, RESOLUTION: 0x%x, SOUND_FORMAT: 0x%x, dataVersion: %s"
-			, get->getParam.attribute, get->getParam.resolution, get->getParam.soundFormat, get->getParam.soundFormat, std::span<const u8>(reinterpret_cast<const u8*>(get->getParam.dataVersion), 6));
+		cellGame.warning("cellHddGameCheck(): Data exists:\nATTRIBUTE: 0x%x, RESOLUTION: 0x%x, SOUND_FORMAT: 0x%x, dataVersion: %s"
+			, get->getParam.attribute, get->getParam.resolution, get->getParam.soundFormat, std::span<const u8>(reinterpret_cast<const u8*>(get->getParam.dataVersion), 6));
 	}
 
 	// TODO ?
@@ -611,7 +611,7 @@ error_code cellHddGameCheck(ppu_thread& ppu, u32 version,
 		break;
 
 	default:
-		cellGame.error("cellHddGameCheck(): callback returned unknown error (code=0x%x). Error message: %s", result->invalidMsg);
+		cellGame.error("cellHddGameCheck(): callback returned unknown error (code=0x%x). Error message: %s", result->result, result->invalidMsg);
 		error_msg = get_localized_string(localized_string_id::CELL_HDD_GAME_CHECK_INVALID, "%s", result->invalidMsg);
 		break;
 	}
@@ -1310,7 +1310,7 @@ error_code cellGameDataCheckCreate2(ppu_thread& ppu, u32 version,
 		break;
 
 	default:
-		cellGame.error("cellGameDataCheckCreate2(): callback returned unknown error (code=0x%x). Error message: %s", cbResult->invalidMsg);
+		cellGame.error("cellGameDataCheckCreate2(): callback returned unknown error (code=0x%x). Error message: %s", cbResult->result, cbResult->invalidMsg);
 		error_msg = get_localized_string(localized_string_id::CELL_GAMEDATA_CHECK_INVALID, "%s", cbResult->invalidMsg);
 		break;
 	}
@@ -1999,7 +1999,7 @@ error_code cellGameThemeInstall(vm::cptr<char> usrdirPath,
 	{
 		u32 magic{};
 
-		if (src_path.ends_with(".p3t") || !theme.read(magic) ||
+		if (!fmt::to_lower(src_path).ends_with(".p3t") || !theme.read(magic) ||
 			magic != "P3TF"_u32)
 		{
 			return CELL_GAME_ERROR_INVALID_THEME_FILE;
@@ -2096,8 +2096,8 @@ error_code cellGameThemeInstallFromBuffer(
 					"cellGameThemeInstallFromBuffer: writing %d bytes at pos %d",
 					read_size, file_offset);
 
-				if (theme.write(reinterpret_cast<u8*>(buf.get_ptr()) + file_offset,
-						read_size) != read_size)
+				if (theme.write(reinterpret_cast<u8*>(buf.get_ptr()), read_size) !=
+					read_size)
 				{
 					cellGame.error("cellGameThemeInstallFromBuffer: failed to write to "
 								   "destination file '%s' (error=%s)",

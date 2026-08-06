@@ -2147,6 +2147,14 @@ public:
 					}
 				}
 
+				if (bb.preds.size() >= 2)
+				{
+					if (g_cfg.core.spu_prof || g_cfg.core.spu_debug)
+					{
+						m_ir->CreateStore(m_ir->getInt64((m_hash_start & -65536) | (baddr >> 2)), spu_ptr(&spu_thread::block_hash));
+					}
+				}
+
 				// State check at the beginning of the chunk
 				if (need_check || (bi == 0 && g_cfg.core.spu_block_size != spu_block_size_type::safe))
 				{
@@ -2806,12 +2814,9 @@ public:
 		std::string& llvm_log = function_log;
 		raw_string_ostream out(llvm_log);
 
-		if (g_cfg.core.spu_debug)
-		{
 			fmt::append(llvm_log, "LLVM IR at 0x%x:\n", func.entry_point);
 			out << *_module; // print IR
 			out << "\n\n";
-		}
 
 		if (verifyModule(*_module, &out))
 		{
@@ -3278,12 +3283,9 @@ public:
 		std::string llvm_log;
 		raw_string_ostream out(llvm_log);
 
-		if (g_cfg.core.spu_debug)
-		{
 			fmt::append(llvm_log, "LLVM IR (interpreter):\n");
 			out << *_module; // print IR
 			out << "\n\n";
-		}
 
 		if (verifyModule(*_module, &out))
 		{

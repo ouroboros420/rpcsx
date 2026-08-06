@@ -26,7 +26,7 @@ struct lv2_update_manager {
     if (std::from_chars(version_str.data(),
                         version_str.data() + version_str.size(),
                         system_sw_version, 16)
-            .ec != std::errc{})
+            .ec == std::errc{})
       system_sw_version <<= 40;
     else
       system_sw_version = 0;
@@ -78,6 +78,7 @@ struct lv2_update_manager {
     std::unique_lock unique_lock(malloc_mutex);
 
     if (malloc_set.count(addr)) {
+      malloc_set.erase(addr);
       return vm::dealloc(addr, vm::main);
     }
 

@@ -120,6 +120,7 @@ static int clock_gettime(int clk_id, struct timespec *tp) {
 
 #ifndef _WIN32
 
+#include <exception>
 #include <sys/time.h>
 
 static struct timespec start_time = []() {

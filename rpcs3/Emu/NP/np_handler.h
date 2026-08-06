@@ -176,6 +176,7 @@ namespace np
 		u32 leave_room(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2LeaveRoomRequest* req);
 		u32 search_room(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SearchRoomRequest* req);
 		u32 get_roomdata_external_list(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomDataExternalListRequest* req);
+		u32 get_room_member_data_external_list(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomMemberDataExternalListRequest* req);
 		u32 set_roomdata_external(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SetRoomDataExternalRequest* req);
 		u32 get_roomdata_internal(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomDataInternalRequest* req);
 		u32 set_roomdata_internal(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SetRoomDataInternalRequest* req);
@@ -234,6 +235,7 @@ namespace np
 		std::pair<error_code, std::optional<SceNpMatching2RoomSlotInfo>> local_get_room_slots(SceNpMatching2RoomId room_id);
 		std::pair<error_code, std::optional<SceNpMatching2SessionPassword>> local_get_room_password(SceNpMatching2RoomId room_id);
 		std::pair<error_code, std::vector<SceNpMatching2RoomMemberId>> local_get_room_memberids(SceNpMatching2RoomId room_id, s32 sort_method);
+		std::pair<error_code, std::optional<SceNpMatching2SignalingOptParam>> local_get_signaling_opt_param(SceNpMatching2RoomId room_id);
 		error_code local_get_room_member_data(SceNpMatching2RoomId room_id, SceNpMatching2RoomMemberId member_id, const std::vector<SceNpMatching2AttributeId>& binattrs_list, SceNpMatching2RoomMemberDataInternal* ptr_member, u32 addr_data, u32 size_data, u32 ctx_id);
 
 		// Local GUI functions
@@ -254,12 +256,13 @@ namespace np
 		// Misc stuff
 		void req_ticket(u32 version, const SceNpId* npid, const char* service_id, const u8* cookie, u32 cookie_size, const char* entitlement_id, u32 consumed_count);
 		const ticket& get_ticket() const;
-		u32 get_clan_ticket_ready();
-		ticket get_clan_ticket();
+		u32 get_clan_ticket_ready() const;
+		ticket get_clan_ticket() const;
 		void add_player_to_history(const SceNpId* npid, const char* description);
 		u32 add_players_to_history(const SceNpId* npids, const char* description, u32 count);
 		u32 get_players_history_count(u32 options);
 		bool get_player_history_entry(u32 options, u32 index, SceNpId* npid);
+		SceNpMatching2MemoryInfo get_memory_info() const;
 		error_code abort_request(u32 req_id);
 
 		// For signaling
@@ -320,6 +323,7 @@ namespace np
 		void reply_leave_room(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_search_room(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_get_roomdata_external_list(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
+		void reply_get_room_member_data_external_list(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_set_roomdata_external(u32 req_id, rpcn::ErrorType error);
 		void reply_get_roomdata_internal(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_set_roomdata_internal(u32 req_id, rpcn::ErrorType error);

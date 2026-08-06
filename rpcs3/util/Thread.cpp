@@ -10,7 +10,6 @@
 #include "cellos/sys_process.h"
 #include "Thread.h"
 #include "util/JIT.h"
-#include <thread>
 #include <cfenv>
 
 #ifdef ARCH_ARM64

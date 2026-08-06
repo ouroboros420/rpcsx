@@ -997,40 +997,43 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 
 		// Sort the entries
 		{
-			const u32 order = setList->sortOrder;
 			const u32 type = setList->sortType;
 
-			std::sort(save_entries.begin(), save_entries.end(),
-				[order, type](const SaveDataEntry& entry1, const SaveDataEntry& entry2) -> bool
+			auto comp = [type](const SaveDataEntry& entry1,
+							const SaveDataEntry& entry2) -> bool
+			{
+				const bool mtime_lower = entry1.mtime < entry2.mtime;
+				const bool mtime_equal = entry1.mtime == entry2.mtime;
+				const bool subtitle_lower = entry1.subtitle < entry2.subtitle;
+				const bool subtitle_equal = entry1.subtitle == entry2.subtitle;
+
+				if (type == CELL_SAVEDATA_SORTTYPE_MODIFIEDTIME)
 				{
-					const bool mtime_lower = entry1.mtime < entry2.mtime;
-					const bool mtime_equal = entry1.mtime == entry2.mtime;
-					const bool subtitle_lower = entry1.subtitle < entry2.subtitle;
-					const bool subtitle_equal = entry1.subtitle == entry2.subtitle;
-					const bool revert_order = order == CELL_SAVEDATA_SORTORDER_DESCENT;
-
-					if (type == CELL_SAVEDATA_SORTTYPE_MODIFIEDTIME)
+					if (mtime_equal)
 					{
-						if (mtime_equal)
-						{
-							return subtitle_lower != revert_order;
-						}
-
-						return mtime_lower != revert_order;
-					}
-					else if (type == CELL_SAVEDATA_SORTTYPE_SUBTITLE)
-					{
-						if (subtitle_equal)
-						{
-							return mtime_lower != revert_order;
-						}
-
-						return subtitle_lower != revert_order;
+						return subtitle_lower;
 					}
 
-					ensure(false);
-					return true;
-				});
+					return mtime_lower;
+				}
+				else if (type == CELL_SAVEDATA_SORTTYPE_SUBTITLE)
+				{
+					if (subtitle_equal)
+					{
+						return mtime_lower;
+					}
+
+					return subtitle_lower;
+				}
+
+				ensure(false);
+				return true;
+			};
+
+			if (setList->sortOrder == CELL_SAVEDATA_SORTORDER_ASCENT)
+				std::sort(save_entries.begin(), save_entries.end(), comp);
+			else
+				std::sort(save_entries.rbegin(), save_entries.rend(), comp);
 		}
 
 		// Fill the listGet->dirList array
@@ -2984,6 +2987,18 @@ error_code cellSaveDataUserFixedDelete(ppu_thread& ppu, u32 userId,
 		6, userdata, userId, funcDone);
 }
 
+error_code cellSaveDataGetEnableOverlay()
+{
+	cellSaveData.todo("cellSaveDataGetEnableOverlay()");
+
+	// auto& manager = g_fxo->get<savedata_manager>();
+	// manager.enable_overlay;
+
+	// TODO
+
+	return CELL_OK;
+}
+
 void cellSaveDataEnableOverlay(s32 enable)
 {
 	cellSaveData.notice("cellSaveDataEnableOverlay(enable=%d)", enable);
@@ -3233,6 +3248,7 @@ void cellSysutil_SaveData_init()
 	REG_VAR(cellSysutil, g_savedata_context).flag(MFF_HIDDEN);
 
 	// libsysutil functions:
+	REG_FUNC(cellSysutil, cellSaveDataGetEnableOverlay);
 	REG_FUNC(cellSysutil, cellSaveDataEnableOverlay);
 
 	REG_FUNC(cellSysutil, cellSaveDataDelete2);

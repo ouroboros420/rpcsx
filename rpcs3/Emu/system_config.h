@@ -197,6 +197,7 @@ struct cfg_root : cfg::node
 		cfg::_bool disable_async_host_memory_manager{this, "Disable Asynchronous Memory Manager", false, true};
 		cfg::_enum<output_scaling_mode> output_scaling{this, "Output Scaling Mode", output_scaling_mode::bilinear, true};
 		cfg::_bool record_with_overlays{ this, "Record With Overlays", true, true };
+		cfg::_bool disable_hardware_texel_remapping{ this, "Disable Hardware ColorSpace Remapping", false, true };
 
 		struct node_vk : cfg::node
 		{
@@ -289,7 +290,7 @@ struct cfg_root : cfg::node
 		cfg::string audio_device{this, "Audio Device", "@@@default@@@", true};
 		cfg::_int<0, 200> volume{this, "Master Volume", 100, true};
 		cfg::_bool enable_buffering{this, "Enable Buffering", true, true};
-		cfg::_int<4, 250> desired_buffer_duration{this, "Desired Audio Buffer Duration", 100, true};
+		cfg::_int <4, 250> desired_buffer_duration{ this, "Desired Audio Buffer Duration", 34, true };
 		cfg::_bool enable_time_stretching{this, "Enable Time Stretching", false, true};
 		cfg::_bool disable_sampling_skip{this, "Disable Sampling Skip", false, true};
 		cfg::_int<0, 100> time_stretching_threshold{this, "Time Stretching Threshold", 75, true};
@@ -308,6 +309,7 @@ struct cfg_root : cfg::node
 		cfg::_enum<fake_camera_type> camera_type{this, "Camera type", fake_camera_type::unknown};
 		cfg::_enum<camera_flip> camera_flip_option{this, "Camera flip", camera_flip::none, true};
 		cfg::string camera_id{this, "Camera ID", "Default", true};
+		cfg::string sdl_camera_id{ this, "SDL Camera ID", "Default", true };
 		cfg::_enum<move_handler> move{this, "Move", move_handler::null, true};
 		cfg::_enum<buzz_handler> buzz{this, "Buzz emulated controller", buzz_handler::null};
 		cfg::_enum<turntable_handler> turntable{this, "Turntable emulated controller", turntable_handler::null};

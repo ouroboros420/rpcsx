@@ -906,7 +906,7 @@ error_code _sys_prx_register_library(ppu_thread &ppu, vm::ptr<void> library) {
                  lib_addr < prx.exports_end;
                  index++, lib_addr += vm::read8(lib_addr) ? vm::read8(lib_addr)
                                                           : sizeof_lib) {
-              if (std::memcpy(vm::base(lib_addr), mem_copy.data(),
+              if (std::memcmp(vm::base(lib_addr), mem_copy.data(),
                               sizeof_lib) == 0) {
                 atomic_storage<char>::release(
                     prx.m_external_loaded_flags[index], true);

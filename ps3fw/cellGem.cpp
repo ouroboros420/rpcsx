@@ -1504,8 +1504,15 @@ void gem_config_data::operator()()
 			vc = vc_attribute;
 		}
 
-		if (g_cfg.io.camera != camera_handler::qt)
+		switch (g_cfg.io.camera)
 		{
+#ifdef HAVE_SDL3
+		case camera_handler::sdl:
+#endif
+		case camera_handler::qt:
+			break;
+		case camera_handler::fake:
+		case camera_handler::null:
 			video_conversion_in_progress = false;
 			done();
 			continue;

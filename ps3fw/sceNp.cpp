@@ -769,7 +769,7 @@ error_code sceNpDrmIsAvailable(ppu_thread& ppu, vm::cptr<u8> k_licensee_addr,
 	lv2_obj::sleep(ppu);
 
 	const auto ret = npDrmIsAvailable(k_licensee_addr, drm_path);
-	lv2_sleep(25'000, &ppu);
+	lv2_sleep(5'000, &ppu);
 
 	return ret;
 }
@@ -906,7 +906,7 @@ error_code sceNpDrmGetTimelimit(vm::cptr<char> path, vm::ptr<u64> time_remain)
 	}
 
 	// Convert time to milliseconds
-	s64 msec = *sec * 1000ll + *nsec / 1000ll;
+	s64 msec = *sec * 1000ll + *nsec / 1'000'000ll;
 
 	// Return the remaining time in microseconds
 	if (npd.activate_time != 0 && msec < npd.activate_time)
@@ -1186,12 +1186,35 @@ sceNpBasicSetPresenceDetails2(vm::cptr<SceNpBasicPresenceDetails2> pres,
 	return CELL_OK;
 }
 
-error_code sceNpBasicSendMessage(vm::cptr<SceNpId> to, vm::cptr<void> data,
-	u32 size)
-{
-	sceNp.warning("sceNpBasicSendMessage(to=*0x%x, data=*0x%x, size=%d)", to,
-		data, size);
+u64 sys_time_get_system_time();
 
+error_code acquire_time_slot(u64* time_array, usz array_size, u64 slot_duration)
+{
+	static shared_mutex mutex;
+	std::lock_guard lock(mutex);
+
+	const u64 current_time = sys_time_get_system_time();
+
+	for (usz index = 0; index < array_size; index++)
+	{
+		if (time_array[index] == 0)
+		{
+			time_array[index] = current_time;
+			return CELL_OK;
+		}
+
+		if (current_time > (time_array[index] + slot_duration))
+		{
+			time_array[index] = current_time;
+			return CELL_OK;
+		}
+	}
+
+	return SCE_NP_BASIC_ERROR_BUSY;
+}
+
+error_code _sceNpBasicSendMessage(vm::cptr<SceNpId> to, vm::cptr<void> data, u32 size, bool rate_limited)
+{
 	auto& nph = g_fxo->get<named_thread<np::np_handler>>();
 
 	if (!nph.is_NP_init)
@@ -1214,6 +1237,23 @@ error_code sceNpBasicSendMessage(vm::cptr<SceNpId> to, vm::cptr<void> data,
 		return SCE_NP_BASIC_ERROR_EXCEEDS_MAX;
 	}
 
+	if (rate_limited)
+	{
+		struct sceNpBasicSendMessage_time_slots
+		{
+			sceNpBasicSendMessage_time_slots() = default;
+			sceNpBasicSendMessage_time_slots(sceNpBasicSendMessage_time_slots&&) = delete;
+			std::array<u64, 20> data{};
+		};
+
+		auto& time_slots = g_fxo->get<sceNpBasicSendMessage_time_slots>();
+
+		if (auto error = acquire_time_slot(time_slots.data.data(), time_slots.data.size(), 60000000); error != CELL_OK)
+		{
+			return error;
+		}
+	}
+
 	if (nph.get_psn_status() != SCE_NP_MANAGER_STATUS_ONLINE)
 	{
 		return not_an_error(SCE_NP_BASIC_ERROR_NOT_CONNECTED);
@@ -1228,11 +1268,29 @@ error_code sceNpBasicSendMessage(vm::cptr<SceNpId> to, vm::cptr<void> data,
 		.data = std::vector<u8>(static_cast<const u8*>(data.get_ptr()),
 			static_cast<const u8*>(data.get_ptr()) + size)};
 	std::set<std::string> npids;
-	npids.insert(std::string(to->handle.data));
+	npids.insert(np::npid_to_string(*to));
 
 	nph.send_message(msg_data, npids);
 
 	return CELL_OK;
+}
+
+error_code sceNpBasicSendMessage(vm::cptr<SceNpId> to, vm::cptr<void> data,
+	u32 size)
+{
+	sceNp.warning("sceNpBasicSendMessage(to=*0x%x, data=*0x%x, size=%d)", to,
+		data, size);
+	return _sceNpBasicSendMessage(to, data, size, false);
+}
+
+// This function is sceNpBasicSendMessage + a rate limiter that will return
+// SCE_NP_BASIC_ERROR_BUSY if it too many messages have been sent
+error_code sceNpBasicLimited_0xEB42E2E6(vm::cptr<SceNpId> to,
+	vm::cptr<void> data, u32 size)
+{
+	sceNp.warning("sceNpBasicLimited_0xEB42E2E6(to=*0x%x, data=*0x%x, size=%d)",
+		to, data, size);
+	return _sceNpBasicSendMessage(to, data, size, true);
 }
 
 error_code sceNpBasicSendMessageGui(ppu_thread& ppu,
@@ -1251,7 +1309,7 @@ error_code sceNpBasicSendMessageGui(ppu_thread& ppu,
 		for (u32 i = 0; i < msg->count && msg->npids; i++)
 		{
 			sceNp.trace("sceNpBasicSendMessageGui: NpId[%d] = %s", i,
-				static_cast<char*>(&msg->npids[i].handle.data[0]));
+				np::npid_to_string(msg->npids[i]));
 		}
 		sceNp.notice("sceNpBasicSendMessageGui: subject: %s", msg->subject);
 		sceNp.notice("sceNpBasicSendMessageGui: body: %s", msg->body);
@@ -1427,7 +1485,7 @@ error_code sceNpBasicSendMessageGui(ppu_thread& ppu,
 	{
 		for (u32 i = 0; i < msg->count; i++)
 		{
-			npids.insert(std::string(msg->npids[i].handle.data));
+			npids.insert(np::npid_to_string(msg->npids[i]));
 		}
 	}
 
@@ -3725,9 +3783,9 @@ error_code sceNpLookupUserProfileAsync(s32 transId, vm::cptr<SceNpId> npId,
 	vm::ptr<SceNpAvatarImage> avatarImage,
 	s32 prio, vm::ptr<void> option)
 {
-	sceNp.todo("sceNpLookupUserProfile(transId=%d, npId=*0x%x, userInfo=*0x%x, "
-			   "aboutMe=*0x%x, languages=*0x%x, countryCode=*0x%x, "
-			   "avatarImage=*0x%x, prio=%d, option=*0x%x)",
+	sceNp.todo("sceNpLookupUserProfileAsync(transId=%d, npId=*0x%x, "
+			   "userInfo=*0x%x, aboutMe=*0x%x, languages=*0x%x, "
+			   "countryCode=*0x%x, avatarImage=*0x%x, prio=%d, option=*0x%x)",
 		transId, npId, userInfo, aboutMe, languages, countryCode,
 		avatarImage, prio, option);
 
@@ -4558,19 +4616,16 @@ error_code sceNpManagerGetTicket(vm::ptr<void> buffer,
 	}
 
 	const auto& ticket = nph.get_ticket();
-	*bufferSize = static_cast<u32>(ticket.size());
 
 	if (!buffer)
 	{
+		*bufferSize = static_cast<u32>(ticket.size());
 		return CELL_OK;
 	}
 
-	if (*bufferSize < ticket.size())
-	{
-		return SCE_NP_ERROR_INVALID_ARGUMENT;
-	}
-
-	memcpy(buffer.get_ptr(), ticket.data(), ticket.size());
+	const u32 size_read = std::min(::size32(ticket), static_cast<u32>(*bufferSize));
+	std::memcpy(buffer.get_ptr(), ticket.data(), size_read);
+	*bufferSize = size_read;
 
 	return CELL_OK;
 }
@@ -6171,7 +6226,7 @@ error_code scenp_score_record_score(s32 transId, SceNpScoreBoardId boardId,
 	else
 	{
 		data = &gameInfo->nativeData[0];
-		data_size = 64;
+		data_size = sizeof(gameInfo->nativeData);
 	}
 
 	nph.record_score(trans_ctx, boardId, score, scoreComment, data, data_size,
@@ -8028,7 +8083,8 @@ error_code sceNpUtilCanonicalizeNpIdForPsp(vm::ptr<SceNpId> npId)
 error_code sceNpUtilCmpNpId(vm::ptr<SceNpId> id1, vm::ptr<SceNpId> id2)
 {
 	sceNp.trace("sceNpUtilCmpNpId(id1=*0x%x(%s), id2=*0x%x(%s))", id1,
-		id1 ? id1->handle.data : "", id2, id2 ? id2->handle.data : "");
+		id1 ? np::npid_to_string(*id1) : std::string(), id2,
+		id2 ? np::npid_to_string(*id2) : std::string());
 
 	if (!id1 || !id2)
 	{
@@ -8241,6 +8297,11 @@ s32 _Z32_sce_np_sysutil_cxml_prepare_docPN16sysutil_cxmlutil11FixedMemoryERN4cxm
 			   "cxmlutil11FixedMemoryERN4cxml8DocumentEPKcRNS2_7ElementES6_i()");
 	return CELL_OK;
 }
+
+DECLARE(ppu_module_manager::sceNpBasicLimited)
+("sceNpBasicLimited", []() {
+	ppu_module_manager::register_static_function<&sceNpBasicLimited_0xEB42E2E6>("sceNpBasicLimited", ppu_select_name("sceNpBasicLimited", "sceNpBasicLimited_0xEB42E2E6"), BIND_FUNC_WITH_BLR(sceNpBasicLimited_0xEB42E2E6, "sceNpBasicLimited"), 0xEB42E2E6);
+});
 
 DECLARE(ppu_module_manager::sceNp)
 ("sceNp", []()

@@ -71,22 +71,22 @@ struct spu_itype
 		RDCH,
 		RCHCNT,
 
-		BR, // branch_tag first
+		BR, // branch_tag first, zregmod_tag (2) first
 		BRA,
 		BRNZ,
 		BRZ,
 		BRHNZ,
 		BRHZ,
-		BRSL,
-		BRASL,
 		IRET,
 		BI,
 		BISLED,
-		BISL,
 		BIZ,
 		BINZ,
 		BIHZ,
-		BIHNZ, // branch_tag last
+		BIHNZ, // zregmod_tag (2) last
+		BRSL,
+		BRASL,
+		BISL, // branch_tag last
 
 		ILH, // constant_tag_first
 		ILHU,
@@ -265,7 +265,7 @@ struct spu_itype
 	// Test for branch instruction
 	friend constexpr bool operator&(type value, branch_tag)
 	{
-		return value >= BR && value <= BIHNZ;
+		return value >= BR && value <= BISL;
 	}
 
 	// Test for floating point instruction
@@ -319,7 +319,7 @@ struct spu_itype
 	// Test for non register-modifying instruction
 	friend constexpr bool operator&(type value, zregmod_tag)
 	{
-		return value >= HEQ && value <= STQR;
+		return (value >= HEQ && value <= STQR) || (value >= BR && value <= BIHNZ);
 	}
 };
 

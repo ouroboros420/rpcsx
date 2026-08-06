@@ -352,7 +352,12 @@ namespace glsl
 					{"FILTERED_MAG_BIT", rsx::texture_control_bits::FILTERED_MAG},
 					{"FILTERED_MIN_BIT", rsx::texture_control_bits::FILTERED_MIN},
 					{"INT_COORDS_BIT  ", rsx::texture_control_bits::UNNORMALIZED_COORDS},
-					{"CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT}});
+					{"CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT},
+
+					{"FORMAT_FEATURE_SIGNED_BIT", rsx::texture_control_bits::FF_SIGNED_BIT},
+					{"FORMAT_FEATURE_GAMMA_BIT", rsx::texture_control_bits::FF_GAMMA_BIT},
+					{"FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT", rsx::texture_control_bits::FF_BIASED_RENORM_BIT},
+					{"FORMAT_FEATURE_16BIT_CHANNELS_BIT", rsx::texture_control_bits::FF_16BIT_CHANNELS_BIT}});
 
 			if (props.require_texture_expand)
 			{
@@ -392,6 +397,16 @@ namespace glsl
 			if (props.require_alpha_kill)
 			{
 				enabled_options.push_back("_ENABLE_TEXTURE_ALPHA_KILL");
+			}
+
+			if (props.require_color_format_convert)
+			{
+				enabled_options.push_back("_ENABLE_FORMAT_CONVERSION");
+			}
+
+			if (props.require_depth_conversion)
+			{
+				enabled_options.push_back("_ENABLE_DEPTH_FORMAT_RECONSTRUCTION");
 			}
 
 			program_common::define_glsl_switches(OS, enabled_options);

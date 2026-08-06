@@ -5,6 +5,7 @@
 #include "Emu/Io/pad_types.h"
 #include "Emu/Io/pad_config.h"
 #include "Emu/Io/pad_config_types.h"
+#include "Input/mouse_gyro_handler.h"
 #include "util/mutex.h"
 
 #include <map>
@@ -45,6 +46,8 @@ public:
 		return m_handlers;
 	}
 
+	mouse_gyro_handler& get_mouse_gyro() { return m_mouse_gyro; }
+
 	static std::shared_ptr<PadHandlerBase> GetHandler(pad_handler type, void* thread = nullptr, void* window = nullptr);
 	static void InitPadConfig(cfg_pad& cfg, pad_handler type, std::shared_ptr<PadHandlerBase>& handler);
 
@@ -76,6 +79,7 @@ private:
 	bool m_resume_emulation_flag = false;
 	bool m_ps_button_pressed = false;
 	atomic_t<bool> m_home_menu_open = false;
+	mouse_gyro_handler m_mouse_gyro;
 };
 
 namespace pad
