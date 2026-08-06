@@ -101,6 +101,8 @@ namespace vk
 		s32 static_parameters[4];
 		s32 static_parameters_width = 2;
 
+		static constexpr usz fragment_push_constants_size = sizeof(static_parameters);
+
 		depth_resolve_base()
 		{
 			renderpass_config.set_depth_mask(true);
@@ -124,7 +126,7 @@ namespace vk
 				glsl::input_type_push_constant,
 				0,
 				umax,
-				glsl::push_constant_ref{ .size = 16 }
+				glsl::push_constant_ref{ .size = fragment_push_constants_size }
 			));
 			return result;
 		}

@@ -1207,20 +1207,296 @@ usz get_x64_access_size(x64_context* context, x64_op_t op, x64_reg_t reg, usz d_
 
 #elif defined(ARCH_ARM64)
 
-#if defined(__APPLE__)
+#ifdef _WIN32
+#define RIP(context) (reinterpret_cast<CONTEXT*>((context))->Pc)
+#define GPR(context, index) (reinterpret_cast<CONTEXT*>((context))->X[index])
+#elif defined(__APPLE__)
 // https://github.com/bombela/backward-cpp/issues/200
 #define RIP(context) ((context)->uc_mcontext->__ss.__pc)
+#define GPR(context, index) ((context)->uc_mcontext->__ss.__x[(index)])
 #elif defined(__FreeBSD__)
 #define RIP(context) ((context)->uc_mcontext.mc_gpregs.gp_elr)
+#define GPR(context, index) ((context)->uc_mcontext.mc_gpregs.gp_x[(index)])
 #elif defined(__NetBSD__)
 #define RIP(context) ((context)->uc_mcontext.__gregs[_REG_PC])
+#define GPR(context, index) ((context)->uc_mcontext.__gregs[(index)])
 #elif defined(__OpenBSD__)
 #define RIP(context) ((context)->sc_elr)
+#define GPR(context, index) ((context)->sc_x[(index)])
 #else
 #define RIP(context) ((context)->uc_mcontext.pc)
+#define GPR(context, index) ((context)->uc_mcontext.regs[(index)])
 #endif
 
-#endif /* ARCH_ */
+enum mem_a64_op_t
+{
+	A64_INVALID = 0,
+	A64_LOAD,
+	A64_STORE,
+};
+
+struct a64_mem_info_t
+{
+	mem_a64_op_t op;
+	u32 mem_size;   // Bytes accessed in memory
+	u32 reg_size;   // Register width (4 or 8 bytes)
+	u32 reg_num;
+	bool reg_signed;
+};
+
+a64_mem_info_t decode_a64_mem_inst(u32 inst)
+{
+	a64_mem_info_t r{ A64_INVALID, 0, 0, inst % 32, false };
+
+	// Exclude SIMD/FP loads/stores
+	if ((inst >> 26) & 1)
+	{
+		return r;
+	}
+
+	// Scalar load/store immediate, unsigned offset variants only:
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	// class bits[29:24] = 111001
+	if ((inst & 0x3B000000) == 0x39000000)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STR
+			r.op = A64_STORE;
+			r.reg_size = r.mem_size;
+			return r;
+		}
+		case 1:
+		{
+			// LDR unsigned zero-extend
+			// size=3 (64-bit) -> Xt; everything else -> Wt
+			r.op = A64_LOAD;
+			r.reg_size = (size == 3) ? 8u : 4u;
+			r.reg_signed = false;
+			return r;
+		}
+		case 2:
+		case 3:
+		{
+			if (size == 3)
+			{
+				return r;
+			}
+
+			if (size == 2 && opc == 3)
+			{
+				// Invalid LDRSW
+				return r;
+			}
+
+			// LDRSB/LDRSH/LDRSW
+			// size determines extension type:
+			// 00 LDRSB
+			// 01 LDRSH
+			// 10 LDRSW
+			r.op = A64_LOAD;
+
+			if (size == 2)
+			{
+				// LDUSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDRSB/LDRSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			r.reg_signed = true;
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// Scalar load/store unscaled immediate (LDUR/STUR)
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	if ((inst & 0x3B200C00u) == 0x38000000u)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STURB/STURH/STUR Wt/STUR Xt
+			r.op = A64_STORE;
+
+			// Source register width
+			r.reg_size = r.mem_size;
+			return r;
+		}
+
+		case 1:
+		{
+			// LDURB/LDURH/LDUR Wt/LDUR Xt
+			r.op = A64_LOAD;
+
+			// Destination register width
+			r.reg_size = (size == 3) ? 8 : 4;
+			r.reg_signed = false;
+			return r;
+		}
+
+		case 2:
+		case 3:
+		{
+			// LDURSB/LDURSH/LDURSW
+			if (size == 3)
+			{
+				return r;
+			}
+
+			r.op = A64_LOAD;
+			r.reg_signed = true;
+
+			if (size == 2)
+			{
+				// LDURSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDURSB/LDURSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// 
+	// Literal loads:
+	// 
+	// LDR Wt, label
+	// LDR Xt, label
+	// LDRSW Xt, label
+	//
+
+	// This is not needed for MMIO (which is the only use for this function)
+
+	// if ((inst & 0x3B000000) == 0x18000000)
+	// {
+	// 	u32 opc = (inst >> 30) & 3;
+
+	// 	r.op = A64_LOAD;
+
+	// 	switch (opc)
+	// 	{
+	// 	case 0: // LDR Wt literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 4;
+	// 		return r;
+	// 	}
+	// 	case 1: // LDR Xt literal
+	// 	{
+	// 		r.mem_size = 8;
+	// 		r.reg_size = 8;
+	// 		return r;
+	// 	}
+	// 	case 2: // LDRSW literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 8;
+	// 		r.reg_signed = true;
+	// 		return r;
+	// 	}
+	// 	default:
+	// 	{
+	// 		break;
+	// 	}
+	// 	}
+	// }
+
+	return r;
+}
+
+void put_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size, bool reg_signed, u32 mem_size, u64 value)
+{
+	ensure(mem_size == 1 || mem_size == 2 || mem_size == 4 || mem_size == 8);
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_size >= mem_size);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register" 
+		ensure(false);
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	// Mask for sign-extending the value
+	const u64 sign_bit = value & (make_mask(mem_size) / 2 + 1);
+	const u64 sign_mask = (reg_signed && sign_bit != 0 && reg_size > mem_size) ? (make_mask(reg_size) & ~make_mask(mem_size)) : 0;
+
+	u64 temp_reg_value = 0;
+	temp_reg_value |= (value & make_mask(mem_size)); // Set value (adjusted by size)
+	temp_reg_value |= sign_mask; // Apply sign-extension
+	GPR(context, reg_index) = temp_reg_value;
+}
+
+u64 get_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size)
+{
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register"
+		return 0;
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	return (GPR(context, reg_index) & make_mask(reg_size));
+}
+
+#endif /* ARCH_ARM64 */
 
 namespace rsx
 {
@@ -1436,11 +1712,11 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 
 			if (a_size == 4)
 			{
-				value = stx::se_storage<u32>::swap(value);
+				value = std::bit_cast<be_t<u32>>(value);
 			}
 			else if (a_size == 2)
 			{
-				value = stx::se_storage<u16>::swap(value);
+				value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
 			}
 			else
 			{
@@ -2092,7 +2368,7 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 #else
-	const u32 insn = is_executing ? 0 : *reinterpret_cast<u32*>(RIP(context));
+	const u32 insn = is_executing ? 0 : read_from_ptr_unsafe<u32>(RIP(context));
 	const bool is_writing =
 		(insn & 0xbfff0000) == 0x0c000000 || // STR <Wt>, [<Xn>, #<imm>] (store word with immediate offset)
 		(insn & 0xbfe00000) == 0x0c800000 || // STP <Wt1>, <Wt2>, [<Xn>, #<imm>] (store pair of registers with immediate offset)
@@ -2150,6 +2426,37 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 	append_thread_name(msg);
+
+#ifdef __APPLE__
+	thread_local bool s_tls_is_attempting_recovery = false;
+	thread_local bool s_tls_last_cause_is_executing = false;
+
+	if (reinterpret_cast<u64>(info->si_addr) < 0x10000)
+	{
+		// Do not recover from the virtual page of 0x0 (such as nullptr)
+	}
+	else if (is_executing || is_writing)
+	{
+		if (s_tls_is_attempting_recovery && s_tls_last_cause_is_executing != is_executing)
+		{
+			// Cause changed, inform recovery
+			s_tls_is_attempting_recovery = false;
+		}
+
+		if (!s_tls_is_attempting_recovery)
+		{
+			s_tls_last_cause_is_executing = is_executing;
+			s_tls_is_attempting_recovery = true;
+			pthread_jit_write_protect_np(is_executing ? true : false);
+
+			sys_log.error("\n%s", msg);
+			sys_log.notice("\n%s", dump_useful_thread_info());
+			sys_log.error("Attempting recovery using pthread_jit_write_protect_np()");
+			logs::listener::sync_all();
+			return;
+		}
+	}
+#endif
 
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
@@ -2270,18 +2577,41 @@ void thread_base::start()
 	pthread_attr_setstacksize(&stack_size_attr, 0x800000);
 	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), &stack_size_attr, entry_point, this) == 0);
 #else
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), nullptr, entry_point, this) == 0);
+	pthread_t thread_id{};
+	ensure(pthread_create(&thread_id, nullptr, entry_point, this) == 0);
+#endif
+
+#ifndef _WIN32
+	// Update m_thread atomically
+	u64 dest_id = 0;
+	std::memcpy(&dest_id, &thread_id, sizeof(thread_id));
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, dest_id))
+	{
+		ensure(m_thread == dest_id);
+	}
 #endif
 }
 
 void thread_base::initialize(void (*error_cb)())
 {
 #ifndef _WIN32
-#ifdef ANDROID
-	m_thread.release(pthread_self());
+#ifdef __APPLE__
+	while (!m_thread)
+	{
+		busy_wait();
+	}
+	[[maybe_unused]] u64 new_tid = 0;
+#elif defined(ANDROID)
+	const u64 new_tid = pthread_self();
 #else
-	m_thread.release(reinterpret_cast<u64>(pthread_self()));
+	const u64 new_tid = reinterpret_cast<u64>(pthread_self());
 #endif
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, new_tid))
+	{
+		ensure(m_thread == new_tid);
+	}
 #endif
 
 	// Initialize TLS variables
@@ -3519,15 +3849,26 @@ std::pair<void*, usz> thread_ctrl::get_thread_stack()
 
 u64 thread_ctrl::get_tid()
 {
+	static thread_local u64 s_tls_tid = []() -> u64
+	{
 #ifdef _WIN32
 	return GetCurrentThreadId();
 #elif defined(ANDROID)
-	return static_cast<u64>(pthread_self());
+		return pthread_gettid_np(pthread_self());
 #elif defined(__linux__)
 	return syscall(SYS_gettid);
+	#elif defined(__APPLE__)
+		u64 tid{};
+		pthread_threadid_np(nullptr, &tid);
+		return tid;
+	#elif defined(__FreeBSD__)
+		return pthread_getthreadid_np();
 #else
-	return reinterpret_cast<u64>(pthread_self());
+		return static_cast<u64>(pthread_self());
 #endif
+	}();
+
+	return s_tls_tid;
 }
 
 bool thread_ctrl::is_main()

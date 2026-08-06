@@ -160,7 +160,7 @@ namespace fmt
 	std::string_view trim_back_sv(std::string_view source, std::string_view values = " \t");
 
 	template <typename T>
-	std::string merge(const T& source, std::string_view separator)
+	std::string merge(const T& source, std::string_view separator, bool is_skip_empty = false)
 	{
 		if (source.empty())
 		{
@@ -179,6 +179,23 @@ namespace fmt
 		auto it = source.begin();
 		auto end = source.end();
 
+		if (is_skip_empty)
+		{
+			for (; it != end; ++it)
+			{
+				if (it->empty()) continue;
+
+				if (!result.empty() && !separator.empty())
+				{
+					result.append(separator);
+				}
+
+				result.append(*it);
+			}
+
+			return result;
+		}
+
 		for (--end; it != end; ++it)
 		{
 			result.append(*it);
@@ -191,7 +208,7 @@ namespace fmt
 	}
 
 	template <typename T>
-	std::string merge(std::initializer_list<T> sources, std::string_view separator)
+	std::string merge(std::initializer_list<T> sources, std::string_view separator, bool is_skip_empty = false)
 	{
 		if (!sources.size())
 		{
@@ -212,6 +229,11 @@ namespace fmt
 
 		for (const auto& v : sources)
 		{
+			if (v.empty()) continue;
+
+			std::string sub = fmt::merge(v, separator, is_skip_empty);
+			if (sub.empty()) continue;
+
 			if (first)
 			{
 				first = false;
@@ -221,7 +243,7 @@ namespace fmt
 				result.append(separator);
 			}
 
-			result.append(fmt::merge(v, separator));
+			result.append(std::move(sub));
 		}
 
 		return result;

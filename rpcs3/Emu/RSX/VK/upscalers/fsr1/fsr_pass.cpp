@@ -58,7 +58,7 @@ namespace vk
 			m_src = fmt::replace_all(m_src, replacement_table);
 
 			// Fill with 0 to avoid sending incomplete/unused variables to the GPU
-			memset(m_constants_buf, 0, sizeof(m_constants_buf));
+			std::fill(m_constants_buf.begin(), m_constants_buf.end(), 0u);
 
 			// No ssbo usage
 			ssbo_count = 0;

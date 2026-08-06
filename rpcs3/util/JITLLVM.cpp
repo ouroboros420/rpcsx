@@ -244,7 +244,7 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 	MemoryManager1(std::function<u64(const std::string&)> symbols_cement = {}) noexcept
 		: m_symbols_cement(std::move(symbols_cement))
 	{
-		auto ptr = reinterpret_cast<u8*>(utils::memory_reserve(c_max_size * 3));
+		auto ptr = reinterpret_cast<u8*>(utils::memory_reserve(c_max_size * 3, true));
 		m_code_mems = ptr;
 		// ptr += c_max_size;
 		// m_data_ro_mems = ptr;
@@ -263,7 +263,7 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 		// utils::memory_decommit(m_code_mems, how_much(code_ptr));
 		// utils::memory_decommit(m_data_ro_mems, how_much(data_ro_ptr));
 		// utils::memory_decommit(m_data_rw_mems, how_much(data_rw_ptr));
-		utils::memory_decommit(m_code_mems, c_max_size * 3);
+		utils::memory_decommit(m_code_mems, c_max_size * 3, true);
 	}
 
 	llvm::JITSymbol findSymbol(const std::string& name) override
@@ -553,9 +553,9 @@ public:
 	}
 };
 
-std::string jit_compiler::cpu(const std::string& _cpu)
+std::string jit_compiler::cpu(std::string_view _cpu)
 {
-	std::string m_cpu = _cpu;
+	std::string m_cpu = std::string(_cpu);
 
 	if (m_cpu.empty())
 	{
@@ -714,11 +714,7 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 	std::string result;
 
 	auto null_mod = std::make_unique<llvm::Module>("null_", *m_context);
-#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 	null_mod->setTargetTriple(llvm::Triple(jit_compiler::triple1()));
-#else
-	null_mod->setTargetTriple(jit_compiler::triple1());
-#endif
 
 	std::unique_ptr<llvm::RTDyldMemoryManager> mem;
 
@@ -732,11 +728,7 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 		else
 		{
 			mem = std::make_unique<MemoryManager2>(std::move(symbols_cement));
-#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 			null_mod->setTargetTriple(llvm::Triple(jit_compiler::triple2()));
-#else
-			null_mod->setTargetTriple(jit_compiler::triple2());
-#endif
 		}
 	}
 	else
@@ -756,6 +748,15 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 		attributes.push_back("+dotprod");
 	else
 		attributes.push_back("-dotprod");
+
+	// The recompilers emit i8mm intrinsics (e.g. ummla) gated on utils::has_i8mm().
+	// The JIT target features must advertise i8mm too, otherwise the backend fails
+	// with "Cannot select: intrinsic %llvm.aarch64.neon.ummla" whenever the resolved
+	// -mcpu does not already imply it (e.g. the cortex-a78 fallback on Apple silicon).
+	if (utils::has_i8mm())
+		attributes.push_back("+i8mm");
+	else
+		attributes.push_back("-i8mm");
 
 	if (utils::has_sve())
 		attributes.push_back("+sve");

@@ -2030,6 +2030,17 @@ fs::native_handle fs::file::get_handle() const
 #endif
 }
 
+bool fs::set_sparse([[maybe_unused]] const fs::file& file)
+{
+#ifdef _WIN32
+	FILE_SET_SPARSE_BUFFER sparse{TRUE};
+	DWORD returned = 0;
+	return DeviceIoControl(file.get_handle(), FSCTL_SET_SPARSE, &sparse, sizeof(sparse), nullptr, 0, &returned, nullptr) != FALSE;
+#else
+	return true;
+#endif
+}
+
 fs::file_id fs::file::get_id() const
 {
 	if (m_file)

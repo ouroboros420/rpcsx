@@ -437,7 +437,7 @@ namespace vk
 		dst_stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
 		if (memory_barriers.empty())
 		{
-			const VkMemoryBarrier signal_barrier =
+			VkMemoryBarrier signal_barrier =
 				{
 					.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 					.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,

@@ -115,11 +115,11 @@ protected:
 	/** returns string calling function where arguments are passed via
 	 * $0 $1 $2 substring.
 	 */
-	virtual std::string getFunction(FUNCTION) = 0;
+	virtual std::string getFunction(FUNCTION f) = 0;
 
 	/** returns string calling comparison function on 2 args passed as strings.
 	 */
-	virtual std::string compareFunction(COMPARE, const std::string&, const std::string&) = 0;
+	virtual std::string compareFunction(COMPARE f, std::string_view Op0, std::string_view Op1) = 0;
 
 	/** Insert header of shader file (eg #version, "system constants"...)
 	 */

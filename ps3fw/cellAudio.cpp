@@ -1026,6 +1026,13 @@ void cell_audio_thread::operator()()
 
 	// Destroy ringbuffer
 	ringbuffer.reset();
+
+	// Destroy the audio backend on this thread (the one that created it in cfg.reset()).
+	// The backend's ctor calls CoInitializeEx here on Windows; releasing it on a different
+	// thread (g_fxo->clear() runs on the GUI thread during Kill()) would land the matching
+	// CoUninitialize on the GUI thread, draining its OLE reference and silently breaking the
+	// main window's file drag&drop. Keep COM init/teardown balanced on this thread.
+	cfg.backend.reset();
 }
 
 audio_port* cell_audio_thread::open_port()
@@ -1671,15 +1678,11 @@ error_code AudioSetNotifyEventQueue(ppu_thread& ppu, u64 key, u32 iFlags)
 	lv2_sleep(20, &ppu);
 
 	// Dirty hack for sound: confirm the creation of _mxr000 event queue by _cellsurMixerMain thread
-	constexpr u64 c_mxr000 = 0x8000cafe0246030;
+	constexpr u64 c_mxr000 = 0x8000cafe02460300;
 
 	if (key == c_mxr000 || key == 0)
 	{
-		bool has_sur_mixer_thread = false;
-
-		for (usz count = 0; !lv2_event_queue::find(c_mxr000) && count < 100; count++)
-		{
-			if (has_sur_mixer_thread || idm::select<named_thread<ppu_thread>>([&](u32 id, named_thread<ppu_thread>& test_ppu)
+		const bool has_sur_mixer_thread = idm::select<named_thread<ppu_thread>>([&](u32 id, named_thread<ppu_thread>& test_ppu)
 											{
 												// Confirm thread existence
 												if (id == ppu.id)
@@ -1698,10 +1701,9 @@ error_code AudioSetNotifyEventQueue(ppu_thread& ppu, u64 key, u32 iFlags)
 											})
 											.ret)
 			{
-				has_sur_mixer_thread = true;
-			}
-			else
+			if (lv2_event_queue::find(c_mxr000))
 			{
+				was_mxr000_queue_found = true;
 				break;
 			}
 
@@ -1711,13 +1713,14 @@ error_code AudioSetNotifyEventQueue(ppu_thread& ppu, u64 key, u32 iFlags)
 				return {};
 			}
 
-			cellAudio.error("AudioSetNotifyEventQueue(): Waiting for _mxr000. x%d", count);
+			(count < 3 ? cellAudio.warning : cellAudio.error)("AudioSetNotifyEventQueue(): Waiting for _mxr000. x%d", count);
 
 			lv2_sleep(50'000, &ppu);
 		}
 
-		if (has_sur_mixer_thread && lv2_event_queue::find(c_mxr000))
+		if (key == 0 && was_mxr000_queue_found)
 		{
+			// Correct key value argument
 			key = c_mxr000;
 		}
 	}

@@ -1298,7 +1298,7 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 			}
 		}
 
-		auto delete_save = [&]()
+		const auto delete_save = [&]()
 		{
 			strcpy_trunc(doneGet->dirName, save_entries[selected].dirName);
 			doneGet->hddFreeSizeKB =
@@ -1635,7 +1635,7 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 			}
 			else
 			{
-				fmt::throw_exception("Invalid savedata selected");
+				fmt::throw_exception("Invalid savedata selected (selected=%d)", selected);
 			}
 		}
 	}

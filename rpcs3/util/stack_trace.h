@@ -28,7 +28,7 @@ namespace utils
 			{
 			}
 
-			void print(const std::string& s)
+			void print(std::string_view s)
 			{
 				log.error("%s", s);
 			}

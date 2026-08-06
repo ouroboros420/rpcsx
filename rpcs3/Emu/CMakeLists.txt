@@ -29,6 +29,17 @@ if(USE_ASAN)
     set_source_files_properties(../../Utilities/Thread.cpp PROPERTIES COMPILE_DEFINITIONS USE_ASAN)
 endif()
 
+# GCC overemits weak type information when using LTO
+# This causes an issue with LLVM 22 which is build without RTTI
+# Issue is specifically related to vfs::ProxyFileSystem
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+        Cell/PPUThread.cpp
+        Cell/SPULLVMRecompiler.cpp
+        PROPERTIES COMPILE_OPTIONS -fno-lto
+    )
+endif()
+
 if(NOT USE_SYSTEM_OPENAL)
     target_compile_definitions(rpcs3_emu PUBLIC AL_LIBTYPE_STATIC)
 endif()
@@ -316,6 +327,7 @@ if(NOT ANDROID AND NOT APPLE)
         RSX/GL/glutils/buffer_object.cpp
         RSX/GL/glutils/capabilities.cpp
         RSX/GL/glutils/common.cpp
+        RSX/GL/glutils/ex.cpp
         RSX/GL/glutils/fbo.cpp
         RSX/GL/glutils/image.cpp
         RSX/GL/glutils/program.cpp
