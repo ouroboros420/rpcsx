@@ -116,8 +116,8 @@ protected:
 	u64 file_offset(u64 pos) const;
 
 public:
-	iso_file(const std::string& path, bs_t<fs::open_mode> mode = fs::read);
-	iso_file(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node);
+	iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode = fs::read);
+	iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node);
 
 	explicit operator bool() const { return m_file.operator bool(); }
 
@@ -140,7 +140,7 @@ private:
 	std::shared_ptr<iso_file_decryption> m_dec;
 
 public:
-	iso_file_encrypted(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node, std::shared_ptr<iso_file_decryption> dec);
+	iso_file_encrypted(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node, std::shared_ptr<iso_file_decryption> dec);
 
 	u64 read_at(u64 offset, void* buffer, u64 size) override;
 };
@@ -178,7 +178,7 @@ public:
 	bool exists(const std::string& path);
 	bool is_file(const std::string& path);
 
-	std::unique_ptr<fs::file_base> get_iso_file(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node);
+	std::unique_ptr<fs::file_base> get_iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node);
 	std::unique_ptr<fs::file_base> open(const std::string& path);
 	psf::registry open_psf(const std::string& path);
 

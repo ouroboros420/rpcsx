@@ -595,7 +595,7 @@ bool iso_file_decryption::decrypt(u64 offset, void* buffer, u64 size, const std:
 	return true;
 }
 
-iso_file_encrypted::iso_file_encrypted(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node, std::shared_ptr<iso_file_decryption> dec)
+iso_file_encrypted::iso_file_encrypted(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node, std::shared_ptr<iso_file_decryption> dec)
 	: iso_file(path, mode, node), m_dec(dec)
 {
 }
@@ -1137,7 +1137,7 @@ bool iso_archive::is_file(const std::string& path)
 	return !file_node->metadata.is_directory;
 }
 
-std::unique_ptr<fs::file_base> iso_archive::get_iso_file(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node)
+std::unique_ptr<fs::file_base> iso_archive::get_iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node)
 {
 	if (m_dec->get_enc_type() == iso_encryption_type::NONE)
 	{
@@ -1166,7 +1166,7 @@ psf::registry iso_archive::open_psf(const std::string& path)
 	return psf::load_object(psf_file, path);
 }
 
-iso_file::iso_file(const std::string& path, bs_t<fs::open_mode> mode)
+iso_file::iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode)
 {
 	m_file = fs::file(path, mode);
 
@@ -1185,7 +1185,7 @@ iso_file::iso_file(const std::string& path, bs_t<fs::open_mode> mode)
 	m_raw_device = fs::is_optical_raw_device(path);
 }
 
-iso_file::iso_file(const std::string& path, bs_t<fs::open_mode> mode, const iso_fs_node& node)
+iso_file::iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node)
 	: m_meta(node.metadata)
 {
 	m_file = fs::file(path, mode);
