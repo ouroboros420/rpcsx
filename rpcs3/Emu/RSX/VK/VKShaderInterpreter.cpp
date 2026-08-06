@@ -229,7 +229,7 @@ namespace vk
 		"	uint entry;\n"
 		"	uint output_mask;\n"
 		"	uint control;\n"
-		"	uvec4 vp_instructions[];\n"
+		"	uvec4 vp_instructions" << vk::ubo_array_dim(16) << ";\n"
 		"};\n\n";
 
 		if (compiler_options & COMPILER_OPT_ENABLE_VTX_TEXTURES)
@@ -311,8 +311,10 @@ namespace vk
 		builder <<
 		"#version 450\n"
 		"#extension GL_EXT_scalar_block_layout : require\n"
-		"#extension GL_EXT_uniform_buffer_unsized_array : require\n"
-		"#extension GL_ARB_separate_shader_objects : enable\n\n";
+		// Gated: see vk::ubo_array_dim(). Adreno has no such extension and
+		// requiring it fails every pipeline.
+		<< (vk::get_current_renderer()->get_unsized_array_support() ? "#extension GL_EXT_uniform_buffer_unsized_array : require\n" : "")
+		<< "#extension GL_ARB_separate_shader_objects : enable\n\n";
 
 		::glsl::insert_subheader_block(builder);
 		comp.insertConstants(builder);
@@ -414,7 +416,7 @@ namespace vk
 			"	uint texture_control;\n"
 			"	uint reserved1;\n"
 			"	uint reserved2;\n"
-			"	uvec4 fp_instructions[];\n"
+			"	uvec4 fp_instructions" << vk::ubo_array_dim(16) << ";\n"
 			"};\n\n";
 
 		builder <<

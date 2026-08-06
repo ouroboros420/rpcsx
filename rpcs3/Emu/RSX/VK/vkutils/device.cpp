@@ -60,6 +60,26 @@ namespace vk
 			features2.pNext = &shader_barycentric_info;
 		}
 
+		// Two DIFFERENT things share almost the same name here:
+		//   VK_EXT_shader_uniform_buffer_unsized_array - the Vulkan device
+		//     extension, provided by the driver (Adreno DOES advertise it).
+		//   GL_EXT_uniform_buffer_unsized_array - the GLSL extension, understood
+		//     by glslang, which compiles our shaders to SPIR-V before the driver
+		//     ever sees them.
+		// Upstream v0.0.41 bumped glslang to f0bd0257c308, which is where the GLSL
+		// side was implemented (Versions.cpp/.h, ParseHelper.cpp). RPCSX pins its
+		// own flat glslang at 14.3.0-66, which does not know the directive, and
+		// moving to 16.2.0 needs a coupled SPIRV-Tools/SPIRV-Headers bump
+		// (SPV_ENV_VULKAN_1_4 and friends). Until that happens glslang rejects the
+		// "#extension ... : require" line with
+		//     ERROR: 0:4: '#extension' : extension not supported
+		// and EVERY game pipeline fails, leaving only overlays drawn.
+		//
+		// So gate on what actually limits us - the shader compiler, not the driver.
+		// Flip this to the device probe once glslang is new enough.
+		unsized_array_support = false;
+		max_ubo_range = props.limits.maxUniformBufferRange;
+
 		if (device_extensions.is_supported(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME))
 		{
 			custom_border_color_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT;
@@ -524,6 +544,16 @@ namespace vk
 		// 1. Anisotropic sampling
 		// 2. Indexable storage buffers
 		VkPhysicalDeviceFeatures enabled_features{};
+		if (pgpu->unsized_array_support)
+		{
+			// Must be pushed HERE, not beside the feature struct further down:
+			// requested_extensions.data() is handed to VkDeviceCreateInfo well
+			// before that point, so a later push_back is invisible to
+			// vkCreateDevice and can reallocate the vector out from under
+			// ppEnabledExtensionNames.
+			requested_extensions.push_back(VK_EXT_SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_EXTENSION_NAME);
+		}
+
 		if (pgpu->custom_border_color_support)
 		{
 			requested_extensions.push_back(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -747,12 +777,23 @@ namespace vk
 			rsx_log.notice("GPU/driver lacks support for float16 data types. All float16_t arithmetic will be emulated with float32_t.");
 		}
 
-		// FIXME: Fall back to something. Idk how that would even work though, this really is a hard requirement
+		// Upstream chained this unconditionally with a FIXME saying it had no
+		// fallback. Passing a feature struct for an extension that is not enabled
+		// is a spec violation; desktop drivers ignore it, Adreno does not - and
+		// since every vertex/fragment program emitted
+		// "#extension GL_EXT_uniform_buffer_unsized_array : require", every game
+		// pipeline came back VK_ERROR_UNKNOWN from vkCreateGraphicsPipelines.
+		// Overlays do not use those blocks, which is why the loading screen and
+		// perf overlay still drew while the game itself stayed black.
+		// The fallback is vk::ubo_array_dim(): concrete array bounds instead.
 		VkPhysicalDeviceShaderUniformBufferUnsizedArrayFeaturesEXT ubo_unsized_array_feature{};
-		ubo_unsized_array_feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_FEATURES_EXT;
-		ubo_unsized_array_feature.shaderUniformBufferUnsizedArray = VK_TRUE;
-		ubo_unsized_array_feature.pNext = const_cast<void*>(device.pNext);
-		device.pNext = &ubo_unsized_array_feature;
+		if (pgpu->unsized_array_support)
+		{
+			ubo_unsized_array_feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_FEATURES_EXT;
+			ubo_unsized_array_feature.shaderUniformBufferUnsizedArray = VK_TRUE;
+			ubo_unsized_array_feature.pNext = const_cast<void*>(device.pNext);
+			device.pNext = &ubo_unsized_array_feature;
+		}
 
 		VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color_features{};
 		if (pgpu->custom_border_color_support)

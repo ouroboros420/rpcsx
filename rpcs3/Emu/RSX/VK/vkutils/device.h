@@ -93,6 +93,18 @@ namespace vk
 
 		custom_border_color_features custom_border_color_support{};
 
+		// VK_EXT_shader_uniform_buffer_unsized_array. Upstream's vertex/fragment
+		// programs declare runtime-sized arrays inside uniform blocks, which needs
+		// this extension. Adreno does not have it.
+		bool unsized_array_support = false;
+
+		// Largest range bindable as a uniform buffer. When unsized_array_support is
+		// false the shader generators need this to emit a concrete array bound: the
+		// data heaps bind a window of exactly this size and the shader indexes it
+		// as (dynamic_offset / element_size), so (this / element_size) IS the
+		// highest index a shader can legally reach - an exact bound, not a guess.
+		u32 max_ubo_range = 16384;
+
 		multidraw_features multidraw_support{};
 
 		struct
@@ -200,6 +212,21 @@ namespace vk
 		const multidraw_features get_multidraw_support() const
 		{
 			return pgpu->multidraw_support;
+		}
+
+		bool get_unsized_array_support() const
+		{
+			return pgpu->unsized_array_support;
+		}
+
+		// Array bound to emit for a runtime-sized uniform-block array on a device
+		// that cannot do unsized ones. The heaps bind a window of
+		// maxUniformBufferRange and the shader indexes it as
+		// (dynamic_offset / element_size), so this is exactly the highest index
+		// reachable - not an estimate.
+		u32 ubo_array_bound(u32 element_size) const
+		{
+			return std::max<u32>(1u, pgpu->max_ubo_range / element_size);
 		}
 
 		bool get_shader_stencil_export_support() const
