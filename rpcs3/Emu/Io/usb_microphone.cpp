@@ -2,7 +2,7 @@
 #include "Emu/system_config.h"
 #include "Emu/IdManager.h"
 #include "Emu/Io/usb_microphone.h"
-#include "Emu/Cell/lv2/sys_usbd.h"
+#include "cellos/sys_usbd.h"
 #include "rpcsx/fw/ps3/cellMic.h"
 #include "Input/pad_thread.h"
 

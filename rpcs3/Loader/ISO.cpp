@@ -552,7 +552,7 @@ bool iso_device::statfs(const std::string& path, fs::device_stat& info)
 	return false;
 }
 
-std::unique_ptr<fs::file_base> iso_device::open(const std::string& path, bs_t<fs::open_mode> mode)
+std::unique_ptr<fs::file_base> iso_device::open(const std::string& path, rx::EnumBitSet<fs::open_mode> mode)
 {
 	const auto relative_path = std::filesystem::relative(std::filesystem::path(path), std::filesystem::path(fs_prefix)).string();
 

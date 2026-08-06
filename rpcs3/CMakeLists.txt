@@ -161,7 +161,6 @@ add_library(rpcs3 STATIC
     Input/evdev_joystick_handler.cpp
     Input/hid_pad_handler.cpp
     Input/mm_joystick_handler.cpp
-    Input/mouse_gyro_handler.cpp
     Input/pad_thread.cpp
     Input/product_info.cpp
     Input/ps_move_calibration.cpp

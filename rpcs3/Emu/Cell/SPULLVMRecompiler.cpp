@@ -2151,7 +2151,7 @@ public:
 				{
 					if (g_cfg.core.spu_prof || g_cfg.core.spu_debug)
 					{
-						m_ir->CreateStore(m_ir->getInt64((m_hash_start & -65536) | (baddr >> 2)), spu_ptr(&spu_thread::block_hash));
+						m_ir->CreateStore(m_ir->getInt64((m_hash_start & -65536) | (baddr >> 2)), spu_ptr(OFFSET_OF(spu_thread, block_hash)));
 					}
 				}
 

@@ -187,7 +187,7 @@ namespace fs
 	} pod_tag;
 
 	// Get virtual device for specified path (nullptr for real path)
-	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path);
+	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path = nullptr);
 
 	// Set virtual device with specified name (nullptr for deletion)
 	shared_ptr<device_base> set_virtual_device(const std::string& name, shared_ptr<device_base> device);

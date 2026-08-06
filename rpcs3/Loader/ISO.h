@@ -116,6 +116,6 @@ public:
 	bool stat(const std::string& path, fs::stat_t& info) override;
 	bool statfs(const std::string& path, fs::device_stat& info) override;
 
-	std::unique_ptr<fs::file_base> open(const std::string& path, bs_t<fs::open_mode> mode) override;
+	std::unique_ptr<fs::file_base> open(const std::string& path, rx::EnumBitSet<fs::open_mode> mode) override;
 	std::unique_ptr<fs::dir_base> open_dir(const std::string& path) override;
 };
