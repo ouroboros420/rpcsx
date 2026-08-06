@@ -166,7 +166,7 @@ namespace rsx
 
 	struct avconf
 	{
-		stereo_render_mode_options stereo_mode = stereo_render_mode_options::disabled; // Stereo 3D display mode
+		bool stereo_enabled = false; // Stereo 3D display mode
 		u8 format = 0;                                                                 // XRGB
 		u8 aspect = 0;                                                                 // AUTO
 		u8 resolution_id = 2;                                                          // 720p
@@ -188,6 +188,8 @@ namespace rsx
 		u32 get_compatible_gcm_format() const;
 		u8 get_bpp() const;
 		double get_aspect_ratio() const;
+
+		size2u video_frame_size() const;
 
 		areau aspect_convert_region(const size2u& image_dimensions, const size2u& output_dimensions) const;
 		size2u aspect_convert_dimensions(const size2u& image_dimensions) const;

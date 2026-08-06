@@ -4,6 +4,7 @@
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "Emu/RSX/Overlays/overlay_message.h"
+#include <cmath>
 
 namespace audio
 {
@@ -28,7 +29,22 @@ namespace audio
 			return;
 
 		const s32 old_volume = g_cfg.audio.volume;
-		const s32 new_volume = old_volume + delta;
+
+		// Apply non-linear volume scaling for better perceived volume control
+		// Use smaller steps at lower volumes for finer control
+		s32 adjusted_delta = delta;
+		if (old_volume < 25 && std::abs(delta) > 1)
+		{
+			// Smaller steps at low volume for better control
+			adjusted_delta = delta > 0 ? 1 : -1;
+		}
+		else if (old_volume > 75 && std::abs(delta) < 5)
+		{
+			// Larger steps at high volume for faster adjustment
+			adjusted_delta = delta > 0 ? std::min(delta * 2, 5) : std::max(delta * 2, -5);
+		}
+
+		const s32 new_volume = old_volume + adjusted_delta;
 
 		if (old_volume == new_volume)
 			return;

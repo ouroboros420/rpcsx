@@ -182,8 +182,7 @@ if(WITH_LLVM)
 		find_package(MLIR CONFIG)
 
 		if (NOT LLVM_FOUND)
-			message(FATAL_ERROR "Can't find LLVM libraries from the CMAKE_PREFIX_PATH path or LLVM_DIR. \
-													 Enable BUILD_LLVM option to build LLVM from included as a git submodule.")
+			message(FATAL_ERROR "Can't find LLVM libraries from the CMAKE_PREFIX_PATH path or LLVM_DIR. Enable BUILD_LLVM option to build LLVM from included as a git submodule.")
 		endif()
 
 		if (LLVM_VERSION VERSION_LESS 18)

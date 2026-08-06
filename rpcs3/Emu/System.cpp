@@ -2569,6 +2569,11 @@ void Emulator::Run(bool start_playtime)
 	{
 		Emu.GetCallbacks().enable_display_sleep(false);
 	}
+
+	if (g_cfg.misc.enable_gamemode)
+	{
+		Emu.GetCallbacks().enable_gamemode(true);
+	}
 }
 
 void Emulator::RunPPU()
@@ -3921,6 +3926,12 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 					// Always Enable display sleep, not only if it was prevented.
 					Emu.GetCallbacks().enable_display_sleep(true);
+
+			// Calling Gamemode Exit on Stop
+			if (g_cfg.misc.enable_gamemode)
+			{
+				Emu.GetCallbacks().enable_gamemode(false);
+			}
 
 					if (allow_autoexit)
 					{

@@ -134,7 +134,7 @@ namespace vk
 		app.applicationVersion = 0;
 		app.pEngineName = app_name;
 		app.engineVersion = 0;
-		app.apiVersion = VK_API_VERSION_1_0;
+		app.apiVersion = VK_API_VERSION_1_2;
 
 		// Set up instance information
 
@@ -162,11 +162,6 @@ namespace vk
 				extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
 			}
 
-			if (support.is_supported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-			}
-
 #ifdef __APPLE__
 			if (support.is_supported(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME))
 			{
@@ -184,11 +179,6 @@ namespace vk
 				next_info = &mvk_layer_settings_create_info;
 			}
 #endif
-
-			if (support.is_supported(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-			}
 
 			if (support.is_supported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
 			{

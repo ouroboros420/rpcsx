@@ -397,5 +397,5 @@ protected:
 	bool m_playing = false;
 
 private:
-	static constexpr f32 VOLUME_CHANGE_DURATION = 0.016f; // sec
+	static constexpr f32 VOLUME_CHANGE_DURATION = 0.032f; // sec - Increased for smoother transitions
 };

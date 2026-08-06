@@ -136,6 +136,14 @@ else()
 	add_subdirectory(pugixml EXCLUDE_FROM_ALL)
 endif()
 
+if (USE_SYSTEM_VULKAN_MEMORY_ALLOCATOR)
+	find_package(VulkanMemoryAllocator REQUIRED GLOBAL)
+	add_library(3rdparty::vulkanmemoryallocator ALIAS GPUOpen::VulkanMemoryAllocator)
+else()
+	add_library(3rdparty_vulkanmemoryallocator INTERFACE)
+	target_include_directories(3rdparty_vulkanmemoryallocator INTERFACE GPUOpen/VulkanMemoryAllocator/include)
+	add_library(3rdparty::vulkanmemoryallocator ALIAS 3rdparty_vulkanmemoryallocator)
+endif()
 
 # libusb
 if(CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD")
@@ -176,6 +184,9 @@ endif()
 add_subdirectory(hidapi)
 
 # glslang
+# NOTE: RPCSX keeps glslang flat at 3rdparty/glslang (direct submodule) and adds it
+# near the top of this file, so it wraps SPIRV itself instead of using upstream's
+# 3rdparty/glslang wrapper directory.
 add_library(3rdparty_glslang INTERFACE)
 target_link_libraries(3rdparty_glslang INTERFACE SPIRV)
 
@@ -415,6 +426,9 @@ add_subdirectory(opencv EXCLUDE_FROM_ALL)
 # FUSION
 add_subdirectory(fusion EXCLUDE_FROM_ALL)
 
+# FERAL INTERACTIVE
+add_subdirectory(feralinteractive EXCLUDE_FROM_ALL)
+
 add_subdirectory(fmtlib)
 
 # add nice ALIAS targets for ease of use
@@ -482,8 +496,9 @@ add_library(3rdparty::wolfssl ALIAS wolfssl)
 add_library(3rdparty::libcurl ALIAS 3rdparty_libcurl)
 add_library(3rdparty::soundtouch ALIAS soundtouch)
 add_library(3rdparty::sdl3 ALIAS ${SDL3_TARGET})
-add_library(3rdparty::miniupnpc ALIAS libminiupnpc-static)
+add_library(3rdparty::miniupnpc ALIAS 3rdparty_miniupnpc)
 add_library(3rdparty::rtmidi ALIAS rtmidi)
 add_library(3rdparty::opencv ALIAS ${OPENCV_TARGET})
 add_library(3rdparty::fusion ALIAS Fusion)
+add_library(3rdparty::feralinteractive ALIAS 3rdparty_feralinteractive)
 add_library(3rdparty::json ALIAS 3rdparty_json)

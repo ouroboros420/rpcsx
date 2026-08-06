@@ -121,6 +121,7 @@ struct PPUContext {
   std::uint32_t res_cached{0}; // Reservation "cached" addresss
   std::uint32_t res_notify{0};
   std::uint64_t res_notify_time{0};
+  std::uint32_t res_notify_postpone_streak{0};
 
   inline void setOV(bool bit) {
     xer_ov = bit;

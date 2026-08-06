@@ -134,7 +134,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "bdver4" ||
 		cpu == "znver1" ||
 		cpu == "znver2" ||
-		cpu == "znver3")
+		cpu == "znver3" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_fma = true;
 		m_use_avx = true;
@@ -156,7 +159,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "cooperlake" ||
 		cpu == "alderlake" ||
 		cpu == "raptorlake" ||
-		cpu == "meteorlake")
+		cpu == "meteorlake" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_vnni = true;
 	}
@@ -166,7 +172,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "gracemont" ||
 		cpu == "alderlake" ||
 		cpu == "raptorlake" ||
-		cpu == "meteorlake")
+		cpu == "meteorlake" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_gfni = true;
 	}

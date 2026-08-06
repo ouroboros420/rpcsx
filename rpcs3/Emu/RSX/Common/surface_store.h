@@ -683,6 +683,7 @@ namespace rsx
 						}
 
 						m_ranges.insert(pos, this_range);
+						inserted = true;
 						break;
 					}
 				}

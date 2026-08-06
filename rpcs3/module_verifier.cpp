@@ -50,8 +50,12 @@ void WIN32_module_verifier::run_module_verification()
 		}
 
 		WCHAR wpath[MAX_PATH];
-		if (const auto len = GetModuleFileName(hModule, wpath, MAX_PATH))
+		const auto len = GetModuleFileName(hModule, wpath, MAX_PATH);
+		if (!len)
 		{
+			continue;
+		}
+
 			if (::StrStrI(wpath, windir) != wpath)
 			{
 				const std::string path = wchar_to_utf8(wpath);
@@ -81,7 +85,6 @@ void WIN32_module_verifier::run_module_verification()
 			}
 		}
 	}
-}
 
 void WIN32_module_verifier::run()
 {

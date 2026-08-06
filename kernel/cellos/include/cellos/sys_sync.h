@@ -438,6 +438,11 @@ public:
       }
     }
 
+    static void enqueue_on_top(const void *waiter) {
+      g_to_notify[0] = waiter;
+      g_to_notify[1] = nullptr;
+    }
+
     ~notify_all_t() noexcept { lv2_obj::notify_all(); }
   };
 

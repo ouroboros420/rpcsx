@@ -1664,8 +1664,8 @@ static bool initVirtualPad(const std::shared_ptr<Pad> &pad) {
   pad->m_sensors[3] =
       AnalogSensor(CELL_PAD_BTN_OFFSET_SENSOR_G, 0, 0, 0, DEFAULT_MOTION_G);
 
-  pad->m_vibrateMotors[0] = VibrateMotor(true, 0);
-  pad->m_vibrateMotors[1] = VibrateMotor(false, 0);
+  pad->m_vibrate_motors[0] = VibrateMotor(true);
+  pad->m_vibrate_motors[1] = VibrateMotor(false);
 
   if (pad->m_player_id == 0) {
     std::lock_guard lock(g_virtual_pad_mutex);

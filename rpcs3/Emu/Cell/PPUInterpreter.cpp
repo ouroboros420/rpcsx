@@ -7859,8 +7859,8 @@ ppu_interpreter_rt_base::ppu_interpreter_rt_base() noexcept
 	INIT(LBZUX);
 	INIT_RC(NOR);
 	INIT(STVEBX);
-	INIT_OV(SUBFE);
-	INIT_OV(ADDE);
+	INIT_RC_OV(SUBFE);
+	INIT_RC_OV(ADDE);
 	INIT(MTOCRF);
 	INIT(STDX);
 	INIT(STWCX);

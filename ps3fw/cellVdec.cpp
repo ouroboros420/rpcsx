@@ -1407,8 +1407,8 @@ error_code cellVdecGetPictureExt(ppu_thread& ppu, u32 handle,
 
 	if (arg4 || format->unk0 || format->unk1)
 	{
-		fmt::throw_exception("cellVdecGetPictureExt: Unknown arguments "
-							 "(arg4=*0x%x, unk0=0x%x, unk1=0x%x)",
+		cellVdec.todo("cellVdecGetPictureExt: Unknown arguments "
+					  "(arg4=*0x%x, unk0=0x%x, unk1=0x%x)",
 			arg4, format->unk0, format->unk1);
 	}
 

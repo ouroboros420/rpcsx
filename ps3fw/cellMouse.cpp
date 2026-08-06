@@ -1,8 +1,9 @@
 #include "stdafx.h"
 #include "Emu/IdManager.h"
+#include "Emu/system_config.h"
 #include "Emu/Cell/PPUModule.h"
-
 #include "Emu/Io/MouseHandler.h"
+#include "Emu/RSX/Overlays/overlay_debug_overlay.h"
 
 #include "cellMouse.h"
 
@@ -13,25 +14,73 @@ extern bool is_input_allowed();
 
 LOG_CHANNEL(cellMouse);
 
-template <>
+void show_debug_overlay(const CellMouseData& data, const MouseData* _mouse)
+{
+	// The cell mouse can be set empty without any new mouse input.
+	// Only update our mouse input if there is new data.
+	static MouseData mouse {};
+	if (_mouse)
+	{
+		mouse = *_mouse;
+	}
+
+	std::string text = fmt::format(
+		">        Name:     Raw   Value   Pixel\n"
+		">\n"
+		">      Update:   %5d   %5d\n"
+		">       Wheel:   %5d   %5d\n"
+		">        Tilt:   %5d   %5d\n"
+		">           X:   %5d   %5d   %5d\n"
+		">           Y:   %5d   %5d   %5d\n"
+		">\n"
+		">     Buttons:  0x%04x  0x%04x\n"
+		">    Button 1:   %5d   %5d\n"
+		">    Button 2:   %5d   %5d\n"
+		">    Button 3:   %5d   %5d\n"
+		">    Button 4:   %5d   %5d\n"
+		">    Button 5:   %5d   %5d\n"
+		">    Button 6:   %5d   %5d\n"
+		">    Button 7:   %5d   %5d\n"
+		">    Button 8:   %5d   %5d\n"
+		,
+		mouse.update, data.update,
+		mouse.wheel, data.wheel,
+		mouse.tilt, data.tilt,
+		mouse.x_axis, data.x_axis, mouse.pixel_x,
+		mouse.y_axis, data.y_axis, mouse.pixel_y,
+		mouse.buttons, data.buttons,
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_1), !!(data.buttons & CELL_MOUSE_BUTTON_1),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_2), !!(data.buttons & CELL_MOUSE_BUTTON_2),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_3), !!(data.buttons & CELL_MOUSE_BUTTON_3),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_4), !!(data.buttons & CELL_MOUSE_BUTTON_4),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_5), !!(data.buttons & CELL_MOUSE_BUTTON_5),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_6), !!(data.buttons & CELL_MOUSE_BUTTON_6),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_7), !!(data.buttons & CELL_MOUSE_BUTTON_7),
+		!!(mouse.buttons & CELL_MOUSE_BUTTON_8), !!(data.buttons & CELL_MOUSE_BUTTON_8)
+	);
+
+	rsx::overlays::set_debug_overlay_text(std::move(text));
+}
+
+template<>
 void fmt_class_string<CellMouseError>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](auto error)
+	{
+		switch (error)
 		{
-			switch (error)
-			{
-				STR_CASE(CELL_MOUSE_ERROR_FATAL);
-				STR_CASE(CELL_MOUSE_ERROR_INVALID_PARAMETER);
-				STR_CASE(CELL_MOUSE_ERROR_ALREADY_INITIALIZED);
-				STR_CASE(CELL_MOUSE_ERROR_UNINITIALIZED);
-				STR_CASE(CELL_MOUSE_ERROR_RESOURCE_ALLOCATION_FAILED);
-				STR_CASE(CELL_MOUSE_ERROR_DATA_READ_FAILED);
-				STR_CASE(CELL_MOUSE_ERROR_NO_DEVICE);
-				STR_CASE(CELL_MOUSE_ERROR_SYS_SETTING_FAILED);
-			}
+			STR_CASE(CELL_MOUSE_ERROR_FATAL);
+			STR_CASE(CELL_MOUSE_ERROR_INVALID_PARAMETER);
+			STR_CASE(CELL_MOUSE_ERROR_ALREADY_INITIALIZED);
+			STR_CASE(CELL_MOUSE_ERROR_UNINITIALIZED);
+			STR_CASE(CELL_MOUSE_ERROR_RESOURCE_ALLOCATION_FAILED);
+			STR_CASE(CELL_MOUSE_ERROR_DATA_READ_FAILED);
+			STR_CASE(CELL_MOUSE_ERROR_NO_DEVICE);
+			STR_CASE(CELL_MOUSE_ERROR_SYS_SETTING_FAILED);
+		}
 
-			return unknown;
-		});
+		return unknown;
+	});
 }
 
 error_code cellMouseInit(ppu_thread& ppu, u32 max_connect)
@@ -135,9 +184,9 @@ error_code cellMouseGetInfo(vm::ptr<CellMouseInfo> info)
 
 	for (u32 i = 0; i < CELL_MAX_MICE; i++)
 	{
-		info->vendor_id[i] = current_info.vendor_id[i];
+		info->vendor_id[i]  = current_info.vendor_id[i];
 		info->product_id[i] = current_info.product_id[i];
-		info->status[i] = current_info.status[i];
+		info->status[i]     = current_info.status[i];
 	}
 
 	return CELL_OK;
@@ -214,16 +263,27 @@ error_code cellMouseGetData(u32 port_no, vm::ptr<CellMouseData> data)
 	if (data_list.empty() || current_info.is_null_handler || (current_info.info & CELL_MOUSE_INFO_INTERCEPTED) || !is_input_allowed())
 	{
 		data_list.clear();
+
+		if (port_no == 0 && g_cfg.io.mouse_debug_overlay && !g_cfg.io.pad_debug_overlay && !g_cfg.video.debug_overlay)
+		{
+			show_debug_overlay(*data, nullptr);
+		}
+
 		return CELL_OK;
 	}
 
-	const MouseData current_data = data_list.front();
+	const MouseData& current_data = data_list.front();
 	data->update = current_data.update;
 	data->buttons = current_data.buttons;
 	data->x_axis = current_data.x_axis;
 	data->y_axis = current_data.y_axis;
 	data->wheel = current_data.wheel;
 	data->tilt = current_data.tilt;
+
+	if (port_no == 0 && g_cfg.io.mouse_debug_overlay && !g_cfg.io.pad_debug_overlay && !g_cfg.video.debug_overlay)
+	{
+		show_debug_overlay(*data, &current_data);
+	}
 
 	data_list.pop_front();
 
@@ -264,20 +324,31 @@ error_code cellMouseGetDataList(u32 port_no, vm::ptr<CellMouseDataList> data)
 	if (list.empty() || current_info.is_null_handler || (current_info.info & CELL_MOUSE_INFO_INTERCEPTED) || !is_input_allowed())
 	{
 		list.clear();
+
+		if (port_no == 0 && g_cfg.io.mouse_debug_overlay && !g_cfg.io.pad_debug_overlay && !g_cfg.video.debug_overlay)
+		{
+			show_debug_overlay(data->list[0], nullptr);
+		}
+
 		return CELL_OK;
 	}
 
 	data->list_num = std::min<u32>(CELL_MOUSE_MAX_DATA_LIST_NUM, static_cast<u32>(list.size()));
 
-	int i = 0;
-	for (auto it = list.begin(); it != list.end() && i < CELL_MOUSE_MAX_DATA_LIST_NUM; ++it, ++i)
+	for (size_t i = 0; i < list.size() && i < CELL_MOUSE_MAX_DATA_LIST_NUM; ++i)
 	{
-		data->list[i].update = it->update;
-		data->list[i].buttons = it->buttons;
-		data->list[i].x_axis = it->x_axis;
-		data->list[i].y_axis = it->y_axis;
-		data->list[i].wheel = it->wheel;
-		data->list[i].tilt = it->tilt;
+		const MouseData& current_data = list[i];
+		data->list[i].update = current_data.update;
+		data->list[i].buttons = current_data.buttons;
+		data->list[i].x_axis = current_data.x_axis;
+		data->list[i].y_axis = current_data.y_axis;
+		data->list[i].wheel = current_data.wheel;
+		data->list[i].tilt = current_data.tilt;
+
+		if (port_no == 0 && g_cfg.io.mouse_debug_overlay && !g_cfg.io.pad_debug_overlay && !g_cfg.video.debug_overlay)
+		{
+			show_debug_overlay(data->list[i], &current_data);
+		}
 	}
 
 	list.clear();
