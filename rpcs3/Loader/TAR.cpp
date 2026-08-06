@@ -308,7 +308,7 @@ bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 
 				filedata_buffers.clear();
 
-				for (usz i = 0; i < std::min<usz>(utils::aligned_div<usz>(filesize, chunk_size), chunk_count); i++)
+				for (usz i = 0; i < std::min<usz>(rx::aligned_div<usz>(filesize, chunk_size), chunk_count); i++)
 				{
 					if (filedata_buffers.size() <= i)
 					{
@@ -373,7 +373,7 @@ bool tar_object::extract(const std::string& prefix_path, bool is_vfs)
 					file.write(data_span.data(), data_span.size());
 					filedata_write_pos++;
 
-					if (filedata_write_pos == utils::aligned_div<usz>(filesize, filedata_buffers[0].size()))
+					if (filedata_write_pos == rx::aligned_div<usz>(filesize, filedata_buffers[0].size()))
 					{
 						if (async_reader)
 						{

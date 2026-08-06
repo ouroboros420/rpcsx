@@ -842,11 +842,20 @@ narrow(const From &value,
   // Otherwise, this is bit-wise narrowing or conversion between types of
   // different signedness of the same size
   if constexpr ((is_from_signed && !is_to_signed) || to_mask < from_mask) {
-    // Try to optimize test if both are of the same signedness
-    if (is_from_signed != is_to_signed ? !!(value & mask)
-                                       : static_cast<CommonTo>(value) != value)
-        [[unlikely]] {
-      fmt::raw_verify_error(src_loc, u8"Narrowing error", +value);
+    // Try to optimize test if both are of the same signedness.
+    //
+    // These must be separate `if constexpr` branches rather than one ternary:
+    // both arms of a ternary are type-checked even when only one can be taken,
+    // so the mixed-signedness case still instantiated the same-signedness
+    // comparison and tripped -Werror=sign-compare (e.g. narrow<s32>(usz)).
+    if constexpr (is_from_signed != is_to_signed) {
+      if (!!(value & mask)) [[unlikely]] {
+        fmt::raw_verify_error(src_loc, u8"Narrowing error", +value);
+      }
+    } else {
+      if (static_cast<CommonTo>(value) != value) [[unlikely]] {
+        fmt::raw_verify_error(src_loc, u8"Narrowing error", +value);
+      }
     }
   }
 

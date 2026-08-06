@@ -1,4 +1,4 @@
-#include "Emu/Cell/Modules/sceNp.h"
+#include "rpcsx/fw/ps3/sceNp.h"
 #include "stdafx.h"
 #include "util/types.hpp"
 #include "util/StrUtil.h"

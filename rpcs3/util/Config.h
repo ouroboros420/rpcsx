@@ -812,6 +812,30 @@ namespace cfg
 			// Should not be used
 			return make_uint_range(0, 1);
 		}
+
+		// to_json/from_json are RPCSX additions to cfg::_base and are pure
+		// virtual, so every setting type must implement them. Upstream added
+		// this class without them (it has no JSON layer), which would leave
+		// cfg::uint128 abstract here. Serialized as a string because a u128
+		// does not fit any JSON number type.
+		nlohmann::ordered_json to_json() const override
+		{
+			return {
+				{"type", "string"},
+				{"value", to_string()},
+				{"default", def_to_string()},
+			};
+		}
+
+		bool from_json(const nlohmann::json& json, bool dynamic = false) override
+		{
+			if (!json.is_string())
+			{
+				return false;
+			}
+
+			return from_string(json.get<std::string>(), dynamic);
+		}
 	};
 
 	// Simple string entry with mutex

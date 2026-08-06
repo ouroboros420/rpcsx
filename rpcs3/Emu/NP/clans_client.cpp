@@ -18,11 +18,11 @@
 #endif
 
 #include <Crypto/utils.h>
-#include <Utilities/StrUtil.h>
-#include <Utilities/StrFmt.h>
+#include "util/StrUtil.h"
+#include "util/StrFmt.h"
 
-#include "Emu/Cell/Modules/sceNp.h"
-#include "Emu/Cell/Modules/sceNpClans.h"
+#include "rpcsx/fw/ps3/sceNp.h"
+#include "rpcsx/fw/ps3/sceNpClans.h"
 #include "Emu/NP/clans_client.h"
 #include "Emu/NP/clans_config.h"
 #include "Emu/NP/np_helpers.h"

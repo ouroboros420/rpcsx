@@ -4,7 +4,7 @@
 #include "Emu/RSX/Common/simple_array.hpp"
 #include "Emu/RSX/Program/RSXFragmentProgram.h"
 
-#include <util/asm.hpp>
+#include <rx/asm.hpp>
 #include <util/v128.hpp>
 #include <span>
 

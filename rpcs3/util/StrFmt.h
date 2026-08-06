@@ -391,7 +391,11 @@ namespace fmt
 		}
 
 #if !defined(_MSC_VER) || defined(__clang__)
-		[[noreturn]] ~throw_exception() = default;
+		// Declared but deliberately never defined: the constructor always
+		// throws, so this is never called. It must NOT be "= default" - clang
+		// drops [[noreturn]] from a defaulted trivial destructor, and then every
+		// function ending in fmt::throw_exception() trips -Werror=return-type.
+		[[noreturn]] ~throw_exception();
 #endif
 	};
 
