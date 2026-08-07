@@ -5,6 +5,14 @@
 #include "util/v128.hpp"
 #include "util/logs.hpp"
 
+// Value::hasUseList() only exists from LLVM 21. On older LLVM every Value has a
+// use list, so the guard these call sites want is trivially satisfied.
+#if LLVM_VERSION_MAJOR >= 21
+#define RPCSX_HAS_USE_LIST(v) ((v)->hasUseList())
+#else
+#define RPCSX_HAS_USE_LIST(v) (true)
+#endif
+
 LOG_CHANNEL(llvm_log, "LLVM");
 
 llvm::LLVMContext g_llvm_ctx;
@@ -255,7 +263,7 @@ llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type, std::so
 	}
 
 	// Skip use iteration for values that don't have use lists
-	if (source_val->hasUseList())
+	if (RPCSX_HAS_USE_LIST(source_val))
 	{
 		for (llvm::Value* it_val : source_val->uses())
 		{
@@ -280,7 +288,7 @@ llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type, std::so
 				}
 
 				// Check if bci has use list before accessing use_begin()
-				if (!bci->hasUseList())
+				if (!RPCSX_HAS_USE_LIST(bci))
 				{
 					break;
 				}
@@ -575,7 +583,7 @@ void cpu_translator::erase_stores(llvm::ArrayRef<llvm::Value*> args)
 	for (auto v : args)
 	{
 		// Skip use iteration for values that don't have use lists
-		if (!v->hasUseList())
+		if (!RPCSX_HAS_USE_LIST(v))
 			continue;
 
 		for (llvm::Value* i : v->uses())
@@ -586,7 +594,7 @@ void cpu_translator::erase_stores(llvm::ArrayRef<llvm::Value*> args)
 			while (i && (bci = llvm::dyn_cast<llvm::CastInst>(i)) && bci->getOpcode() == llvm::Instruction::BitCast)
 			{
 				// Check if bci has use list before accessing use_begin()
-				if (!bci->hasUseList())
+				if (!RPCSX_HAS_USE_LIST(bci))
 					break;
 
 				i = *bci->use_begin();

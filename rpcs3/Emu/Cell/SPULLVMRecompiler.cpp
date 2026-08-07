@@ -1727,7 +1727,11 @@ public:
 
 		// Create LLVM module
 		std::unique_ptr<Module> _module = std::make_unique<Module>(m_hash + ".obj", m_context);
+#if LLVM_VERSION_MAJOR >= 21
 		_module->setTargetTriple(Triple(jit_compiler::triple2()));
+#else
+		_module->setTargetTriple(jit_compiler::triple2());
+#endif
 		_module->setDataLayout(m_jit.get_engine().getTargetMachine()->createDataLayout());
 		m_module = _module.get();
 
@@ -2989,7 +2993,7 @@ public:
 					else
 					{
 						// Check spu_thread::state
-						condition = m_ir->CreateAnd(m_ir->CreateICmpEQ(spu_context_attr(m_ir->CreateLoad(get_type<u32>(), spu_ptr(&spu_thread::state), true)), m_ir->getInt32(0)), condition);
+						condition = m_ir->CreateAnd(m_ir->CreateICmpEQ(spu_context_attr(m_ir->CreateLoad(get_type<u32>(), spu_ptr(OFFSET_OF(spu_thread, state)), true)), m_ir->getInt32(0)), condition);
 					}
 
 					m_ir->CreateCondBr(condition, optimization_block, block_optimization_next);
@@ -4057,7 +4061,11 @@ public:
 
 		// Create LLVM module
 		std::unique_ptr<Module> _module = std::make_unique<Module>("spu_interpreter.obj", m_context);
+#if LLVM_VERSION_MAJOR >= 21
 		_module->setTargetTriple(Triple(jit_compiler::triple2()));
+#else
+		_module->setTargetTriple(jit_compiler::triple2());
+#endif
 		_module->setDataLayout(m_jit.get_engine().getTargetMachine()->createDataLayout());
 		m_module = _module.get();
 
@@ -7338,7 +7346,7 @@ public:
 
 			unsigned equals_run = 0;
 			u8 prev_elt = mask._u8[0];
-			for (u8 cur_elt : mask._u8.m_data)
+			for (u8 cur_elt : mask._u8.data)
 			{
 				if (cur_elt != 0x00 && cur_elt != 0xFF)
 				{

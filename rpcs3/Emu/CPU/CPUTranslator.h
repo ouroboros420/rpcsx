@@ -27,7 +27,17 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/KnownBits.h"
+#include "llvm/Config/llvm-config.h" // LLVM_VERSION_MAJOR for the guard below
+#if LLVM_VERSION_MAJOR >= 21
+// llvm::KnownFPClass moved to its own header in LLVM 21. On the LLVM version
+// RPCSX actually builds against it still lives in llvm/Analysis/ValueTracking.h,
+// which is included a couple of lines below - so nothing else is needed there.
+// NOTE: the Android build does NOT compile the 3rdparty/llvm submodule despite
+// BUILD_LLVM=on; it downloads a prebuilt keyed on USE_LLVM_VERSION
+// (3rdparty/llvm/CMakeLists.txt, currently 20.1.3). Check that value, not the
+// submodule revision, when deciding what LLVM API is available.
 #include "llvm/Support/KnownFPClass.h"
+#endif
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -4315,7 +4325,12 @@ template <typename T1, typename T2>
 		static_assert(depth <= llvm::MaxAnalysisRecursionDepth, "Depth parameter can only decrease search. Default is max.");
 
 		const llvm::SimplifyQuery SQ(m_module->getDataLayout());
+#if LLVM_VERSION_MAJOR >= 21
 		return llvm::computeKnownFPClass(a.eval(m_ir), interested_classes, SQ, llvm::MaxAnalysisRecursionDepth - depth);
+#else
+		// LLVM 20 takes (V, InterestedClasses, Depth, SQ) - Depth and SQ are swapped.
+		return llvm::computeKnownFPClass(a.eval(m_ir), interested_classes, llvm::MaxAnalysisRecursionDepth - depth, SQ);
+#endif
 	}
 
 private:
