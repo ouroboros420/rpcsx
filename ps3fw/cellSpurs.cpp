@@ -5421,7 +5421,6 @@ DECLARE(ppu_module_manager::cellSpurs)("cellSpurs", [](ppu_static_module* _this)
 		REG_FUNC(cellSpurs, cellSpursInitializeForSpuSharing);
 		REG_FUNC(cellSpurs, cellSpursInitializeWithAttribute);
 		REG_FUNC(cellSpurs, cellSpursInitializeWithAttribute2);
-	REG_FUNC(cellSpurs, cellSpursInitializeForSpuSharing);
 		REG_FUNC(cellSpurs, cellSpursFinalize);
 		REG_FUNC(cellSpurs, _cellSpursAttributeInitialize);
 		REG_FUNC(cellSpurs, cellSpursAttributeSetMemoryContainerForSpuThread);
