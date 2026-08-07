@@ -48,6 +48,18 @@ namespace vk
 					continue;
 				}
 
+				if (job.resolve_modules_func)
+				{
+					// This job's GLSL->SPIR-V compilation was deferred to us so that the
+					// RSX thread would not have to block on it.
+					if (!job.resolve_modules_func(job.graphics_modules))
+					{
+						std::unique_ptr<glsl::program> failed;
+						job.callback_func(failed);
+						continue;
+					}
+				}
+
 				auto compiled = int_compile_graphics_pipe(job.graphics_data, job.graphics_modules, job.inputs, {}, job.flags);
 				job.callback_func(compiled);
 			}
@@ -229,6 +241,30 @@ namespace vk
 		}
 
 		m_work_queue.push(create_info, modules, vs_inputs, fs_inputs, flags, callback);
+		return {};
+	}
+
+	std::unique_ptr<glsl::program> pipe_compiler::compile(
+		const vk::pipeline_props& create_info,
+		module_resolver_t resolve_modules,
+		op_flags flags, callback_t callback,
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs)
+	{
+		ensure(resolve_modules);
+
+		if (flags & COMPILE_INLINE)
+		{
+			VkShaderModule modules[2]{};
+			if (!resolve_modules(modules))
+			{
+				return {};
+			}
+
+			return int_compile_graphics_pipe(create_info, modules, vs_inputs, fs_inputs, flags);
+		}
+
+		m_work_queue.push(create_info, resolve_modules, vs_inputs, fs_inputs, flags, callback);
 		return {};
 	}
 

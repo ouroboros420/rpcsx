@@ -14,18 +14,71 @@ namespace vk
 		using pipeline_storage_type = std::unique_ptr<vk::glsl::program>;
 		using pipeline_properties = vk::pipeline_props;
 
+		// GLSL->SPIR-V compilation can be deferred to a pipeline compiler worker, so
+		// that a shader cache miss does not stall the RSX thread. See
+		// decompile_*_program() and build_pipeline() below.
+		static constexpr bool supports_deferred_shader_compilation = true;
+
 		static void recompile_fragment_program(const RSXFragmentProgram& RSXFP, fragment_program_type& fragmentProgramData, usz ID)
 		{
-			fragmentProgramData.Decompile(RSXFP);
-			fragmentProgramData.id = static_cast<u32>(ID);
+			decompile_fragment_program(RSXFP, fragmentProgramData, ID);
 			fragmentProgramData.Compile();
 		}
 
 		static void recompile_vertex_program(const RSXVertexProgram& RSXVP, vertex_program_type& vertexProgramData, usz ID)
 		{
+			decompile_vertex_program(RSXVP, vertexProgramData, ID);
+			vertexProgramData.Compile();
+		}
+
+		// Decompile only: produces the GLSL source, the program id, the binding table,
+		// the uniform list and the constant metadata - everything the RSX thread reads
+		// off these objects. The expensive part (Compile(), i.e. glslang GLSL->SPIR-V,
+		// which is what populates 'handle') is left for later.
+		static void decompile_fragment_program(const RSXFragmentProgram& RSXFP, fragment_program_type& fragmentProgramData, usz ID)
+		{
+			fragmentProgramData.Decompile(RSXFP);
+			fragmentProgramData.id = static_cast<u32>(ID);
+		}
+
+		static void decompile_vertex_program(const RSXVertexProgram& RSXVP, vertex_program_type& vertexProgramData, usz ID)
+		{
 			vertexProgramData.Decompile(RSXVP);
 			vertexProgramData.id = static_cast<u32>(ID);
-			vertexProgramData.Compile();
+		}
+
+		// Compile a shader pair on a pipeline compiler worker.
+		//
+		// Two things force a lock here. Several workers run concurrently, and two
+		// different pipelines routinely share a vertex or fragment shader, so the
+		// same object can be resolved from more than one job at once. Serializing
+		// also keeps glslang single-threaded, which is how it was invoked before
+		// this ran anywhere other than the RSX thread.
+		//
+		// 'handle' doubles as the "already compiled" marker: it is null until
+		// Compile() assigns it, and shader::compile() asserts if called twice.
+		static bool compile_shaders_once(vertex_program_type& vs, fragment_program_type& fs)
+		{
+			static shared_mutex s_shader_compile_mutex;
+			std::lock_guard lock(s_shader_compile_mutex);
+
+			// No error handling around Compile(): this target is built without
+			// exceptions and shader::compile() reports failure through
+			// fmt::throw_exception(), which is [[noreturn]]. A malformed shader was
+			// already fatal when this ran on the RSX thread, so moving it here does
+			// not change that. The bool return exists for the caller's benefit and to
+			// leave room for a recoverable path later.
+			if (!vs.handle)
+			{
+				vs.Compile();
+			}
+
+			if (!fs.handle)
+			{
+				fs.Compile();
+			}
+
+			return vs.handle && fs.handle;
 		}
 
 		static void validate_pipeline_properties(const VKVertexProgram&, const VKFragmentProgram& fp, vk::pipeline_props& properties)
@@ -48,6 +101,36 @@ namespace vk
 			compiler_flags |= vk::pipe_compiler::SEPARATE_SHADER_OBJECTS;
 
 			auto compiler = vk::get_pipe_compiler();
+
+			if (compile_async)
+			{
+				// The shaders were only decompiled, not compiled - hand the GLSL->SPIR-V
+				// step to the worker as well so the RSX thread never blocks on glslang.
+				auto& vs = const_cast<vertex_program_type&>(vertexProgramData);
+				auto& fs = const_cast<fragment_program_type&>(fragmentProgramData);
+
+				auto resolver = [&vs, &fs](VkShaderModule(&modules)[2]) -> bool
+				{
+					if (!compile_shaders_once(vs, fs))
+					{
+						return false;
+					}
+
+					modules[0] = vs.handle;
+					modules[1] = fs.handle;
+					return true;
+				};
+
+				auto result = compiler->compile(
+					pipelineProperties,
+					resolver,
+					compiler_flags, callback,
+					vertexProgramData.uniforms,
+					fragmentProgramData.uniforms);
+
+				return callback(result);
+			}
+
 			auto result = compiler->compile(
 				pipelineProperties,
 				vertexProgramData.handle,

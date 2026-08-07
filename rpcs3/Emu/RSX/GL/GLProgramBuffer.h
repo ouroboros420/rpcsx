@@ -13,6 +13,11 @@ struct GLTraits
 	using pipeline_storage_type = std::unique_ptr<gl::glsl::program>;
 	using pipeline_properties = void*;
 
+	// GL shader compilation is bound to the thread holding the GL context, so it
+	// cannot be moved onto the pipeline compiler workers the way the Vulkan backend
+	// does. Behaviour here is unchanged.
+	static constexpr bool supports_deferred_shader_compilation = false;
+
 	static void recompile_fragment_program(const RSXFragmentProgram& RSXFP, fragment_program_type& fragmentProgramData, usz /*ID*/)
 	{
 		fragmentProgramData.Decompile(RSXFP);

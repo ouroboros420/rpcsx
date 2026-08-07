@@ -221,7 +221,8 @@ protected:
 	/// bool here to inform that the program was preexisting.
 	std::tuple<const vertex_program_type&, bool> search_vertex_program(
 		rsx::program_cache_hint_t* cache_hint,
-		const RSXVertexProgram& rsx_vp)
+		const RSXVertexProgram& rsx_vp,
+		bool defer_compile = false)
 	{
 		if (cache_hint && cache_hint->has_vertex_program())
 		{
@@ -251,7 +252,23 @@ protected:
 
 		if (recompile)
 		{
-			backend_traits::recompile_vertex_program(rsx_vp, *new_shader, m_next_id++);
+			if constexpr (backend_traits::supports_deferred_shader_compilation)
+			{
+				if (defer_compile)
+				{
+					// Decompile only. The backend finishes the job (GLSL->SPIR-V) on a
+					// pipeline compiler worker, so this thread is not stalled by it.
+					backend_traits::decompile_vertex_program(rsx_vp, *new_shader, m_next_id++);
+				}
+				else
+				{
+					backend_traits::recompile_vertex_program(rsx_vp, *new_shader, m_next_id++);
+				}
+			}
+			else
+			{
+				backend_traits::recompile_vertex_program(rsx_vp, *new_shader, m_next_id++);
+			}
 		}
 
 		rsx::program_cache_hint_t::cache_vertex_program(cache_hint, rsx_vp, new_shader);
@@ -259,7 +276,7 @@ protected:
 	}
 
 	/// bool here to inform that the program was preexisting.
-	std::tuple<const fragment_program_type&, bool> search_fragment_program(rsx::program_cache_hint_t* cache_hint, const RSXFragmentProgram& rsx_fp)
+	std::tuple<const fragment_program_type&, bool> search_fragment_program(rsx::program_cache_hint_t* cache_hint, const RSXFragmentProgram& rsx_fp, bool defer_compile = false)
 	{
 		if (cache_hint && cache_hint->has_fragment_program())
 		{
@@ -290,7 +307,23 @@ protected:
 		if (recompile)
 		{
 			it->first.clone_data();
-			backend_traits::recompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
+
+			if constexpr (backend_traits::supports_deferred_shader_compilation)
+			{
+				if (defer_compile)
+				{
+					// See search_vertex_program().
+					backend_traits::decompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
+				}
+				else
+				{
+					backend_traits::recompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
+				}
+			}
+			else
+			{
+				backend_traits::recompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
+			}
 		}
 
 		rsx::program_cache_hint_t::cache_fragment_program(cache_hint, rsx_fp, new_shader);
@@ -356,8 +389,13 @@ public:
 		bool allow_notification,
 		Args&&... args)
 	{
-		const auto& vp_search = search_vertex_program(cache_hint, vertex_shader);
-		const auto& fp_search = search_fragment_program(cache_hint, fragment_shader);
+		// When the caller allows asynchronous compilation, a shader cache miss must
+		// not compile anything on this (RSX) thread: only decompile here and let the
+		// pipeline compiler worker do GLSL->SPIR-V along with the pipeline itself.
+		// The draw for this frame falls back to the shader interpreter, or is
+		// skipped, exactly as it already does while a pipeline is still building.
+		const auto& vp_search = search_vertex_program(cache_hint, vertex_shader, compile_async);
+		const auto& fp_search = search_fragment_program(cache_hint, fragment_shader, compile_async);
 
 		const bool already_existing_fragment_program = std::get<1>(fp_search);
 		const bool already_existing_vertex_program = std::get<1>(vp_search);

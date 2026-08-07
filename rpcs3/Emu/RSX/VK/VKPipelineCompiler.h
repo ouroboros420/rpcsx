@@ -66,6 +66,12 @@ namespace vk
 		using callback_t = std::function<void(std::unique_ptr<glsl::program>&)>;
 		using graphics_pipe_create_callback_t = std::function<VkGraphicsPipelineCreateInfo()>;
 
+		// Produces the vertex/fragment shader modules on the worker thread. Lets the
+		// caller defer GLSL->SPIR-V compilation off the RSX thread instead of having
+		// to hand over modules that are already compiled. Returns false to abandon
+		// the job (the completion callback is then invoked with a null program).
+		using module_resolver_t = std::function<bool(VkShaderModule(&modules)[2])>;
+
 		pipe_compiler();
 		~pipe_compiler();
 
@@ -96,6 +102,14 @@ namespace vk
 			const std::vector<glsl::program_input>& vs_inputs,
 			const std::vector<glsl::program_input>& fs_inputs);
 
+		// As above, but the shader modules themselves are produced on the worker.
+		std::unique_ptr<glsl::program> compile(
+			const vk::pipeline_props& create_info,
+			module_resolver_t resolve_modules,
+			op_flags flags, callback_t callback,
+			const std::vector<glsl::program_input>& vs_inputs,
+			const std::vector<glsl::program_input>& fs_inputs);
+
 		void operator()();
 
 	private:
@@ -119,6 +133,7 @@ namespace vk
 			bool is_graphics_job;
 			callback_t callback_func;
 			graphics_pipe_create_callback_t create_info_func;
+			module_resolver_t resolve_modules_func;
 
 			vk::pipeline_props graphics_data;
 			compute_pipeline_props compute_data;
@@ -139,6 +154,27 @@ namespace vk
 				graphics_data = props;
 				graphics_modules[0] = modules[0];
 				graphics_modules[1] = modules[1];
+				is_graphics_job = true;
+				flags = flags_;
+
+				inputs.reserve(vs_in.size() + fs_in.size());
+				inputs.insert(inputs.end(), vs_in.begin(), vs_in.end());
+				inputs.insert(inputs.end(), fs_in.begin(), fs_in.end());
+			}
+
+			pipe_compiler_job(
+				const vk::pipeline_props& props,
+				module_resolver_t resolve_fn,
+				const std::vector<glsl::program_input>& vs_in,
+				const std::vector<glsl::program_input>& fs_in,
+				op_flags flags_,
+				callback_t func)
+			{
+				callback_func = func;
+				resolve_modules_func = resolve_fn;
+				graphics_data = props;
+				graphics_modules[0] = VK_NULL_HANDLE;
+				graphics_modules[1] = VK_NULL_HANDLE;
 				is_graphics_job = true;
 				flags = flags_;
 
