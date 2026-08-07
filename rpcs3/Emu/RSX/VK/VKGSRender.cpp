@@ -2802,9 +2802,91 @@ void VKGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* 
 
 		data.sync();
 
+		// On a tile-based renderer the results are typically a whole tiling pass
+		// away, so this wait is long. It must therefore stay interruptible:
+		// get_query_result() blocks without ever checking external_interrupt_lock,
+		// and a PPU thread that faults on RSX-guarded memory during that window
+		// spins in on_access_violation() waiting for an ack this thread can no
+		// longer give. Measured on Adreno/Turnip: PPU pinned at ~90% in
+		// sched_yield under on_access_violation, RSX parked in the query wait -
+		// a deadlock presenting as a freeze. Wait here instead, servicing
+		// external interrupts exactly like the FIFO semaphore_acquire loop does,
+		// and only fall through to get_query_result() once the value is ready.
+		static const bool needs_interruptible_wait = vk::is_tile_based_renderer(vk::get_driver_vendor());
+
+		bool aborted = false;
+
 		// Gather data
 		for (const auto occlusion_id : data.indices)
 		{
+			if (needs_interruptible_wait)
+			{
+				u32 wait_iterations = 0;
+				bool rescued = false;
+
+				while (!m_occlusion_query_manager->check_query_status(occlusion_id))
+				{
+					// Rescue path. A query begun in the current command buffer is
+					// not even ENDED until close_and_submit_command_buffer(), so if
+					// the is_current() bookkeeping above mis-reported (it compares
+					// reset_id), the value can never arrive without a flush. Rather
+					// than pay a hard sync on every ZCULL read, give the result a
+					// generous window and then force the flush once. If the query
+					// STILL never readies after this fired, the GPU itself is not
+					// retiring work - a driver/desync hang, not a bookkeeping bug -
+					// and the warning below is the breadcrumb that says so.
+					if (!rescued && ++wait_iterations >= 4096)
+					{
+						rescued = true;
+						rsx_log.warning("ZCULL result did not arrive; forcing command flush (query=%d)", occlusion_id);
+
+						std::lock_guard lock(m_flush_queue_mutex);
+						flush_command_queue();
+
+						if (m_flush_requests.pending())
+						{
+							m_flush_requests.clear_pending_flag();
+						}
+
+						continue;
+					}
+
+					// Consume texture-cache flush requests, pending flips and
+					// offloader deadlocks while waiting. This is NOT optional: a
+					// PPU thread that faults on RSX-guarded memory posts a flush
+					// request in on_access_violation() and then spins in
+					// producer_wait() until this thread consumes it. Servicing
+					// only external_interrupt_lock is not enough - measured
+					// deadlock: PPU pinned in sched_yield under producer_wait,
+					// this thread parked below, neither able to advance. The FIFO
+					// semaphore_acquire wait survives the same situation because
+					// cpu_wait() makes exactly this call.
+					on_semaphore_acquire_wait();
+
+					if (external_interrupt_lock)
+					{
+						wait_pause();
+					}
+					else if (state & cpu_flag::exit)
+					{
+						// Result may never arrive during shutdown; do not read it.
+						aborted = true;
+						break;
+					}
+					else
+					{
+						// Park at near-zero power; the event stream bounds the
+						// poll period to tens of microseconds.
+						rx::wait_for_event();
+					}
+				}
+
+				if (aborted)
+				{
+					break;
+				}
+			}
+
 			query->result += m_occlusion_query_manager->get_query_result(occlusion_id);
 			if (query->result && !g_cfg.video.precise_zpass_count)
 			{

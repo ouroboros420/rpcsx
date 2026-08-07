@@ -46,6 +46,11 @@ namespace vk
 		vk::render_device* owner = nullptr;
 		std::vector<query_slot_info> query_slot_status;
 
+		// A tile-based renderer cannot produce a query result before its tiling
+		// pass resolves, so spinning on one burns a core for the whole pass.
+		// Sleep between polls instead. Decided once, at construction.
+		bool tile_based_renderer = false;
+
 		bool poke_query(query_slot_info& query, u32 index, VkQueryResultFlags flags);
 		void allocate_new_pool(vk::command_buffer& cmd);
 		void reallocate_pool(vk::command_buffer& cmd);

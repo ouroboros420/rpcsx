@@ -164,11 +164,37 @@ namespace vk
 
 		void sync()
 		{
-			if (command_buffer_to_wait->reset_id == command_buffer_sync_id)
+			if (command_buffer_to_wait->reset_id != command_buffer_sync_id)
+			{
+				return;
+			}
+
+			// Cheap, and the answer cannot change for the lifetime of the device.
+			static const bool s_tile_based = vk::is_tile_based_renderer(vk::get_driver_vendor());
+
+			if (!s_tile_based)
 			{
 				// Allocation stack is FIFO and very long so no need to actually wait for fence signal
 				command_buffer_to_wait->flush();
+				return;
 			}
+
+			// NOTE: do not "fix" this by waiting on the submission fence here.
+			//
+			// It is tempting: on a tile-based renderer nothing resolves until the
+			// tiling pass ends, so this flush returns before the result exists and
+			// get_query_result() then spins for the rest of the pass (~48% of all
+			// CPU samples on Adreno/Turnip). Replacing the flush with
+			// wait(GENERAL_WAIT_TIMEOUT) does cut total CPU cycles roughly in half
+			// and the RSX thread stops burning a core entirely - measured.
+			//
+			// It also hangs the emulator. wait() waits for GPU *completion*, but
+			// the command buffer holding the query is not necessarily submitted
+			// yet, and the thread responsible for submitting it is this one. The
+			// wait then only ends via its timeout, which presents as a freeze at
+			// low CPU. Any real fix has to guarantee the work is in flight before
+			// blocking on it.
+			command_buffer_to_wait->flush();
 		}
 	};
 
