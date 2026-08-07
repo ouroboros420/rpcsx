@@ -2,6 +2,7 @@
 
 #include "util/types.hpp"
 #include <functional>
+#include <thread> // std::this_thread::yield in utils::spin_on_cacheline_once
 
 #ifndef _MSC_VER
 #pragma GCC diagnostic push
@@ -1839,6 +1840,61 @@ namespace utils
 
 	template <typename F>
 	aofn_helper(F&& f) -> aofn_helper<F>;
+
+	// Spin until a cacheline changes, or until the timeout expires.
+	//
+	// Ported from upstream's rpcs3/util/asm.hpp (v0.0.42), which this fork
+	// replaced with rx/asm.hpp. It lives here rather than in rx/ because it
+	// needs atomic_t, which rx/ does not (and should not) know about. Keeping
+	// upstream's "utils::" spelling means the nv406e.cpp call site continues to
+	// merge cleanly in later stages.
+	//
+	// NOTE: upstream's x86 branch (UMONITOR/UMWAIT and MONITORX/MWAITX) is
+	// deliberately NOT ported. It depends on utils::get_wait_cycles(), which
+	// does not exist anywhere in this fork, plus has_waitpkg()/has_waitx() from
+	// util/sysinfo.hpp. ARM64 is the architecture that matters here and is
+	// ported faithfully; everything else yields, which is exactly what this
+	// code path did before upstream added this function.
+	template <typename T, usz Align>
+	inline void spin_on_cacheline_once(const atomic_t<T, Align>& var, T old_value, u64 timeout_us)
+	{
+#if defined(ARCH_ARM64)
+		// WFE wakes from the periodic event stream, so the explicit timeout is ignored on ARM.
+		(void)timeout_us;
+
+		const void* addr = &var.raw();
+
+		using wait_type = std::remove_cvref_t<decltype(var.raw())>;
+		using raw_type = std::conditional_t<sizeof(wait_type) == 8, u64,
+			std::conditional_t<sizeof(wait_type) == 4, u32,
+			std::conditional_t<sizeof(wait_type) == 2, u16, u8>>>;
+
+		static_assert(sizeof(wait_type) <= 8, "Unsupported atomic size for spin_on_cacheline_once");
+
+		raw_type value{};
+		const auto* wait_addr = static_cast<const volatile raw_type*>(addr);
+
+		if constexpr (sizeof(raw_type) == 1) __asm__ volatile("ldaxrb %w0, %1" : "=r"(value) : "Q"(*wait_addr) : "memory");
+		else if constexpr (sizeof(raw_type) == 2) __asm__ volatile("ldaxrh %w0, %1" : "=r"(value) : "Q"(*wait_addr) : "memory");
+		else if constexpr (sizeof(raw_type) == 4) __asm__ volatile("ldaxr %w0, %1" : "=r"(value) : "Q"(*wait_addr) : "memory");
+		else if constexpr (sizeof(raw_type) == 8) __asm__ volatile("ldaxr %x0, %1" : "=r"(value) : "Q"(*wait_addr) : "memory");
+
+		if (std::bit_cast<wait_type>(value) != old_value)
+		{
+			__asm__ volatile("clrex" ::: "memory");
+			return;
+		}
+
+		__asm__ volatile("wfe" ::: "memory");
+		__asm__ volatile("clrex" ::: "memory");
+#else
+		(void)var;
+		(void)old_value;
+		(void)timeout_us;
+
+		std::this_thread::yield();
+#endif
+	}
 } // namespace utils
 
 // Shorter lambda for non-cv qualified L-values

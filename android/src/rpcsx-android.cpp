@@ -207,6 +207,12 @@ struct GraphicsFrame : GSFrameBase {
                      bool is_bgra) const override {}
   void take_screenshot(std::vector<u8> &&sshot_data, u32 sshot_width,
                        u32 sshot_height, bool is_bgra) override {}
+
+  // Upstream v0.0.42 added this as a pure virtual on GSFrameBase. It exists to
+  // put the FPS counter in a desktop window's title bar; there is no title bar
+  // here, and its only caller is GLGSRender, which Android never uses (we are
+  // Vulkan-only). The UI gets its stats through the JNI bridge instead.
+  void update_title(double fps = 0.0) override {}
 };
 
 void jit_announce(uptr, usz, std::string_view);
