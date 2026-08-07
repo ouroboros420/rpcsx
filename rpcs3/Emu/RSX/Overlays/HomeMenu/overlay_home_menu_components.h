@@ -31,7 +31,7 @@ namespace rsx
 		struct home_menu_entry : horizontal_layout
 		{
 		public:
-			home_menu_entry(home_menu::fa_icon icon, const std::string& text, u16 width, text_align alignment = text_align::center);
+			home_menu_entry(home_menu::fa_icon icon, std::string_view text, u16 width, text_align alignment = text_align::center);
 		};
 
 		template <typename T, typename C>
@@ -318,12 +318,9 @@ namespace rsx
 		{
 		public:
 			home_menu_slider(C* setting, const std::string& text, const std::string& suffix, std::map<T, std::string> special_labels = {}, T minimum = C::min, T maximum = C::max)
-				: home_menu_setting<T, C>(setting, text)
-				, m_suffix(suffix)
-				, m_special_labels(std::move(special_labels))
-				, m_minimum(minimum)
-				, m_maximum(maximum)
-			{}
+				: home_menu_setting<T, C>(setting, text), m_suffix(suffix), m_special_labels(std::move(special_labels)), m_minimum(minimum), m_maximum(maximum)
+			{
+			}
 
 			void set_size(u16 w, u16 h = element_height) override
 			{
@@ -406,5 +403,5 @@ namespace rsx
 		{
 			using home_menu_slider<f64, cfg::_float<Min, Max>>::home_menu_slider;
 		};
-	}
-}
+	} // namespace overlays
+} // namespace rsx

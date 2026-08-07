@@ -3,8 +3,24 @@
 #include "Common/TextureUtils.h"
 
 #include "rsx_utils.h"
+#include "Common/TextureUtils.h"
+#include "Program/GLSLCommon.h"
 
 #include "Emu/system_config.h"
+#include "util/simd.hpp"
+
+#if !defined(_MSC_VER)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+#endif
+
+#if defined(ARCH_ARM64)
+#if !defined(_MSC_VER)
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+#endif
+#undef FORCE_INLINE
+#include "Emu/CPU/sse2neon.h"
+#endif
 
 namespace rsx
 {
@@ -312,7 +328,7 @@ namespace rsx
 
 	u8 fragment_texture::convolution_filter() const
 	{
-		return ((registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 13) & 0xf);
+		return ((registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 13) & 0x7);
 	}
 
 	u8 fragment_texture::argb_signed() const
@@ -350,14 +366,79 @@ namespace rsx
 		return dimension() != rsx::texture_dimension::dimension1d ? ((registers[NV4097_SET_TEXTURE_IMAGE_RECT + (m_index * 8)]) & 0xffff) : 1;
 	}
 
-	u32 fragment_texture::border_color() const
+	u32 fragment_texture::border_color(bool apply_colorspace_remapping) const
 	{
-		return registers[NV4097_SET_TEXTURE_BORDER_COLOR + (m_index * 8)];
+		const u32 raw = registers[NV4097_SET_TEXTURE_BORDER_COLOR + (m_index * 8)];
+		if (!apply_colorspace_remapping) [[ likely ]]
+		{
+			return raw;
 	}
 
-	color4f fragment_texture::remapped_border_color() const
+		const u32 sext = argb_signed();
+		if (!sext) [[ likely ]]
 	{
-		color4f base_color = rsx::decode_border_color(border_color());
+			return raw;
+		}
+
+		// Border color is broken on PS3. The SNORM behavior is completely broken and behaves like BIASED renormalization instead.
+		// To solve the mismatch, we need to first do a bit expansion on the value then store it as sign extended. The second part is a natural part of numbers on a binary system, so we only need to do the former.
+		// Note that the input color is in BE order (BGRA) so we reverse the mask to match.
+		static constexpr u32 expand4_lut[16] =
+		{
+			0x00000000u, // 0000
+			0xFF000000u, // 0001
+			0x00FF0000u, // 0010
+			0xFFFF0000u, // 0011
+			0x0000FF00u, // 0100
+			0xFF00FF00u, // 0101
+			0x00FFFF00u, // 0110
+			0xFFFFFF00u, // 0111
+			0x000000FFu, // 1000
+			0xFF0000FFu, // 1001
+			0x00FF00FFu, // 1010
+			0xFFFF00FFu, // 1011
+			0x0000FFFFu, // 1100
+			0xFF00FFFFu, // 1101
+			0x00FFFFFFu, // 1110
+			0xFFFFFFFFu  // 1111
+		};
+
+		// Bit pattern expand
+		const u32 mask = expand4_lut[sext];
+
+		// Now we perform the compensation operation
+		// BIAS operation = (V - 128 / 127)
+
+		// Load
+		const __m128i _0 = _mm_setzero_si128();
+		const __m128i _128 = _mm_set1_epi32(128);
+
+		// Explode the bytes.
+		__m128i v = _mm_cvtsi32_si128(raw);
+		v = _mm_unpacklo_epi8(v, _0);
+		v = _mm_unpacklo_epi16(v, _0);
+
+		// Conversion: x = (y - 128)
+		v = _mm_sub_epi32(v, _128);
+
+		// Convert to signed encoding (reverse sext)
+		v = _mm_slli_epi32(v, 24);
+		v = _mm_srli_epi32(v, 24);
+
+		// Pack down
+		v = _mm_packs_epi32(v, _0);
+		v = _mm_packus_epi16(v, _0);
+
+		// Read
+		const u32 conv = _mm_cvtsi128_si32(v);
+
+		// Merge
+		return (conv & mask) | (raw & ~mask);
+	}
+
+	color4f fragment_texture::remapped_border_color(bool apply_colorspace_remapping) const
+	{
+		color4f base_color = rsx::decode_border_color(border_color(apply_colorspace_remapping));
 		if (remap() == RSX_TEXTURE_REMAP_IDENTITY)
 		{
 			return base_color;
@@ -373,6 +454,21 @@ namespace rsx
 	u32 fragment_texture::pitch() const
 	{
 		return registers[NV4097_SET_TEXTURE_CONTROL3 + m_index] & 0xfffff;
+	}
+
+	image_section_attributes_t fragment_texture::attributes() const
+	{
+		const auto _format = format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
+		return {
+			.address = offset(),
+			.gcm_format = _format,
+			.pitch = pitch(),
+			.width = width(),
+			.height = height(),
+			.depth = depth(),
+			.mipmaps = mipmap(),
+			.bpp = rsx::get_format_block_size_in_bytes(_format)
+		};
 	}
 
 	u32 vertex_texture::offset() const
@@ -496,14 +592,14 @@ namespace rsx
 		return dimension() != rsx::texture_dimension::dimension1d ? ((registers[NV4097_SET_VERTEX_TEXTURE_IMAGE_RECT + (m_index * 8)]) & 0xffff) : 1;
 	}
 
-	u32 vertex_texture::border_color() const
+	u32 vertex_texture::border_color(bool) const
 	{
 		return registers[NV4097_SET_VERTEX_TEXTURE_BORDER_COLOR + (m_index * 8)];
 	}
 
-	color4f vertex_texture::remapped_border_color() const
+	color4f vertex_texture::remapped_border_color(bool) const
 	{
-		return rsx::decode_border_color(border_color());
+		return rsx::decode_border_color(border_color(false));
 	}
 
 	u16 vertex_texture::depth() const

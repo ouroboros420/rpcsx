@@ -19,8 +19,8 @@ R"(
 #define SDF_ROUND_BOX 3
 
 #ifdef VULKAN
-	layout(set=0, binding=1) uniform sampler2D fs0;
-	layout(set=0, binding=2) uniform sampler2DArray fs1;
+	layout(set=0, binding=0) uniform sampler2D fs0;
+	layout(set=0, binding=1) uniform sampler2DArray fs1;
 #else
 	layout(binding=31) uniform sampler2D fs0;
 	layout(binding=30) uniform sampler2DArray fs1;
@@ -87,27 +87,36 @@ vec4 SDF_blend(
 	float b = smoothstep(fw, -fw, sd);                                // outer edge transition
 
 	// Mix the 3 colors with the transition values.
-	vec4 col = mix(outer_color, border_color, b);
-	col      = mix(col, inner_color, a);
-	return col;
+	vec4 color = mix(outer_color, border_color, b);
+	color      = mix(color, inner_color, a);
+	return color;
 }
 
 float SDF_fn(const in uint sdf)
 {
-	const vec2 p = floor(gl_FragCoord.xy) - sdf_origin.xy;   // Screen-space distance
+	const vec2 p = floor(gl_FragCoord.xy) - sdf_origin.xy;   // Screen-spac distance
 	const vec2 hs = sdf_params.xy;                           // Half size
 	const float r = sdf_params.z;                            // Radius (for round box, ellipses use half size instead)
 	vec2 v;                                                  // Scratch
+	float d;                                                 // Distance calculated
 
 	switch (sdf)
 	{
 	case SDF_ELLIPSE:
 		// Slightly inaccurate hack, but good enough for classification and allows oval shapes
-		return (length(p / hs) - 1.f) * length(hs);
+		d = length(p / hs) - 1.f;
+		// Now we need to correct for the border because the circle was scaled down to a unit
+		return d * length(hs);
 	case SDF_BOX:
+		// Insanity, reduced junction of 3 functions
+		// If for each axis the axis-aligned distance = D then you can select/clamp each axis separately by doing a max(D, 0) on all dimensions
+		// Length then does the squareroot transformation.
+		// The second term is to add back the inner distance which is useful for rendering borders
 		v = abs(p) - hs;
 		return length(max(v, 0.f)) + min(max(v.x, v.y), 0.0);
 	case SDF_ROUND_BOX:
+		// Modified BOX SDF.
+		// The half box size is shrunk by R in it's diagonal, but we add radius back into the output to bias the output again
 		v = abs(p) - (hs - r);
 		return length(max(v, 0.f)) + min(max(v.x, v.y), 0.0) - r;
 	default:

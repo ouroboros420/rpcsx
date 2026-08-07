@@ -32,8 +32,8 @@ public:
 protected:
 	std::string getFloatTypeName(usz elementCount) override;
 	std::string getHalfTypeName(usz elementCount) override;
-	std::string getFunction(FUNCTION) override;
-	std::string compareFunction(COMPARE, const std::string&, const std::string&) override;
+	std::string getFunction(FUNCTION f) override;
+	std::string compareFunction(COMPARE f, std::string_view Op0, std::string_view Op1) override;
 
 	void insertHeader(std::stringstream& OS) override;
 	void insertInputs(std::stringstream& OS) override;
@@ -56,7 +56,7 @@ public:
 	ParamArray parr;
 	u32 id;
 	gl::glsl::shader shader;
-	std::vector<usz> FragmentConstantOffsetCache;
+	std::vector<u32> constant_offsets;
 
 	/**
 	 * Decompile a fragment shader located in the PS3's Memory.  This function operates synchronously.

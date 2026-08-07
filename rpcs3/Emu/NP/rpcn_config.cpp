@@ -63,8 +63,8 @@ std::string cfg_rpcn::get_path()
 	// the emulator working on any app/core version skew.
 	if (g_android_internal_config_dir.empty())
 	{
-		return fs::get_config_dir(true) + "rpcn.yml";
-	}
+	return fs::get_config_dir(true) + "rpcn.yml";
+}
 
 	const std::string internal_path = g_android_internal_config_dir + "rpcn.yml";
 

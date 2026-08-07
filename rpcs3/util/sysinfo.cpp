@@ -3,9 +3,11 @@
 #include "util/File.h"
 #include "Emu/vfs_config.h"
 #include "util/Thread.h"
+#include "rpcs3_version.h"
 
 #if defined(ARCH_ARM64)
 #include "Emu/CPU/Backends/AArch64/AArch64Common.h"
+#include <arm_sve.h>
 #endif
 #ifdef _WIN32
 #include "windows.h"
@@ -21,7 +23,7 @@ DYNAMIC_IMPORT("ntdll.dll", RtlGetVersion, NTSTATUS(OSVERSIONINFOW* lpVersionInf
 #include <sys/sysctl.h>
 #else
 #include <sys/utsname.h>
-#include <errno.h>
+#include <cerrno>
 #if defined(ARCH_ARM64) && defined(__linux__)
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
@@ -481,6 +483,19 @@ bool utils::has_sve2()
 	return g_value;
 }
 
+#if defined(_MSC_VER)
+#define sve_func
+#else
+#define sve_func __attribute__((__target__("+sve")))
+#endif
+
+// svcntb returns sve length in bytes, our function retuns length in bits
+sve_func int utils::sve_length()
+{
+	static const int g_value = static_cast<int>(svcntb() * 8);
+	return g_value;
+}
+
 #endif
 
 std::string utils::get_cpu_brand()
@@ -517,6 +532,17 @@ std::string utils::get_cpu_brand()
 #endif
 }
 
+std::string_view utils::get_architecture()
+{
+#if defined(ARCH_X64)
+    return "x64"sv;
+#elif defined(ARCH_ARM64)
+    return "arm64"sv;
+#else
+    return "unknown"sv;
+#endif
+}
+
 std::string utils::get_system_info()
 {
 	std::string result;
@@ -537,13 +563,18 @@ std::string utils::get_system_info()
 	}
 #ifdef ARCH_ARM64
 
-	if (has_neon())
+	if (!has_neon())
 	{
-		result += " | Neon";
+		fmt::throw_exception("Neon support not present");
+	}
+
+	if (has_sve())
+	{
+		fmt::append(result, " | SVE%s-%d", has_sve2() ? "2" : "", sve_length());
 	}
 	else
 	{
-		fmt::throw_exception("Neon support not present");
+		result += " | Neon";
 	}
 #else
 
@@ -732,21 +763,22 @@ utils::OS_version utils::get_OS_version()
 #ifdef _WIN32
 	if (RtlGetVersion)
 	{
-	    OSVERSIONINFOW osvi{};
-	    osvi.dwOSVersionInfoSize = sizeof(osvi);
-	    RtlGetVersion(&osvi);
-	    res.version_major = osvi.dwMajorVersion;
-	    res.version_minor = osvi.dwMinorVersion;
-	    res.version_patch = osvi.dwBuildNumber;
+		OSVERSIONINFOW osvi{};
+		osvi.dwOSVersionInfoSize = sizeof(osvi);
+		RtlGetVersion(&osvi);
+		res.version_major = osvi.dwMajorVersion;
+		res.version_minor = osvi.dwMinorVersion;
+		res.version_patch = osvi.dwBuildNumber;
 	}
-#elif defined (__APPLE__)
+#elif defined(__APPLE__)
 	res.version_major = Darwin_Version::getNSmajorVersion();
 	res.version_minor = Darwin_Version::getNSminorVersion();
 	res.version_patch = Darwin_Version::getNSpatchVersion();
 #else
 	if (struct utsname details = {}; !uname(&details))
 	{
-		const std::vector<std::string> version_list = fmt::split(details.release, {"."});
+		const std::string_view release = details.release;
+		const std::vector<std::string_view> version_list = fmt::split_sv(release, { "." });
 		const auto get_version_part = [&version_list](usz i) -> usz
 		{
 			if (version_list.size() <= i)
@@ -766,13 +798,17 @@ utils::OS_version utils::get_OS_version()
 	return res;
 }
 
-std::string utils::get_OS_version_string()
+std::string utils::get_OS_version_string(bool simple)
 {
-	std::string output;
 #ifdef _WIN32
 	OSVERSIONINFOW osvi{};
 	osvi.dwOSVersionInfoSize = sizeof(osvi);
 	RtlGetVersion(&osvi);
+
+	if (simple)
+	{
+		return fmt::format("Windows %lu.%lu.%lu", osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
+	}
 
 	const bool has_sp = osvi.szCSDVersion[0] != L'\0';
 	std::vector<char> holder;
@@ -785,31 +821,49 @@ std::string utils::get_OS_version_string()
 			holder.data(), len, nullptr, nullptr);
 	}
 
-	fmt::append(output,
-		"Operating system: Windows, Major: %lu, Minor: %lu, Build: %lu, Service Pack: %s",
+	return fmt::format("Operating system: Windows, Major: %lu, Minor: %lu, Build: %lu, Service Pack: %s",
 		osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber,
 		has_sp ? holder.data() : "none");
-#elif defined (__APPLE__)
+#elif defined(__APPLE__)
 	const int major_version = Darwin_Version::getNSmajorVersion();
 	const int minor_version = Darwin_Version::getNSminorVersion();
 	const int patch_version = Darwin_Version::getNSpatchVersion();
 
-	fmt::append(output, "Operating system: macOS, Version: %d.%d.%d",
-		major_version, minor_version, patch_version);
+	if (simple)
+	{
+		return fmt::format("macOS %d.%d.%d", major_version, minor_version, patch_version);
+	}
+
+	return fmt::format("Operating system: macOS, Version: %d.%d.%d", major_version, minor_version, patch_version);
 #else
 	struct utsname details = {};
 
 	if (!uname(&details))
 	{
-		fmt::append(output, "Operating system: POSIX, Name: %s, Release: %s, Version: %s",
-			details.sysname, details.release, details.version);
-	}
-	else
+		if (simple)
 	{
-		fmt::append(output, "Operating system: POSIX, Unknown version! (Error: %d)", errno);
+			return fmt::format("%s %s", details.sysname, details.release);
 	}
+
+		return fmt::format("Operating system: POSIX, Name: %s, Release: %s, Version: %s", details.sysname, details.release, details.version);
+	}
+
+	if (simple)
+	{
+		return "POSIX";
+	}
+
+	return fmt::format("Operating system: POSIX, Unknown version! (Error: %d)", errno);
 #endif
-	return output;
+}
+
+std::string utils::get_user_agent()
+{
+	const std::string user_agent = fmt::format("RPCS3/%s (%s; %s)",
+		rpcs3::get_version().to_string(true),
+		utils::get_OS_version_string(true),
+		utils::get_architecture());
+	return user_agent;
 }
 
 int utils::get_maxfiles()
@@ -875,13 +929,22 @@ static const bool s_tsc_freq_evaluated = []() -> bool
 		}
 
 #ifdef _WIN32
-		LARGE_INTEGER freq;
+		LARGE_INTEGER freq{};
 		if (!QueryPerformanceFrequency(&freq))
 		{
 			return 0;
 		}
 
-		if (freq.QuadPart <= 9'999'999)
+		if (!freq.QuadPart)
+		{
+			return 0;
+		}
+
+		// Theoretical constraint for the function itself to operate properly
+		// Unlikely to be unmet
+		constexpr LONGLONG min_supported_QPC_frequency = 50'000;
+
+		if (freq.QuadPart <= min_supported_QPC_frequency)
 		{
 			return 0;
 		}
@@ -913,7 +976,7 @@ static const bool s_tsc_freq_evaluated = []() -> bool
 		printf("[TSC calibration] Available clock sources: '%s'\n", clock_sources.c_str());
 
 		// Check if the Kernel has blacklisted the TSC
-		const auto available_clocks = fmt::split(clock_sources, {" "});
+		const auto available_clocks = fmt::split_sv(clock_sources, {" "});
 		const bool tsc_reliable = std::find(available_clocks.begin(), available_clocks.end(), "tsc") != available_clocks.end();
 
 		if (!tsc_reliable)
@@ -953,7 +1016,7 @@ static const bool s_tsc_freq_evaluated = []() -> bool
 		const ullong sec_base = ts0.tv_sec;
 #endif
 
-		constexpr usz sleep_time_ms = 40;
+		const usz sleep_time_ms = timer_freq <= 300'000 ? (300'000 * 50) / timer_freq : 50;
 
 		for (usz sample = 0; sample < sample_count; sample++)
 		{
@@ -1007,7 +1070,7 @@ static const bool s_tsc_freq_evaluated = []() -> bool
 			{
 				// Sleep between first and last sample
 #ifdef _WIN32
-				Sleep(sleep_time_ms);
+				Sleep(static_cast<DWORD>(sleep_time_ms));
 #else
 				usleep(sleep_time_ms * 1000);
 #endif

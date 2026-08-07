@@ -40,13 +40,21 @@ void fmt_class_string<CellAudioInError>::format(std::string& out, u64 arg)
 struct avconf_manager
 {
 	shared_mutex mutex;
-	std::vector<CellAudioInDeviceInfo> devices;
+
+	struct device_info
+	{
+		CellAudioInDeviceInfo info{};
+		// The device name may be too long for CellAudioInDeviceInfo, so we
+		// additionally save the full name.
+		std::string full_device_name;
+	};
+
+	std::vector<device_info> devices;
 	CellAudioInDeviceMode inDeviceMode =
 		CELL_AUDIO_IN_SINGLE_DEVICE_MODE; // TODO: use somewhere
 
 	void copy_device_info(u32 num, vm::ptr<CellAudioInDeviceInfo> info) const;
-	std::optional<CellAudioInDeviceInfo>
-	get_device_info(vm::cptr<char> name) const;
+	std::optional<device_info> get_device_info(vm::cptr<char> name) const;
 
 	avconf_manager();
 
@@ -67,69 +75,76 @@ avconf_manager::avconf_manager()
 		switch (g_cfg.audio.microphone_type)
 		{
 		case microphone_handler::standard:
+		{
 			for (u32 index = 0; index < mic_list.size(); index++)
 			{
-				devices.emplace_back();
-
-				devices[curindex].portType = CELL_AUDIO_IN_PORT_USB;
-				devices[curindex].availableModeCount = 1;
-				devices[curindex].state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
-				devices[curindex].deviceId = 0xE11CC0DE + curindex;
-				devices[curindex].type = 0xC0DEE11C;
-				devices[curindex].availableModes[0].type =
-					CELL_AUDIO_IN_CODING_TYPE_LPCM;
-				devices[curindex].availableModes[0].channel = CELL_AUDIO_IN_CHNUM_2;
-				devices[curindex].availableModes[0].fs =
+				device_info device{};
+				device.info.portType = CELL_AUDIO_IN_PORT_USB;
+				device.info.availableModeCount = 1;
+				device.info.state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
+				device.info.deviceId = 0xE11CC0DE + curindex;
+				device.info.type = 0xC0DEE11C;
+				device.info.availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
+				device.info.availableModes[0].channel = CELL_AUDIO_IN_CHNUM_2;
+				device.info.availableModes[0].fs =
 					CELL_AUDIO_IN_FS_8KHZ | CELL_AUDIO_IN_FS_12KHZ |
 					CELL_AUDIO_IN_FS_16KHZ | CELL_AUDIO_IN_FS_24KHZ |
 					CELL_AUDIO_IN_FS_32KHZ | CELL_AUDIO_IN_FS_48KHZ;
-				devices[curindex].deviceNumber = curindex;
-				strcpy_trunc(devices[curindex].name, mic_list[index]);
+				device.info.deviceNumber = curindex;
+				device.full_device_name = mic_list[index];
+				strcpy_trunc(device.info.name, device.full_device_name);
 
+				devices.push_back(std::move(device));
 				curindex++;
 			}
 			break;
+		}
 		case microphone_handler::real_singstar:
 		case microphone_handler::singstar:
+		{
 			// Only one device for singstar device
-			devices.emplace_back();
-
-			devices[curindex].portType = CELL_AUDIO_IN_PORT_USB;
-			devices[curindex].availableModeCount = 1;
-			devices[curindex].state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
-			devices[curindex].deviceId = 0x00000001;
-			devices[curindex].type = 0x14150000;
-			devices[curindex].availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
-			devices[curindex].availableModes[0].channel = CELL_AUDIO_IN_CHNUM_2;
-			devices[curindex].availableModes[0].fs =
+			device_info device{};
+			device.info.portType = CELL_AUDIO_IN_PORT_USB;
+			device.info.availableModeCount = 1;
+			device.info.state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
+			device.info.deviceId = 0x00000001;
+			device.info.type = 0x14150000;
+			device.info.availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
+			device.info.availableModes[0].channel = CELL_AUDIO_IN_CHNUM_2;
+			device.info.availableModes[0].fs =
 				CELL_AUDIO_IN_FS_8KHZ | CELL_AUDIO_IN_FS_12KHZ |
 				CELL_AUDIO_IN_FS_16KHZ | CELL_AUDIO_IN_FS_24KHZ |
 				CELL_AUDIO_IN_FS_32KHZ | CELL_AUDIO_IN_FS_48KHZ;
-			devices[curindex].deviceNumber = curindex;
-			strcpy_trunc(devices[curindex].name, mic_list[0]);
+			device.info.deviceNumber = curindex;
+			device.full_device_name = mic_list[0];
+			strcpy_trunc(device.info.name, device.full_device_name);
 
+			devices.push_back(std::move(device));
 			curindex++;
 			break;
+		}
 		case microphone_handler::rocksmith:
-			devices.emplace_back();
-
-			devices[curindex].portType = CELL_AUDIO_IN_PORT_USB;
-			devices[curindex].availableModeCount = 1;
-			devices[curindex].state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
-			devices[curindex].deviceId =
-				0x12BA00FF; // Specific to rocksmith usb input
-			devices[curindex].type = 0xC0DE73C4;
-			devices[curindex].availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
-			devices[curindex].availableModes[0].channel = CELL_AUDIO_IN_CHNUM_1;
-			devices[curindex].availableModes[0].fs =
+		{
+			device_info device{};
+			device.info.portType = CELL_AUDIO_IN_PORT_USB;
+			device.info.availableModeCount = 1;
+			device.info.state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
+			device.info.deviceId = 0x12BA00FF; // Specific to rocksmith usb input
+			device.info.type = 0xC0DE73C4;
+			device.info.availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
+			device.info.availableModes[0].channel = CELL_AUDIO_IN_CHNUM_1;
+			device.info.availableModes[0].fs =
 				CELL_AUDIO_IN_FS_8KHZ | CELL_AUDIO_IN_FS_12KHZ |
 				CELL_AUDIO_IN_FS_16KHZ | CELL_AUDIO_IN_FS_24KHZ |
 				CELL_AUDIO_IN_FS_32KHZ | CELL_AUDIO_IN_FS_48KHZ;
-			devices[curindex].deviceNumber = curindex;
-			strcpy_trunc(devices[curindex].name, mic_list[0]);
+			device.info.deviceNumber = curindex;
+			device.full_device_name = mic_list[0];
+			strcpy_trunc(device.info.name, device.full_device_name);
 
+			devices.push_back(std::move(device));
 			curindex++;
 			break;
+		}
 		case microphone_handler::null:
 		default:
 			break;
@@ -138,22 +153,23 @@ avconf_manager::avconf_manager()
 
 	if (g_cfg.io.camera != camera_handler::null)
 	{
-		devices.emplace_back();
-
-		devices[curindex].portType = CELL_AUDIO_IN_PORT_USB;
-		devices[curindex].availableModeCount = 1;
-		devices[curindex].state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
-		devices[curindex].deviceId = 0xDEADBEEF;
-		devices[curindex].type = 0xBEEFDEAD;
-		devices[curindex].availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
-		devices[curindex].availableModes[0].channel = CELL_AUDIO_IN_CHNUM_NONE;
-		devices[curindex].availableModes[0].fs =
+		device_info device{};
+		device.info.portType = CELL_AUDIO_IN_PORT_USB;
+		device.info.availableModeCount = 1;
+		device.info.state = CELL_AUDIO_IN_DEVICE_STATE_AVAILABLE;
+		device.info.deviceId = 0xDEADBEEF;
+		device.info.type = 0xBEEFDEAD;
+		device.info.availableModes[0].type = CELL_AUDIO_IN_CODING_TYPE_LPCM;
+		device.info.availableModes[0].channel = CELL_AUDIO_IN_CHNUM_NONE;
+		device.info.availableModes[0].fs =
 			CELL_AUDIO_IN_FS_8KHZ | CELL_AUDIO_IN_FS_12KHZ |
 			CELL_AUDIO_IN_FS_16KHZ | CELL_AUDIO_IN_FS_24KHZ |
 			CELL_AUDIO_IN_FS_32KHZ | CELL_AUDIO_IN_FS_48KHZ;
-		devices[curindex].deviceNumber = curindex;
-		strcpy_trunc(devices[curindex].name, "USB Camera");
+		device.info.deviceNumber = curindex;
+		device.full_device_name = "USB Camera";
+		strcpy_trunc(device.info.name, device.full_device_name);
 
+		devices.push_back(std::move(device));
 		curindex++;
 	}
 }
@@ -163,15 +179,15 @@ void avconf_manager::copy_device_info(
 {
 	memset(info.get_ptr(), 0, sizeof(CellAudioInDeviceInfo));
 	ensure(num < devices.size());
-	*info = devices[num];
+	*info = devices[num].info;
 }
 
-std::optional<CellAudioInDeviceInfo>
+std::optional<avconf_manager::device_info>
 avconf_manager::get_device_info(vm::cptr<char> name) const
 {
-	for (const CellAudioInDeviceInfo& device : devices)
+	for (const device_info& device : devices)
 	{
-		if (strncmp(device.name, name.get_ptr(), sizeof(device.name)) == 0)
+		if (strncmp(device.info.name, name.get_ptr(), sizeof(device.info.name)) == 0)
 		{
 			return device;
 		}
@@ -294,9 +310,9 @@ error_code cellVideoOutConvertCursorColor(u32 videoOut,
 	vm::ptr<void> src_addr,
 	vm::ptr<u32> dest_addr, s32 num)
 {
-	cellAvconfExt.todo(
+	cellAvconfExt.warning(
 		"cellVideoOutConvertCursorColor(videoOut=%d, displaybuffer_format=0x%x, "
-		"gamma=0x%x, source_buffer_format=0x%x, src_addr=*0x%x, dest_addr=*0x%x, "
+		"gamma=%f, source_buffer_format=0x%x, src_addr=*0x%x, dest_addr=*0x%x, "
 		"num=0x%x)",
 		videoOut, displaybuffer_format, gamma, source_buffer_format, src_addr,
 		dest_addr, num);
@@ -307,7 +323,8 @@ error_code cellVideoOutConvertCursorColor(u32 videoOut,
 	}
 
 	if (displaybuffer_format < 0 ||
-		displaybuffer_format > CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_R16G16B16X16_FLOAT ||
+		displaybuffer_format >
+			CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_R16G16B16X16_FLOAT ||
 		source_buffer_format != CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8)
 	{
 		return CELL_VIDEO_OUT_ERROR_PARAMETER_OUT_OF_RANGE;
@@ -338,16 +355,24 @@ error_code cellVideoOutConvertCursorColor(u32 videoOut,
 	if (displaybuffer_format == CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_R16G16B16X16_FLOAT)
 	{
 		if (*rgbOutputRange == CELL_VIDEO_OUT_RGB_OUTPUT_RANGE_LIMITED)
+		{
 			convert_cursor_color<true, true>(src, dst, num, gamma);
+		}
 		else
+		{
 			convert_cursor_color<true, false>(src, dst, num, gamma);
+		}
 	}
 	else
 	{
 		if (*rgbOutputRange == CELL_VIDEO_OUT_RGB_OUTPUT_RANGE_LIMITED)
+		{
 			convert_cursor_color<false, true>(src, dst, num, gamma);
+		}
 		else
+		{
 			convert_cursor_color<false, false>(src, dst, num, gamma);
+		}
 	}
 
 	return CELL_OK;
@@ -517,8 +542,8 @@ cellAudioInRegisterDevice(u64 deviceType, vm::cptr<char> name,
 	auto& av_manager = g_fxo->get<avconf_manager>();
 	const std::lock_guard lock(av_manager.mutex);
 
-	std::optional<CellAudioInDeviceInfo> info = av_manager.get_device_info(name);
-	if (!info || !memchr(info->name, '\0', sizeof(info->name)))
+	std::optional<avconf_manager::device_info> device = av_manager.get_device_info(name);
+	if (!device)
 	{
 		// TODO
 		return CELL_AUDIO_IN_ERROR_DEVICE_NOT_FOUND;
@@ -526,7 +551,7 @@ cellAudioInRegisterDevice(u64 deviceType, vm::cptr<char> name,
 
 	auto& mic_thr = g_fxo->get<mic_thread>();
 	const std::lock_guard mic_lock(mic_thr.mutex);
-	const u32 device_number = mic_thr.register_device(info->name);
+	const u32 device_number = mic_thr.register_device(device->full_device_name);
 
 	return not_an_error(device_number);
 }
@@ -559,26 +584,15 @@ error_code cellVideoOutGetScreenSize(u32 videoOut, vm::ptr<f32> screenSize)
 		return CELL_VIDEO_OUT_ERROR_UNSUPPORTED_VIDEO_OUT;
 	}
 
-	if (g_cfg.video.stereo_render_mode != stereo_render_mode_options::disabled)
+	if (g_cfg.video.stereo_enabled)
 	{
 		// Return Playstation 3D display value
 		// Some games call this function when 3D is enabled
-		*screenSize = 24.f;
+		*screenSize = static_cast<f32>(g_cfg.video.screen_size.get());
 		return CELL_OK;
 	}
 
-	//	TODO: Use virtual screen size
-#ifdef _WIN32
-	//	HDC screen = GetDC(NULL);
-	//	float diagonal = roundf(sqrtf((powf(float(GetDeviceCaps(screen,
-	// HORZSIZE)), 2) + powf(float(GetDeviceCaps(screen, VERTSIZE)), 2))) *
-	// 0.0393f);
-#else
-	// TODO: Linux implementation, without using wx
-	// float diagonal = roundf(sqrtf((powf(wxGetDisplaySizeMM().GetWidth(), 2) +
-	// powf(wxGetDisplaySizeMM().GetHeight(), 2))) * 0.0393f);
-#endif
-
+	// Let's just return not set for now
 	return CELL_VIDEO_OUT_ERROR_VALUE_IS_NOT_SET;
 }
 

@@ -215,7 +215,10 @@ namespace stx
 		}
 	};
 
-#ifndef _MSC_VER
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+#elif !defined(_MSC_VER)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 #endif
@@ -324,7 +327,9 @@ namespace stx
 		return make_single<std::remove_reference_t<T>>(std::forward<T>(value));
 	}
 
-#ifndef _MSC_VER
+#ifdef __clang__
+#pragma clang diagnostic pop
+#elif !defined(_MSC_VER)
 #pragma GCC diagnostic pop
 #endif
 
@@ -589,7 +594,6 @@ namespace stx
 		}
 
 		// Random checks which may fail on invalid pointer
-		ensure((reinterpret_cast<u64>(r.d()->destroy.load()) - 0x10000) >> 47 == 0);
 		ensure((r.d()->refs++ - 1) >> 58 == 0);
 		return r;
 	}
@@ -598,6 +602,7 @@ namespace stx
 	template <typename T>
 	class atomic_ptr
 	{
+	private:
 		struct fat_ptr
 		{
 			uptr ptr{};
@@ -767,9 +772,9 @@ namespace stx
 			// Add reference
 			const auto [prev, did_ref] = m_val.fetch_op([](fat_ptr& val)
 				{
-					if (val.ptr)
+				if (val.ptr)
 					{
-						val.ref_ctr++;
+					val.ref_ctr++;
 						return true;
 					}
 
@@ -789,9 +794,9 @@ namespace stx
 			// Dereference if still the same pointer
 			const auto [_, did_deref] = m_val.fetch_op([prev = prev](fat_ptr& val)
 				{
-					if (val.ptr == prev.ptr)
+				if (val.ptr == prev.ptr)
 					{
-						val.ref_ctr--;
+					val.ref_ctr--;
 						return true;
 					}
 
@@ -816,9 +821,9 @@ namespace stx
 			// Add reference
 			const auto [prev, did_ref] = m_val.fetch_op([](fat_ptr& val)
 				{
-					if (val.ptr)
+				if (val.ptr)
 					{
-						val.ref_ctr++;
+					val.ref_ctr++;
 						return true;
 					}
 
@@ -857,9 +862,9 @@ namespace stx
 			// Dereference if still the same pointer
 			const auto [_, did_deref] = m_val.fetch_op([prev = prev](fat_ptr& val)
 				{
-					if (val.ptr == prev.ptr)
+				if (val.ptr == prev.ptr)
 					{
-						val.ref_ctr--;
+					val.ref_ctr--;
 						return true;
 					}
 
@@ -953,15 +958,15 @@ namespace stx
 
 			const fat_ptr _val = m_val.fetch_op([&](fat_ptr& val)
 				{
-					if (val.ptr == _old)
+				if (val.ptr == _old)
 					{
 						// Set new value
-						val = to_val(_new);
+					val = to_val(_new);
 					}
-					else if (val.ptr != 0)
+				else if (val.ptr != 0)
 					{
 						// Reference previous value
-						val.ref_ctr++;
+					val.ref_ctr++;
 					}
 				});
 
@@ -997,9 +1002,9 @@ namespace stx
 			// Dereference if still the same pointer
 			const auto [_, did_deref] = m_val.fetch_op([_val](fat_ptr& val)
 				{
-					if (val.ptr == _val.ptr)
+				if (val.ptr == _val.ptr)
 					{
-						val.ref_ctr--;
+					val.ref_ctr--;
 						return true;
 					}
 
@@ -1042,10 +1047,10 @@ namespace stx
 
 			const auto [_val, ok] = m_val.fetch_op([&](fat_ptr& val)
 				{
-					if (val.ptr == _old)
+				if (val.ptr == _old)
 					{
 						// Set new value
-						val = to_val(_new);
+					val = to_val(_new);
 						return true;
 					}
 
@@ -1143,7 +1148,7 @@ namespace stx
 			return static_cast<volatile const void*>(observe()) == r.get();
 		}
 
-		atomic_t<u32>& get_wait_atomic()
+		atomic_t<u32> &get_wait_atomic()
 		{
 			return *utils::bless<atomic_t<u32>>(&m_val.raw().is_non_null);
 		}

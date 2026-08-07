@@ -250,7 +250,7 @@ namespace vk
 
 		if (m_backend == sync_backend::events_v2)
 		{
-			m_device->_vkCmdPipelineBarrier2KHR(cmd, &dependency);
+			_vkCmdPipelineBarrier2KHR(cmd, &dependency);
 			return;
 		}
 
@@ -281,7 +281,7 @@ namespace vk
 			// The expectation is that this will be awaited using the gpu_wait function.
 			if (m_backend == sync_backend::events_v2) [[likely]]
 			{
-				m_device->_vkCmdSetEvent2KHR(cmd, m_vk_event, &dependency);
+				_vkCmdSetEvent2KHR(cmd, m_vk_event, &dependency);
 			}
 			else
 			{
@@ -316,7 +316,7 @@ namespace vk
 			.memoryBarrierCount = 1,
 			.pMemoryBarriers = &mem_barrier};
 
-		m_device->_vkCmdSetEvent2KHR(cmd, m_vk_event, &empty_dependency);
+		_vkCmdSetEvent2KHR(cmd, m_vk_event, &empty_dependency);
 	}
 
 	void event::host_signal() const
@@ -336,7 +336,7 @@ namespace vk
 
 		if (m_backend == sync_backend::events_v2) [[likely]]
 		{
-			m_device->_vkCmdWaitEvents2KHR(cmd, 1, &m_vk_event, &dependency);
+			_vkCmdWaitEvents2KHR(cmd, 1, &m_vk_event, &dependency);
 			return;
 		}
 
@@ -447,12 +447,12 @@ namespace vk
 		dst_stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
 		if (memory_barriers.empty())
 		{
-			const VkMemoryBarrier signal_barrier =
+			VkMemoryBarrier signal_barrier =
 				{
 					.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 					.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
 					.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
-			memory_barriers.push_back(signal_barrier);
+			memory_barriers.push_back(std::move(signal_barrier));
 		}
 		else
 		{

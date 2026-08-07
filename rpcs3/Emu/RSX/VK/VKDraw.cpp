@@ -1,11 +1,13 @@
 #include "stdafx.h"
 #include "../Common/BufferUtils.h"
+#include "../Program/GLSLCommon.h"
 #include "../rsx_methods.h"
 
 #include "VKAsyncScheduler.h"
 #include "VKGSRender.h"
 #include "vkutils/buffer_object.h"
 #include "vkutils/chip_class.h"
+#include <vulkan/vulkan_core.h>
 
 namespace vk
 {
@@ -64,42 +66,55 @@ namespace vk
 		case VK_IMAGE_LAYOUT_GENERAL:
 		case VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT:
 			ensure(sampler_state->upload_context == rsx::texture_upload_context::framebuffer_storage);
-			if (!sampler_state->is_cyclic_reference)
+			if (sampler_state->is_cyclic_reference) [[ unlikely ]]
 			{
-				// This was used in a cyclic ref before, but is missing a barrier
-				// No need for a full stall, use a custom barrier instead
-				VkPipelineStageFlags src_stage;
-				VkAccessFlags src_access, dst_access;
-				if (raw->aspect() == VK_IMAGE_ASPECT_COLOR_BIT)
-				{
-					src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-					src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-					dst_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
-					dst_stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-				}
-				else
-				{
-					src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-					src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-					dst_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-					dst_stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-				}
-
-				vk::insert_image_memory_barrier(
-					cmd,
-					raw->value,
-					raw->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					src_stage, dst_stage,
-					src_access, dst_access,
-					{raw->aspect(), 0, 1, 0, 1});
-
-				raw->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				// Nothing to do
+				break;
 			}
+
+			// This was used in a cyclic ref before, but is missing a barrier
+			// No need for a full stall, use a custom barrier instead
+			VkPipelineStageFlags src_stage;
+			VkAccessFlags src_access, dst_access;
+			if (raw->aspect() == VK_IMAGE_ASPECT_COLOR_BIT)
+			{
+				src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+				src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+				dst_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+				dst_stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			}
+			else
+			{
+				src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+				src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+				dst_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+				dst_stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			}
+
+			vk::insert_image_memory_barrier(
+				cmd,
+				raw->value,
+				raw->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				src_stage, dst_stage,
+				src_access, dst_access,
+				{raw->aspect(), 0, 1, 0, 1});
+
+			raw->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			break;
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
 		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
 			ensure(sampler_state->upload_context == rsx::texture_upload_context::framebuffer_storage);
+			if (!sampler_state->is_cyclic_reference) [[ likely ]]
+			{
+				// Standard pre-read barrier.
 			raw->change_layout(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			break;
+		}
+
+			// Normally this shouldn't happen. But that is only guaranteed if the attachment state never changes outside of RTT rebind interrupts.
+			// If the shader changes between binds to "disable" the cyclic nature, we could end up here.
+			// Draw 1 (cyllic) -> texture_barrier -> Draw 2 (no textures) -> attachment_optimal -> Draw 3 (cylic again, no new data) -> incorrect layout.
+			vk::as_rtt(raw)->texture_barrier(cmd);
 			break;
 		}
 	}
@@ -129,6 +144,17 @@ VkRenderPass VKGSRender::get_render_pass()
 	return m_cached_renderpass;
 }
 
+void VKGSRender::invalidate_render_pass()
+{
+	// Regenerate renderpass key for the next draw call
+	if (const auto key = vk::get_renderpass_key(m_fbo_images, m_current_renderpass_key);
+		key != m_current_renderpass_key)
+	{
+		m_current_renderpass_key = key;
+		m_cached_renderpass = VK_NULL_HANDLE;
+	}
+}
+
 void VKGSRender::update_draw_state()
 {
 	m_profiler.start();
@@ -138,7 +164,7 @@ void VKGSRender::update_draw_state()
 		rsx::method_registers.current_draw_clause.primitive <= rsx::primitive_type::line_strip)
 	{
 		const float actual_line_width =
-			m_device->get_wide_lines_support() ? rsx::method_registers.line_width() * rsx::get_resolution_scale() : 1.f;
+			m_device->get_wide_lines_support() ? rsx::method_registers.line_width() * resolution_scaling_config.scale_factor() : 1.f;
 		VK_GET_SYMBOL(vkCmdSetLineWidth)(*m_current_command_buffer, actual_line_width);
 	}
 
@@ -237,7 +263,7 @@ void VKGSRender::load_texture_env()
 {
 	// Load textures
 	bool check_for_cyclic_refs = false;
-	auto check_surface_cache_sampler = [&](auto descriptor, const auto& tex)
+	auto check_surface_cache_sampler_valid = [&](auto descriptor, const auto& tex)
 	{
 		if (!m_texture_cache.test_if_descriptor_expired(*m_current_command_buffer, m_rtts, descriptor, tex))
 		{
@@ -248,9 +274,9 @@ void VKGSRender::load_texture_env()
 		return false;
 	};
 
-	auto get_border_color = [&](const rsx::Texture auto& tex)
+	auto get_border_color = [&](const rsx::Texture auto& tex, bool remap_colorspace)
 	{
-		return m_device->get_custom_border_color_support().require_border_color_remap ? tex.remapped_border_color() : rsx::decode_border_color(tex.border_color());
+		return m_device->get_custom_border_color_support().require_border_color_remap ? tex.remapped_border_color(remap_colorspace) : rsx::decode_border_color(tex.border_color(remap_colorspace));
 	};
 
 	std::lock_guard lock(m_sampler_mutex);
@@ -258,250 +284,358 @@ void VKGSRender::load_texture_env()
 	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 	{
 		if (!(textures_ref & 1))
+		{
 			continue;
+		}
 
 		if (!fs_sampler_state[i])
+		{
 			fs_sampler_state[i] = std::make_unique<vk::texture_cache::sampled_image_descriptor>();
+		}
 
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
 		const auto& tex = rsx::method_registers.fragment_textures[i];
 		const auto previous_format_class = fs_sampler_state[i]->format_class;
 
-		if (m_samplers_dirty || m_textures_dirty[i] || !check_surface_cache_sampler(sampler_state, tex))
+		if (!m_samplers_dirty &&
+			!m_textures_dirty[i] &&
+			check_surface_cache_sampler_valid(sampler_state, tex))
 		{
-			if (tex.enabled())
+			continue;
+		}
+
+		const bool is_sampler_dirty = m_textures_dirty[i];
+		m_textures_dirty[i] = false;
+
+		if (!tex.enabled())
+		{
+			*sampler_state = {};
+			continue;
+		}
+
+		*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
+		if (!sampler_state->validate())
+		{
+			continue;
+		}
+
+		if (sampler_state->is_cyclic_reference)
+		{
+			check_for_cyclic_refs |= true;
+		}
+
+		if (!is_sampler_dirty)
+		{
+			if (sampler_state->format_class != previous_format_class)
 			{
-				check_heap_status(VK_HEAP_CHECK_TEXTURE_UPLOAD_STORAGE);
-				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
+				// Host details changed but RSX is not aware
+				m_graphics_state |= rsx::fragment_program_state_dirty;
+			}
+
+			if (sampler_state->format_ex)
+			{
+				// Nothing to change, use cached sampler
+				continue;
+			}
+		}
+
+		sampler_state->format_ex = tex.format_ex();
+
+		if (sampler_state->format_ex.texel_remap_control &&
+			sampler_state->image_handle &&
+			sampler_state->upload_context == rsx::texture_upload_context::shader_read &&
+			(current_fp_metadata.bx2_texture_reads_mask & (1u << i)) == 0 &&
+			!g_cfg.video.disable_hardware_texel_remapping) [[ unlikely ]]
+		{
+			// Check if we need to override the view format
+			const auto vk_format = sampler_state->image_handle->format();
+			VkFormat format_override = vk_format;
+			rsx::flags32_t flags_to_erase = 0u;
+			rsx::flags32_t host_flags_to_set = 0u;
+
+			if (sampler_state->format_ex.hw_SNORM_possible())
+			{
+				format_override = vk::get_compatible_snorm_format(vk_format);
+				flags_to_erase = rsx::texture_control_bits::SEXT_MASK;
+				host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SNORM;
+			}
+			else if (sampler_state->format_ex.hw_SRGB_possible())
+			{
+				format_override = vk::get_compatible_srgb_format(vk_format);
+				flags_to_erase = rsx::texture_control_bits::GAMMA_CTRL_MASK;
+				host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SRGB;
+			}
+
+			if (format_override != VK_FORMAT_UNDEFINED && format_override != vk_format)
+			{
+				sampler_state->image_handle = sampler_state->image_handle->as(format_override);
+				sampler_state->format_ex.texel_remap_control &= (~flags_to_erase);
+				sampler_state->format_ex.host_features |= host_flags_to_set;
+			}
+		}
+
+		VkFilter mag_filter;
+		vk::minification_filter min_filter;
+		f32 min_lod = 0.f, max_lod = 0.f;
+		f32 lod_bias = 0.f;
+
+		const u32 texture_format = sampler_state->format_ex.format();
+		VkBool32 compare_enabled = VK_FALSE;
+		VkCompareOp depth_compare_mode = VK_COMPARE_OP_NEVER;
+
+		if (texture_format >= CELL_GCM_TEXTURE_DEPTH24_D8 && texture_format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT)
+		{
+			compare_enabled = VK_TRUE;
+			depth_compare_mode = vk::get_compare_func(tex.zfunc(), true);
+		}
+
+		const f32 af_level = vk::max_aniso(tex.max_aniso());
+		const auto wrap_s = vk::vk_wrap_mode(tex.wrap_s());
+		const auto wrap_t = vk::vk_wrap_mode(tex.wrap_t());
+		const auto wrap_r = vk::vk_wrap_mode(tex.wrap_r());
+
+		// NOTE: In vulkan, the border color can bypass the sample swizzle stage.
+		// Check the device properties to determine whether to pre-swizzle the colors or not.
+		const bool sext_conv_required = (sampler_state->format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0;
+		vk::border_color_t border_color(VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
+
+		if (rsx::is_border_clamped_texture(tex))
+		{
+			auto color_value = get_border_color(tex, sext_conv_required);
+			if (sampler_state->format_ex.host_snorm_format_active())
+			{
+				// Convert the border color in host space (2N - 1)
+				// HW does the conversion in integer space as (x - 128) / 127 which introduces a biasing error.
+				const float bias_v = 128.f / 255.f;
+				const float scale_v = 255.f / 127.f;
+
+				color4f scale{1.f}, bias{0.f};
+				const auto snorm_mask = tex.argb_signed();
+				if (snorm_mask & 1)
+				{
+					scale.a = scale_v;
+					bias.a = -bias_v;
+				}
+				if (snorm_mask & 2)
+				{
+					scale.r = scale_v;
+					bias.r = -bias_v;
+				}
+				if (snorm_mask & 4)
+				{
+					scale.g = scale_v;
+					bias.g = -bias_v;
+				}
+				if (snorm_mask & 8)
+				{
+					scale.b = scale_v;
+					bias.b = -bias_v;
+				}
+				color_value = (color_value + bias) * scale;
+			}
+
+			border_color = color_value;
+		}
+
+		// Check if non-point filtering can even be used on this format
+		bool can_sample_linear;
+		if (sampler_state->format_class == RSX_FORMAT_CLASS_COLOR) [[likely]]
+		{
+			// Most PS3-like formats can be linearly filtered without problem
+			// Exclude textures that require SNORM conversion however
+			can_sample_linear = !sext_conv_required;
+		}
+		else if (sampler_state->format_class != rsx::classify_format(texture_format) &&
+				 (texture_format == CELL_GCM_TEXTURE_A8R8G8B8 || texture_format == CELL_GCM_TEXTURE_D8R8G8B8))
+		{
+			// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking
+			can_sample_linear = false;
+		}
+		else
+		{
+			// Not all GPUs support linear filtering of depth formats
+			const auto vk_format = sampler_state->image_handle ? sampler_state->image_handle->image()->format() :
+			                                                     vk::get_compatible_sampler_format(m_device->get_formats_support(), sampler_state->external_subresource_desc.gcm_format);
+
+			can_sample_linear = m_device->get_format_properties(vk_format).optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+		}
+
+		const auto mipmap_count = tex.get_exact_mipmap_count();
+		min_filter = vk::get_min_filter(tex.min_filter());
+
+		if (can_sample_linear)
+		{
+			mag_filter = vk::get_mag_filter(tex.mag_filter());
+		}
+		else
+		{
+			mag_filter = VK_FILTER_NEAREST;
+			min_filter.filter = VK_FILTER_NEAREST;
+			min_filter.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		}
+
+		if (min_filter.sample_mipmaps && mipmap_count > 1)
+		{
+			f32 actual_mipmaps;
+			if (sampler_state->upload_context == rsx::texture_upload_context::shader_read)
+			{
+				actual_mipmaps = static_cast<f32>(mipmap_count);
+			}
+			else if (sampler_state->external_subresource_desc.op == rsx::deferred_request_command::mipmap_gather)
+			{
+				// Clamp min and max lod
+				actual_mipmaps = static_cast<f32>(sampler_state->external_subresource_desc.sections_to_copy.size());
+			}
+			else if (sampler_state->external_subresource_desc.op == rsx::deferred_request_command::cubemap_unwrap)
+			{
+				actual_mipmaps = static_cast<f32>(sampler_state->external_subresource_desc.mipmaps);
 			}
 			else
 			{
-				*sampler_state = {};
+				actual_mipmaps = 1.f;
 			}
 
-			if (sampler_state->validate())
+			if (actual_mipmaps > 1.f)
 			{
-				if (sampler_state->is_cyclic_reference)
+				min_lod = tex.min_lod();
+				max_lod = tex.max_lod();
+				lod_bias = tex.bias();
+
+				min_lod = std::min(min_lod, actual_mipmaps - 1.f);
+				max_lod = std::min(max_lod, actual_mipmaps - 1.f);
+
+				if (min_filter.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_NEAREST)
 				{
-					check_for_cyclic_refs |= true;
-				}
-
-				if (!m_textures_dirty[i] && sampler_state->format_class != previous_format_class)
-				{
-					// Host details changed but RSX is not aware
-					m_graphics_state |= rsx::fragment_program_state_dirty;
-				}
-
-				bool replace = !fs_sampler_handles[i];
-				VkFilter mag_filter;
-				vk::minification_filter min_filter;
-				f32 min_lod = 0.f, max_lod = 0.f;
-				f32 lod_bias = 0.f;
-
-				const u32 texture_format = tex.format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
-				VkBool32 compare_enabled = VK_FALSE;
-				VkCompareOp depth_compare_mode = VK_COMPARE_OP_NEVER;
-
-				if (texture_format >= CELL_GCM_TEXTURE_DEPTH24_D8 && texture_format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT)
-				{
-					compare_enabled = VK_TRUE;
-					depth_compare_mode = vk::get_compare_func(tex.zfunc(), true);
-				}
-
-				const f32 af_level = vk::max_aniso(tex.max_aniso());
-				const auto wrap_s = vk::vk_wrap_mode(tex.wrap_s());
-				const auto wrap_t = vk::vk_wrap_mode(tex.wrap_t());
-				const auto wrap_r = vk::vk_wrap_mode(tex.wrap_r());
-
-				// NOTE: In vulkan, the border color can bypass the sample swizzle stage.
-				// Check the device properties to determine whether to pre-swizzle the colors or not.
-				const auto border_color = rsx::is_border_clamped_texture(tex) ? vk::border_color_t(get_border_color(tex)) : vk::border_color_t(VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
-
-				// Check if non-point filtering can even be used on this format
-				bool can_sample_linear;
-				if (sampler_state->format_class == RSX_FORMAT_CLASS_COLOR) [[likely]]
-				{
-					// Most PS3-like formats can be linearly filtered without problem
-					can_sample_linear = true;
-				}
-				else
-				{
-					// Not all GPUs support linear filtering of depth formats
-					const auto vk_format = sampler_state->image_handle ? sampler_state->image_handle->image()->format() :
-					                                                     vk::get_compatible_sampler_format(m_device->get_formats_support(), sampler_state->external_subresource_desc.gcm_format);
-
-					can_sample_linear = m_device->get_format_properties(vk_format).optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-				}
-
-				const auto mipmap_count = tex.get_exact_mipmap_count();
-				min_filter = vk::get_min_filter(tex.min_filter());
-
-				if (can_sample_linear)
-				{
-					mag_filter = vk::get_mag_filter(tex.mag_filter());
-				}
-				else
-				{
-					mag_filter = VK_FILTER_NEAREST;
-					min_filter.filter = VK_FILTER_NEAREST;
-				}
-
-				if (min_filter.sample_mipmaps && mipmap_count > 1)
-				{
-					f32 actual_mipmaps;
-					if (sampler_state->upload_context == rsx::texture_upload_context::shader_read)
-					{
-						actual_mipmaps = static_cast<f32>(mipmap_count);
-					}
-					else if (sampler_state->external_subresource_desc.op == rsx::deferred_request_command::mipmap_gather)
-					{
-						// Clamp min and max lod
-						actual_mipmaps = static_cast<f32>(sampler_state->external_subresource_desc.sections_to_copy.size());
-					}
-					else
-					{
-						actual_mipmaps = 1.f;
-					}
-
-					if (actual_mipmaps > 1.f)
-					{
-						min_lod = tex.min_lod();
-						max_lod = tex.max_lod();
-						lod_bias = tex.bias();
-
-						min_lod = std::min(min_lod, actual_mipmaps - 1.f);
-						max_lod = std::min(max_lod, actual_mipmaps - 1.f);
-
-						if (min_filter.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_NEAREST)
-						{
-							// Round to nearest 0.5 to work around some broken games
-							// Unlike openGL, sampler parameters cannot be dynamically changed on vulkan, leading to many permutations
-							lod_bias = std::floor(lod_bias * 2.f + 0.5f) * 0.5f;
-						}
-					}
-					else
-					{
-						min_lod = max_lod = lod_bias = 0.f;
-						min_filter.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-					}
-				}
-
-				if (fs_sampler_handles[i] && m_textures_dirty[i])
-				{
-					if (!fs_sampler_handles[i]->matches(wrap_s, wrap_t, wrap_r, false, lod_bias, af_level, min_lod, max_lod,
-							min_filter.filter, mag_filter, min_filter.mipmap_mode, border_color, compare_enabled, depth_compare_mode))
-					{
-						replace = true;
-					}
-				}
-
-				if (replace)
-				{
-					fs_sampler_handles[i] = vk::get_resource_manager()->get_sampler(
-						*m_device,
-						fs_sampler_handles[i],
-						wrap_s, wrap_t, wrap_r,
-						false,
-						lod_bias, af_level, min_lod, max_lod,
-						min_filter.filter, mag_filter, min_filter.mipmap_mode,
-						border_color, compare_enabled, depth_compare_mode);
+					// Round to nearest 0.5 to work around some broken games
+					// Unlike openGL, sampler parameters cannot be dynamically changed on vulkan, leading to many permutations
+					lod_bias = std::floor(lod_bias * 2.f + 0.5f) * 0.5f;
 				}
 			}
-
-			m_textures_dirty[i] = false;
+			else
+			{
+				min_lod = max_lod = lod_bias = 0.f;
+				min_filter.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			}
 		}
+
+		if (fs_sampler_handles[i] &&
+			fs_sampler_handles[i]->matches(wrap_s, wrap_t, wrap_r, false, lod_bias, af_level, min_lod, max_lod,
+				min_filter.filter, mag_filter, min_filter.mipmap_mode, border_color, compare_enabled, depth_compare_mode))
+		{
+			continue;
+		}
+
+		fs_sampler_handles[i] = vk::get_resource_manager()->get_sampler(
+			*m_device,
+			fs_sampler_handles[i],
+			wrap_s, wrap_t, wrap_r,
+			false,
+			lod_bias, af_level, min_lod, max_lod,
+			min_filter.filter, mag_filter, min_filter.mipmap_mode,
+			border_color, compare_enabled, depth_compare_mode);
 	}
 
 	for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 	{
 		if (!(textures_ref & 1))
+		{
 			continue;
+		}
 
 		if (!vs_sampler_state[i])
+		{
 			vs_sampler_state[i] = std::make_unique<vk::texture_cache::sampled_image_descriptor>();
+		}
 
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
 		const auto& tex = rsx::method_registers.vertex_textures[i];
 		const auto previous_format_class = sampler_state->format_class;
 
-		if (m_samplers_dirty || m_vertex_textures_dirty[i] || !check_surface_cache_sampler(sampler_state, tex))
+		if (!m_samplers_dirty &&
+			!m_vertex_textures_dirty[i] &&
+			check_surface_cache_sampler_valid(sampler_state, tex))
 		{
-			if (rsx::method_registers.vertex_textures[i].enabled())
-			{
-				check_heap_status(VK_HEAP_CHECK_TEXTURE_UPLOAD_STORAGE);
-				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
-			}
-			else
-			{
-				*sampler_state = {};
-			}
-
-			if (sampler_state->validate())
-			{
-				if (sampler_state->is_cyclic_reference || sampler_state->external_subresource_desc.do_not_cache)
-				{
-					check_for_cyclic_refs |= true;
-				}
-
-				if (!m_vertex_textures_dirty[i] && sampler_state->format_class != previous_format_class)
-				{
-					// Host details changed but RSX is not aware
-					m_graphics_state |= rsx::vertex_program_state_dirty;
-				}
-
-				bool replace = !vs_sampler_handles[i];
-				const VkBool32 unnormalized_coords = !!(tex.format() & CELL_GCM_TEXTURE_UN);
-				const auto min_lod = tex.min_lod();
-				const auto max_lod = tex.max_lod();
-				const auto wrap_s = vk::vk_wrap_mode(tex.wrap_s());
-				const auto wrap_t = vk::vk_wrap_mode(tex.wrap_t());
-
-				// NOTE: In vulkan, the border color can bypass the sample swizzle stage.
-				// Check the device properties to determine whether to pre-swizzle the colors or not.
-				const auto border_color = is_border_clamped_texture(tex) ? vk::border_color_t(get_border_color(tex)) : vk::border_color_t(VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
-
-				if (vs_sampler_handles[i])
-				{
-					if (!vs_sampler_handles[i]->matches(wrap_s, wrap_t, VK_SAMPLER_ADDRESS_MODE_REPEAT,
-							unnormalized_coords, 0.f, 1.f, min_lod, max_lod, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, border_color))
-					{
-						replace = true;
-					}
-				}
-
-				if (replace)
-				{
-					vs_sampler_handles[i] = vk::get_resource_manager()->get_sampler(
-						*m_device,
-						vs_sampler_handles[i],
-						wrap_s, wrap_t, VK_SAMPLER_ADDRESS_MODE_REPEAT,
-						unnormalized_coords,
-						0.f, 1.f, min_lod, max_lod,
-						VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, border_color);
-				}
-			}
-
-			m_vertex_textures_dirty[i] = false;
+			continue;
 		}
+
+		const bool is_sampler_dirty = m_vertex_textures_dirty[i];
+		m_vertex_textures_dirty[i] = false;
+
+		if (!rsx::method_registers.vertex_textures[i].enabled())
+		{
+			*sampler_state = {};
+			continue;
+		}
+
+		*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
+		if (!sampler_state->validate())
+		{
+			continue;
+		}
+
+		if (sampler_state->is_cyclic_reference || sampler_state->external_subresource_desc.do_not_cache)
+		{
+			check_for_cyclic_refs |= true;
+		}
+
+		if (!is_sampler_dirty)
+		{
+			if (sampler_state->format_class != previous_format_class)
+			{
+				// Host details changed but RSX is not aware
+				m_graphics_state |= rsx::vertex_program_state_dirty;
+			}
+
+			if (vs_sampler_handles[i])
+			{
+				continue;
+			}
+		}
+
+		const VkBool32 unnormalized_coords = !!(tex.format() & CELL_GCM_TEXTURE_UN);
+		const auto min_lod = tex.min_lod();
+		const auto max_lod = tex.max_lod();
+		const auto wrap_s = vk::vk_wrap_mode(tex.wrap_s());
+		const auto wrap_t = vk::vk_wrap_mode(tex.wrap_t());
+
+		// NOTE: In vulkan, the border color can bypass the sample swizzle stage.
+		// Check the device properties to determine whether to pre-swizzle the colors or not.
+		const auto border_color = is_border_clamped_texture(tex) ? vk::border_color_t(get_border_color(tex, false)) : vk::border_color_t(VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
+
+		if (vs_sampler_handles[i] &&
+			vs_sampler_handles[i]->matches(wrap_s, wrap_t, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+				unnormalized_coords, 0.f, 1.f, min_lod, max_lod, VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, border_color))
+		{
+			continue;
+		}
+
+		vs_sampler_handles[i] = vk::get_resource_manager()->get_sampler(
+			*m_device,
+			vs_sampler_handles[i],
+			wrap_s, wrap_t, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			unnormalized_coords,
+			0.f, 1.f, min_lod, max_lod,
+			VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, border_color);
 	}
 
 	m_samplers_dirty.store(false);
 
+	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
+	{
+		// Transition our FBO to a loop-friendly format.
+		// We can also convert it into an input attachment, but for now this is easier.
+		auto ds = ensure(m_rtts.m_bound_depth_stencil.second, "Invalid FS export configuration.");
+		ds->texture_barrier(*m_current_command_buffer);
+
+		check_for_cyclic_refs = true;
+	}
+
 	if (check_for_cyclic_refs)
 	{
 		// Regenerate renderpass key
-		if (const auto key = vk::get_renderpass_key(m_fbo_images, m_current_renderpass_key);
-			key != m_current_renderpass_key)
-		{
-			m_current_renderpass_key = key;
-			m_cached_renderpass = VK_NULL_HANDLE;
-		}
+		invalidate_render_pass();
 	}
 
-	// Gate on the SANITIZED capability, not the raw config (upstream behavior):
-	// init disables async compute when graphics and transfer share one queue
-	// (typical on Adreno), and the scheduler is then never initialized -
-	// g_fxo->get on it crashed at boot whenever the setting was enabled.
 	if (backend_config.supports_asynchronous_compute)
 	{
 		// We have to do this here, because we have to assume the CB will be dumped
@@ -527,7 +661,16 @@ bool VKGSRender::bind_texture_env()
 	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 	{
 		if (!(textures_ref & 1))
+		{
+			// Unused TIU
 			continue;
+		}
+
+		if (m_fs_binding_table->ftex_location[i] == umax)
+		{
+			// Corrupt shader table
+			break;
+		}
 
 		vk::image_view* view = nullptr;
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
@@ -551,10 +694,9 @@ bool VKGSRender::bind_texture_env()
 
 		if (view) [[likely]]
 		{
-			m_program->bind_uniform({fs_sampler_handles[i]->value, view->value, view->image()->current_layout},
-				i,
-				::glsl::program_domain::glsl_fragment_program,
-				m_current_frame->descriptor_set);
+			m_program->bind_uniform({ *view, *fs_sampler_handles[i] },
+				vk::glsl::binding_set_index_fragment,
+				m_fs_binding_table->ftex_location[i]);
 
 			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
@@ -573,28 +715,24 @@ bool VKGSRender::bind_texture_env()
 						VK_BORDER_COLOR_INT_OPAQUE_BLACK);
 				}
 
-				m_program->bind_uniform({m_stencil_mirror_sampler->value, stencil_view->value, stencil_view->image()->current_layout},
-					i,
-					::glsl::program_domain::glsl_fragment_program,
-					m_current_frame->descriptor_set,
-					true);
+				m_program->bind_uniform({ *stencil_view, *m_stencil_mirror_sampler },
+					vk::glsl::binding_set_index_fragment,
+					m_fs_binding_table->ftex_stencil_location[i]);
 			}
 		}
 		else
 		{
 			const VkImageViewType view_type = vk::get_view_type(current_fragment_program.get_texture_dimension(i));
-			m_program->bind_uniform({vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, view_type)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-				i,
-				::glsl::program_domain::glsl_fragment_program,
-				m_current_frame->descriptor_set);
+			const VkDescriptorImageInfoEx desc = { *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() };
+			m_program->bind_uniform(desc,
+				vk::glsl::binding_set_index_fragment,
+				m_fs_binding_table->ftex_location[i]);
 
 			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
-				m_program->bind_uniform({vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, view_type)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-					i,
-					::glsl::program_domain::glsl_fragment_program,
-					m_current_frame->descriptor_set,
-					true);
+				m_program->bind_uniform(desc,
+					vk::glsl::binding_set_index_fragment,
+					m_fs_binding_table->ftex_stencil_location[i]);
 			}
 		}
 	}
@@ -602,15 +740,23 @@ bool VKGSRender::bind_texture_env()
 	for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 	{
 		if (!(textures_ref & 1))
+		{
+			// Unused TIU
 			continue;
+		}
+
+		if (m_vs_binding_table->vtex_location[i] == umax)
+		{
+			// Corrupt shader
+			break;
+		}
 
 		if (!rsx::method_registers.vertex_textures[i].enabled())
 		{
 			const auto view_type = vk::get_view_type(current_vertex_program.get_texture_dimension(i));
-			m_program->bind_uniform({vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, view_type)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-				i,
-				::glsl::program_domain::glsl_vertex_program,
-				m_current_frame->descriptor_set);
+			m_program->bind_uniform({ *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() },
+				vk::glsl::binding_set_index_vertex,
+				m_vs_binding_table->vtex_location[i]);
 
 			continue;
 		}
@@ -631,20 +777,25 @@ bool VKGSRender::bind_texture_env()
 			rsx_log.error("Texture upload failed to vtexture index %d. Binding null sampler.", i);
 			const auto view_type = vk::get_view_type(current_vertex_program.get_texture_dimension(i));
 
-			m_program->bind_uniform({vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, view_type)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-				i,
-				::glsl::program_domain::glsl_vertex_program,
-				m_current_frame->descriptor_set);
+			m_program->bind_uniform({ *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() },
+				vk::glsl::binding_set_index_vertex,
+				m_vs_binding_table->vtex_location[i]);
 
 			continue;
 		}
 
 		validate_image_layout_for_read_access(*m_current_command_buffer, image_ptr, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, sampler_state);
 
-		m_program->bind_uniform({vs_sampler_handles[i]->value, image_ptr->value, image_ptr->image()->current_layout},
-			i,
-			::glsl::program_domain::glsl_vertex_program,
-			m_current_frame->descriptor_set);
+		m_program->bind_uniform({ *image_ptr, *vs_sampler_handles[i] },
+			vk::glsl::binding_set_index_vertex,
+			m_vs_binding_table->vtex_location[i]);
+	}
+
+	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
+	{
+		auto ds = ensure(m_rtts.m_bound_depth_stencil.second);
+		auto view = ds->get_view(rsx::default_remap_vector, VK_IMAGE_ASPECT_DEPTH_BIT);
+		m_program->bind_uniform({ *view, vk::null_sampler() }, vk::glsl::binding_set_index_fragment, m_fs_binding_table->frag_depth_input_location);
 	}
 
 	return out_of_memory;
@@ -658,8 +809,12 @@ bool VKGSRender::bind_interpreter_texture_env()
 		return false;
 	}
 
-	std::array<VkDescriptorImageInfo, 68> texture_env;
-	VkDescriptorImageInfo fallback = {vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_1D)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+	std::array<VkDescriptorImageInfoEx, 68> texture_env;
+	VkDescriptorImageInfoEx fallback =
+	{
+		*vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_1D),
+		vk::null_sampler()
+	};
 
 	auto start = texture_env.begin();
 	auto end = start;
@@ -686,6 +841,59 @@ bool VKGSRender::bind_interpreter_texture_env()
 
 	bool out_of_memory = false;
 
+	auto decay_view_for_interpreter = [&](
+		const rsx::image_section_attributes_t& attr,
+		vk::texture_cache::sampled_image_descriptor* desc,
+		vk::image_view* base,
+		const rsx::texture_channel_remap_t& decoded_remap,
+		bool is_msaa,
+		bool is_redirected) -> vk::image_view*
+	{
+		if (!is_msaa && !is_redirected)
+		{
+			return base;
+		}
+
+		if (is_redirected && desc->image_type > rsx::texture_dimension_extended::texture_dimension_2d)
+		{
+			// Cannot handle redirect on 3D or cubemap with the interpreter.
+			auto view_type = vk::get_view_type(desc->image_type);
+			return vk::null_image_view(*m_current_command_buffer, view_type);
+		}
+
+		using deferred_subresource_t = vk::texture_cache::deferred_subresource;
+		auto image = static_cast<vk::viewable_image*>(base->image());
+
+		if (is_msaa)
+		{
+			// MSAA resolve
+			auto rtt = vk::as_rtt(base->image());
+			rtt->memory_barrier(*m_current_command_buffer, rsx::surface_access::transfer_read);
+			image = rtt->get_surface(rsx::surface_access::transfer_read);
+		}
+
+		if (is_redirected)
+		{
+			// Force bitcast
+			deferred_subresource_t flatten_op{};
+			flatten_op.address = desc->ref_address;
+			flatten_op.external_handle = image;
+			flatten_op.op = desc->is_cyclic_reference
+				? rsx::deferred_request_command::copy_image_dynamic
+				: rsx::deferred_request_command::copy_image_static;
+			flatten_op.width = flatten_op.external_handle->width();
+			flatten_op.height = flatten_op.external_handle->height();
+			flatten_op.depth = 1;
+			flatten_op.gcm_format = desc->format_ex.format();
+			flatten_op.remap = decoded_remap;
+			flatten_op.cache_range = utils::address_range32::start_length(desc->ref_address, attr.pitch * attr.height);
+			return m_texture_cache.create_temporary_subresource(*m_current_command_buffer, flatten_op);
+		}
+
+		image->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		return image->get_view(decoded_remap, base->info.subresourceRange.aspectMask);
+	};
+
 	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 	{
 		if (!(textures_ref & 1))
@@ -694,8 +902,8 @@ bool VKGSRender::bind_interpreter_texture_env()
 		vk::image_view* view = nullptr;
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
 
-		if (rsx::method_registers.fragment_textures[i].enabled() &&
-			sampler_state->validate())
+		auto& tex = rsx::method_registers.fragment_textures[i];
+		if (tex.enabled() && sampler_state->validate())
 		{
 			if (view = sampler_state->image_handle; !view)
 			{
@@ -705,21 +913,52 @@ bool VKGSRender::bind_interpreter_texture_env()
 					out_of_memory = true;
 				}
 			}
-			else
+		}
+
+		if (!view)
 			{
-				validate_image_layout_for_read_access(*m_current_command_buffer, view, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, sampler_state);
+			// OOM or disabled texture
+			continue;
+		}
+
+		auto primary_view = view;
+
+		// Flatten MSAA and DEPTH24S8 redirects
+		if (view->image()->samples() > 1 || view->info.subresourceRange.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
+		{
+			const auto mask = (1u << i);
+			const bool is_redirected = !!(current_fragment_program.texture_state.redirected_textures & mask);
+			const bool is_msaa = !!(current_fragment_program.texture_state.multisampled_textures & mask);
+			if (is_redirected || is_msaa)
+			{
+				view = decay_view_for_interpreter(
+					tex.attributes(),
+					sampler_state,
+					view,
+					tex.decoded_remap(),
+					is_msaa,
+					is_redirected);
+
+				if (!view)
+				{
+					// OOM
+					out_of_memory = true;
+					continue;
+				}
 			}
 		}
 
-		if (view)
+		if (primary_view == view)
 		{
+			validate_image_layout_for_read_access(*m_current_command_buffer, view, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, sampler_state);
+		}
+
 			const int offsets[] = {0, 16, 48, 32};
 			auto& sampled_image_info = texture_env[offsets[static_cast<u32>(sampler_state->image_type)] + i];
-			sampled_image_info = {fs_sampler_handles[i]->value, view->value, view->image()->current_layout};
+			sampled_image_info = { *view, *fs_sampler_handles[i] };
 		}
-	}
 
-	m_shader_interpreter.update_fragment_textures(texture_env, m_current_frame->descriptor_set);
+	m_shader_interpreter.update_fragment_textures(texture_env);
 	return out_of_memory;
 }
 
@@ -766,9 +1005,6 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		draw_call.end();
 		return;
 	}
-
-	const auto old_persistent_buffer = m_persistent_attribute_storage ? m_persistent_attribute_storage->value : null_buffer_view->value;
-	const auto old_volatile_buffer = m_volatile_attribute_storage ? m_volatile_attribute_storage->value : null_buffer_view->value;
 
 	// Programs data is dependent on vertex state
 	auto upload_info = upload_vertex_data();
@@ -821,68 +1057,26 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		m_current_command_buffer->flags |= (vk::command_buffer::cb_has_occlusion_task | vk::command_buffer::cb_has_open_query);
 	}
 
-	auto persistent_buffer = m_persistent_attribute_storage ? m_persistent_attribute_storage->value : null_buffer_view->value;
-	auto volatile_buffer = m_volatile_attribute_storage ? m_volatile_attribute_storage->value : null_buffer_view->value;
+	VkDescriptorBufferViewEx persistent_buffer = m_persistent_attribute_storage ? *m_persistent_attribute_storage : *null_buffer_view;
+	VkDescriptorBufferViewEx volatile_buffer = m_volatile_attribute_storage ? *m_volatile_attribute_storage : *null_buffer_view;
 	bool update_descriptors = false;
-
-	const auto& binding_table = m_device->get_pipeline_binding_table();
 
 	if (m_current_draw.subdraw_id == 0)
 	{
 		update_descriptors = true;
 
 		// Allocate stream layout memory for this batch
-		m_vertex_layout_stream_info.range = rsx::method_registers.current_draw_clause.pass_count() * 128;
-		m_vertex_layout_stream_info.offset = m_vertex_layout_ring_info.alloc<256>(m_vertex_layout_stream_info.range);
-
-		if (vk::test_status_interrupt(vk::heap_changed))
-		{
-			if (m_vertex_layout_storage &&
-				m_vertex_layout_storage->info.buffer != m_vertex_layout_ring_info.heap->value)
-			{
-				m_current_frame->buffer_views_to_clean.push_back(std::move(m_vertex_layout_storage));
-			}
-
-			vk::clear_status_interrupt(vk::heap_changed);
-		}
-	}
-	else if (persistent_buffer != old_persistent_buffer || volatile_buffer != old_volatile_buffer)
-	{
-		// Need to update descriptors; make a copy for the next draw
-		VkDescriptorSet previous_set = m_current_frame->descriptor_set.value();
-		m_current_frame->descriptor_set.flush();
-		m_current_frame->descriptor_set = allocate_descriptor_set();
-		rsx::simple_array<VkCopyDescriptorSet> copy_cmds(binding_table.total_descriptor_bindings);
-
-		for (u32 n = 0; n < binding_table.total_descriptor_bindings; ++n)
-		{
-			copy_cmds[n] =
-				{
-					VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET,   // sType
-					nullptr,                                 // pNext
-					previous_set,                            // srcSet
-					n,                                       // srcBinding
-					0u,                                      // srcArrayElement
-					m_current_frame->descriptor_set.value(), // dstSet
-					n,                                       // dstBinding
-					0u,                                      // dstArrayElement
-					1u                                       // descriptorCount
-				};
-		}
-
-		m_current_frame->descriptor_set.push(copy_cmds);
-		update_descriptors = true;
+		const u64 alloc_size = rsx::method_registers.current_draw_clause.pass_count() * 168;
+		m_vertex_layout_dynamic_offset = m_vertex_layout_ring_info.alloc<8>(alloc_size);
 	}
 
 	// Update vertex fetch parameters
 	update_vertex_env(sub_index, upload_info);
 
-	ensure(m_vertex_layout_storage);
 	if (update_descriptors)
 	{
-		m_program->bind_uniform(persistent_buffer, binding_table.vertex_buffers_first_bind_slot, m_current_frame->descriptor_set);
-		m_program->bind_uniform(volatile_buffer, binding_table.vertex_buffers_first_bind_slot + 1, m_current_frame->descriptor_set);
-		m_program->bind_uniform(m_vertex_layout_storage->value, binding_table.vertex_buffers_first_bind_slot + 2, m_current_frame->descriptor_set);
+		m_program->bind_uniform(persistent_buffer, vk::glsl::binding_set_index_vertex, m_vs_binding_table->vertex_buffers_location);
+		m_program->bind_uniform(volatile_buffer, vk::glsl::binding_set_index_vertex, m_vs_binding_table->vertex_buffers_location + 1);
 	}
 
 	bool reload_state = (!m_current_draw.subdraw_id++);
@@ -906,10 +1100,12 @@ void VKGSRender::emit_geometry(u32 sub_index)
 			reload_state = true;
 		});
 
+	// Bind both pipe and descriptors in one go
+	// FIXME: We only need to rebind the pipeline when reload state is set. Flags?
+	m_program->bind(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+
 	if (reload_state)
 	{
-		VK_GET_SYMBOL(vkCmdBindPipeline)(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_program->pipeline);
-
 		update_draw_state();
 		begin_render_pass();
 
@@ -921,13 +1117,12 @@ void VKGSRender::emit_geometry(u32 sub_index)
 			info.sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
 			info.buffer = m_cond_render_buffer->value;
 
-			m_device->_vkCmdBeginConditionalRenderingEXT(*m_current_command_buffer, &info);
+			_vkCmdBeginConditionalRenderingEXT(*m_current_command_buffer, &info);
 			m_current_command_buffer->flags |= vk::command_buffer::cb_has_conditional_render;
 		}
 	}
 
 	// Bind the new set of descriptors for use with this draw call
-	m_current_frame->descriptor_set.bind(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_program->pipeline_layout);
 	m_frame_stats.setup_time += m_profiler.duration();
 
 	if (!upload_info.index_info)
@@ -939,6 +1134,12 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		else if (draw_call.is_single_draw())
 		{
 			VK_GET_SYMBOL(vkCmdDraw)(*m_current_command_buffer, upload_info.vertex_draw_count, 1, 0, 0);
+		}
+		else if (m_device->get_multidraw_support())
+		{
+			const auto subranges = draw_call.get_subranges();
+			auto ptr = utils::bless<const VkMultiDrawInfoEXT>(& subranges.front().first);
+			_vkCmdDrawMultiEXT(*m_current_command_buffer, ::size32(subranges), ptr, 1, 0, sizeof(rsx::draw_range_t));
 		}
 		else
 		{
@@ -965,6 +1166,30 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		else if (rsx::method_registers.current_draw_clause.is_single_draw())
 		{
 			VK_GET_SYMBOL(vkCmdDrawIndexed)(*m_current_command_buffer, upload_info.vertex_draw_count, 1, 0, 0, 0);
+		}
+		else if (m_device->get_multidraw_support())
+		{
+			const auto subranges = draw_call.get_subranges();
+			const auto subranges_count = ::size32(subranges);
+			const auto allocation_size = subranges_count * sizeof(VkMultiDrawIndexedInfoEXT);
+
+			m_multidraw_parameters_buffer.resize(allocation_size);
+			auto base_ptr = utils::bless<VkMultiDrawIndexedInfoEXT>(m_multidraw_parameters_buffer.data());
+
+			u32 vertex_offset = 0;
+			auto _ptr = base_ptr;
+
+			for (const auto& range : subranges)
+			{
+				const auto count = get_index_count(draw_call.primitive, range.count);
+				_ptr->firstIndex = vertex_offset;
+				_ptr->indexCount = count;
+				_ptr->vertexOffset = 0;
+
+				_ptr++;
+				vertex_offset += count;
+			}
+			_vkCmdDrawMultiIndexedEXT(*m_current_command_buffer, subranges_count, base_ptr, 1, 0, sizeof(VkMultiDrawIndexedInfoEXT), nullptr);
 		}
 		else
 		{
@@ -1051,9 +1276,6 @@ void VKGSRender::end()
 		return;
 	}
 
-	// Allocate descriptor set
-	m_current_frame->descriptor_set = allocate_descriptor_set();
-
 	// Load program execution environment
 	load_program_env();
 	m_frame_stats.setup_time += m_profiler.duration();
@@ -1062,6 +1284,18 @@ void VKGSRender::end()
 	if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil))
 	{
 		ds->write_barrier(*m_current_command_buffer);
+
+		if (m_graphics_state.test(rsx::zeta_address_cyclic_barrier) &&
+			ds->current_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		{
+			// We actually need to end the subpass as a minimum. Without this, early-Z optimiazations in following draws will clobber reads from previous draws and cause flickering.
+			// Since we're ending the subpass, might as well restore DCC/HiZ for extra performance
+			ds->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+			ds->reset_surface_counters();
+
+			// Regenerate render pass key
+			invalidate_render_pass();
+		}
 	}
 
 	for (auto& rtt : m_rtts.m_bound_render_targets)
@@ -1071,6 +1305,8 @@ void VKGSRender::end()
 			surface->write_barrier(*m_current_command_buffer);
 		}
 	}
+
+	m_graphics_state.clear(rsx::zeta_address_cyclic_barrier);
 
 	m_frame_stats.setup_time += m_profiler.duration();
 
@@ -1108,9 +1344,6 @@ void VKGSRender::end()
 	m_texture_cache.release_uncached_temporary_subresources();
 	m_frame_stats.textures_upload_time += m_profiler.duration();
 
-	// Final heap check...
-	check_heap_status(VK_HEAP_CHECK_VERTEX_STORAGE | VK_HEAP_CHECK_VERTEX_LAYOUT_STORAGE);
-
 	u32 sub_index = 0;             // RSX subdraw ID
 	m_current_draw.subdraw_id = 0; // Host subdraw ID. Invalid RSX subdraws do not increment this value
 
@@ -1134,7 +1367,7 @@ void VKGSRender::end()
 
 	if (m_current_command_buffer->flags & vk::command_buffer::cb_has_conditional_render)
 	{
-		m_device->_vkCmdEndConditionalRenderingEXT(*m_current_command_buffer);
+		_vkCmdEndConditionalRenderingEXT(*m_current_command_buffer);
 		m_current_command_buffer->flags &= ~(vk::command_buffer::cb_has_conditional_render);
 	}
 

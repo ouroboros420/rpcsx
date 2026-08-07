@@ -2,8 +2,7 @@
 #include "overlay_home_menu_savestate.h"
 #include "overlay_home_menu_components.h"
 #include "Emu/system_config.h"
-
-extern bool boot_last_savestate(bool testing);
+#include "Emu/savestate_utils.hpp"
 
 namespace rsx
 {
@@ -29,7 +28,7 @@ namespace rsx
 							{
 								Emu.after_kill_callback = []()
 								{
-									Emu.Restart();
+									Emu.Restart(true, false);
 								};
 
 								// Make sure we keep the game window opened
@@ -40,25 +39,33 @@ namespace rsx
 					return page_navigation::exit;
 				});
 
-			if (!suspend_mode && boot_last_savestate(true))
+			for (u32 save_index = 1; !suspend_mode && save_index <= 4; save_index++)
 			{
-				std::unique_ptr<overlay_element> reload_state = std::make_unique<home_menu_entry>(
-					home_menu::fa_icon::restart, get_localized_string(localized_string_id::HOME_MENU_RELOAD_SAVESTATE), width, text_align::left);
+				if (boot_current_game_savestate(true, save_index))
+				{
+					const localized_string_id str_id = static_cast<localized_string_id>(static_cast<usz>(localized_string_id::HOME_MENU_RELOAD_SAVESTATE) + (save_index - 1));
+					std::unique_ptr<overlay_element> reload_state = std::make_unique<home_menu_entry>(home_menu::fa_icon::restart, get_localized_string(str_id), width, text_align::left);
 
-				add_item(reload_state, [](pad_button btn) -> page_navigation
-					{
-						if (btn != pad_button::cross)
-							return page_navigation::stay;
-						rsx_log.notice("User selected reload savestate in home menu");
-						Emu.CallFromMainThread([]()
-							{
-								boot_last_savestate(false);
-							});
-						return page_navigation::exit;
-					});
+					add_item(reload_state, [save_index](pad_button btn) -> page_navigation
+						{
+							if (btn != pad_button::cross)
+								return page_navigation::stay;
+							rsx_log.notice("User selected reload savestate(%u) in home menu", save_index);
+							Emu.CallFromMainThread([save_index]()
+								{
+									boot_current_game_savestate(false, save_index);
+								});
+							return page_navigation::exit;
+						});
+				}
+				else
+				{
+					break;
+				}
 			}
+
 			// Center the few savestate entries vertically so the page doesn't leave
-			// a large empty gap below them (centering only applies when items fit).
+			// a large empty gap below them (centering only applies when items fit). (theirs c6a8b93)
 			apply_layout(true);
 		}
 	} // namespace overlays

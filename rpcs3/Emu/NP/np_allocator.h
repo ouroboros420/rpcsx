@@ -24,8 +24,8 @@ namespace np
 		void setup(vm::ptr<void> ptr_pool, u32 size)
 		{
 			std::lock_guard lock(m_mutex);
-			m_pool  = ptr_pool;
-			m_size  = size;
+			m_pool = ptr_pool;
+			m_size = size;
 			m_avail = size;
 			m_allocs.clear();
 		}
@@ -33,8 +33,8 @@ namespace np
 		void release()
 		{
 			std::lock_guard lock(m_mutex);
-			m_pool  = vm::null;
-			m_size  = 0;
+			m_pool = vm::null;
+			m_size = 0;
 			m_avail = 0;
 			m_allocs.clear();
 		}
@@ -61,7 +61,7 @@ namespace np
 				return 0;
 			}
 
-			u32 last_free    = 0;
+			u32 last_free = 0;
 			bool found_space = false;
 
 			for (const auto& a : m_allocs)
@@ -130,7 +130,7 @@ namespace np
 	private:
 		shared_mutex m_mutex;
 		vm::ptr<void> m_pool{};
-		u32 m_size  = 0;
+		u32 m_size = 0;
 		u32 m_avail = 0;
 		u32 m_max_usage = 0;
 		std::map<u32, u32> m_allocs{}; // offset/size

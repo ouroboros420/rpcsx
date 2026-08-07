@@ -77,7 +77,7 @@ std::string music_selection_context::get_yaml_path() const
 
 	if (!fs::create_path(path))
 	{
-		cellMusicSelectionContext.fatal("Failed to create path: %s (%s)", path, fs::g_tls_error);
+		cellMusicSelectionContext.fatal("get_yaml_path: Failed to create path: %s (%s)", path, fs::g_tls_error);
 	}
 
 	return path + hash + ".yml";
@@ -101,13 +101,18 @@ void music_selection_context::set_playlist(const std::string& path)
 				continue;
 			}
 
-			playlist.push_back(dir_path + std::string(path + "/" + dir_entry.name).substr(vfs_dir_path.length()));
+			std::string track = dir_path + std::string(path + "/" + dir_entry.name).substr(vfs_dir_path.length());
+			cellMusicSelectionContext.notice("set_playlist: Adding track to playlist: '%s'. (path: '%s', name: '%s')", track, path, dir_entry.name);
+			playlist.push_back(std::move(track));
 		}
 	}
 	else
 	{
 		content_type = CELL_SEARCH_CONTENTTYPE_MUSIC;
-		playlist.push_back(dir_path + path.substr(vfs_dir_path.length()));
+
+		std::string track = dir_path + path.substr(vfs_dir_path.length());
+		cellMusicSelectionContext.notice("set_playlist: Adding track to playlist: '%s'. (path: '%s')", track, path);
+		playlist.push_back(std::move(track));
 	}
 
 	valid = true;
@@ -118,7 +123,7 @@ void music_selection_context::create_playlist(const std::string& new_hash)
 	hash = new_hash;
 
 	const std::string yaml_path = get_yaml_path();
-	cellMusicSelectionContext.notice("Saving music playlist file %s", yaml_path);
+	cellMusicSelectionContext.notice("create_playlist: Saving music playlist file %s", yaml_path);
 
 	YAML::Emitter out;
 	out << YAML::BeginMap;
@@ -142,7 +147,7 @@ void music_selection_context::create_playlist(const std::string& new_hash)
 
 	if (!file.file || file.file.write(out.c_str(), out.size()) < out.size() || !file.commit())
 	{
-		cellMusicSelectionContext.error("Failed to create music playlist file %s (error=%s)", yaml_path, fs::g_tls_error);
+		cellMusicSelectionContext.error("create_playlist: Failed to create music playlist file '%s' (error=%s)", yaml_path, fs::g_tls_error);
 	}
 }
 
@@ -151,7 +156,7 @@ bool music_selection_context::load_playlist()
 	playlist.clear();
 
 	const std::string path = get_yaml_path();
-	cellMusicSelectionContext.notice("Loading music playlist file %s", path);
+	cellMusicSelectionContext.notice("load_playlist: Loading music playlist file '%s'", path);
 
 	std::string content;
 	{
@@ -160,7 +165,7 @@ bool music_selection_context::load_playlist()
 
 		if (!file)
 		{
-			cellMusicSelectionContext.error("Failed to load music playlist file %s: %s", path, fs::g_tls_error);
+			cellMusicSelectionContext.error("load_playlist: Failed to load music playlist file '%s': %s", path, fs::g_tls_error);
 			return false;
 		}
 
@@ -171,7 +176,7 @@ bool music_selection_context::load_playlist()
 
 	if (!error.empty() || !root)
 	{
-		cellMusicSelectionContext.error("Failed to load music playlist file %s:\n%s", path, error);
+		cellMusicSelectionContext.error("load_playlist: Failed to load music playlist file '%s':\n%s", path, error);
 		return false;
 	}
 
@@ -180,54 +185,54 @@ bool music_selection_context::load_playlist()
 	const std::string version = get_yaml_node_value<std::string>(root["Version"], err);
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No Version entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No Version entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
 	if (version != target_version)
 	{
-		cellMusicSelectionContext.error("Version '%s' does not match music playlist target '%s' (file: %s)", version, target_version, path);
+		cellMusicSelectionContext.error("load_playlist: Version '%s' does not match music playlist target '%s' (file: '%s')", version, target_version, path);
 		return false;
 	}
 
 	const std::string file_type = get_yaml_node_value<std::string>(root["FileType"], err);
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No FileType entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No FileType entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
 	if (file_type != target_file_type)
 	{
-		cellMusicSelectionContext.error("FileType '%s' does not match music playlist target '%s' (file: %s)", file_type, target_file_type, path);
+		cellMusicSelectionContext.error("load_playlist: FileType '%s' does not match music playlist target '%s' (file: '%s')", file_type, target_file_type, path);
 		return false;
 	}
 
 	content_type = static_cast<CellSearchContentType>(get_yaml_node_value<u32>(root["ContentType"], err));
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No ContentType entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No ContentType entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
 	context_option = static_cast<CellSearchContextOption>(get_yaml_node_value<u32>(root["ContextOption"], err));
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No ContextOption entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No ContextOption entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
 	repeat_mode = static_cast<CellSearchRepeatMode>(get_yaml_node_value<u32>(root["RepeatMode"], err));
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No RepeatMode entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No RepeatMode entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
 	first_track = get_yaml_node_value<u32>(root["FirstTrack"], err);
 	if (!err.empty())
 	{
-		cellMusicSelectionContext.error("No FirstTrack entry found. Error: '%s' (file: %s)", err, path);
+		cellMusicSelectionContext.error("load_playlist: No FirstTrack entry found. Error: '%s' (file: '%s')", err, path);
 		return false;
 	}
 
@@ -235,15 +240,17 @@ bool music_selection_context::load_playlist()
 
 	if (!track_node || track_node.Type() != YAML::NodeType::Sequence)
 	{
-		cellMusicSelectionContext.error("No Tracks entry found or Tracks is not a Sequence. (file: %s)", path);
+		cellMusicSelectionContext.error("load_playlist: No Tracks entry found or Tracks is not a Sequence. (file: '%s')", path);
 		return false;
 	}
 
 	for (usz i = 0; i < track_node.size(); i++)
 	{
+		cellMusicSelectionContext.notice("load_playlist: Adding track to playlist: '%s'. (file: '%s')", track_node[i].Scalar(), path);
 		playlist.push_back(track_node[i].Scalar());
 	}
 
+	cellMusicSelectionContext.notice("load_playlist: Loaded music playlist file '%s' (context: %s)", path, to_string());
 	valid = true;
 	return true;
 }
@@ -255,31 +262,34 @@ void music_selection_context::set_track(std::string_view track)
 
 	if (playlist.empty())
 	{
-		cellMusicSelectionContext.error("No tracks to play... (requested path='%s')", track);
+		cellMusicSelectionContext.error("set_track: No tracks to play... (requested path='%s')", track);
 		return;
 	}
 
 	for (usz i = 0; i < playlist.size(); i++)
 	{
-		cellMusicSelectionContext.error("Comparing track '%s' vs '%s'", track, playlist[i]);
+		cellMusicSelectionContext.notice("set_track: Comparing track '%s' vs '%s'", track, playlist[i]);
 		if (track.ends_with(playlist[i]))
 		{
+			cellMusicSelectionContext.notice("set_track: Found track '%s': '%s'", track, playlist[i]);
 			first_track = current_track = static_cast<u32>(i);
 			return;
 		}
 	}
 
-	cellMusicSelectionContext.error("Track '%s' not found...", track);
+	cellMusicSelectionContext.error("set_track: Track '%s' not found...", track);
 }
 
 u32 music_selection_context::step_track(bool next)
 {
 	if (playlist.empty())
 	{
-		cellMusicSelectionContext.error("No tracks to play...");
+		cellMusicSelectionContext.error("step_track: No tracks to play...");
 		current_track = umax;
 		return umax;
 	}
+
+	const std::string last_track = (current_track < playlist.size()) ? playlist[current_track] : "";
 
 	switch (repeat_mode)
 	{
@@ -291,8 +301,8 @@ u32 music_selection_context::step_track(bool next)
 			if (++current_track >= playlist.size())
 			{
 				// We are at the end of the playlist.
-				cellMusicSelectionContext.notice("No more tracks to play in playlist...");
-				current_track = ::narrow<u32>(playlist.size() - 1); // keep index in range (port f8a5a6ad9); the returned umax already signals end-of-content
+				cellMusicSelectionContext.notice("step_track: No more tracks to play in playlist...");
+				current_track = ::size32(playlist) - 1; // NOTE: We could use size instead of size - 1 to allow to use PREV to play the last track again.
 				return umax;
 			}
 		}
@@ -302,8 +312,7 @@ u32 music_selection_context::step_track(bool next)
 			if (current_track == 0)
 			{
 				// We are at the start of the playlist.
-				cellMusicSelectionContext.notice("No more tracks to play in playlist...");
-				// leave current_track at 0 (don't stomp it to umax) so a consumer's ::at32(playlist, current_track) can't go OOB (port 7c2bd5677)
+				cellMusicSelectionContext.notice("step_track: No more tracks to play in playlist...");
 				return umax;
 			}
 
@@ -328,7 +337,7 @@ u32 music_selection_context::step_track(bool next)
 			// Play the previous track. Start with the last track if we reached the start of the playlist.
 			if (current_track == 0)
 			{
-				current_track = ::narrow<u32>(playlist.size() - 1);
+				current_track = ::size32(playlist) - 1;
 			}
 			else
 			{
@@ -340,13 +349,13 @@ u32 music_selection_context::step_track(bool next)
 	case CELL_SEARCH_REPEATMODE_NOREPEAT1:
 	{
 		// We are done. We only wanted to decode a single track.
-		cellMusicSelectionContext.notice("No more tracks to play...");
+		cellMusicSelectionContext.notice("step_track: No more tracks to play...");
 		current_track = umax;
 		return umax;
 	}
 	default:
 	{
-		fmt::throw_exception("Unknown repeat mode %d", static_cast<u32>(repeat_mode));
+		fmt::throw_exception("step_track: Unknown repeat mode %d", static_cast<u32>(repeat_mode));
 	}
 	}
 
@@ -355,10 +364,16 @@ u32 music_selection_context::step_track(bool next)
 		if (next ? current_track == 0 : current_track == (playlist.size() - 1))
 		{
 			// We reached the first or last track again. Let's shuffle!
-			cellMusicSelectionContext.notice("Shuffling playlist...");
+			cellMusicSelectionContext.notice("step_track: Shuffling playlist...");
 			std::random_device rd;
 			auto engine = std::default_random_engine{rd()};
 			std::shuffle(std::begin(playlist), std::end(playlist), engine);
+
+			// Don't play the same track twice
+			if (last_track == ::at32(playlist, current_track))
+			{
+				current_track = (current_track + 1) % playlist.size();
+			}
 		}
 	}
 

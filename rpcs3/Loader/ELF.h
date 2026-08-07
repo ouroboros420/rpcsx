@@ -280,7 +280,6 @@ public:
 			return set_error(elf_error::stream);
 
 		// Read ELF header
-		highest_offset = sizeof(header);
 		if (sizeof(header) != stream.read_at(offset, &header, sizeof(header)))
 			return set_error(elf_error::stream_header);
 
@@ -317,6 +316,8 @@ public:
 
 		if (header.e_shnum && header.e_shentsize != u16{sizeof(shdr_t)})
 			return set_error(elf_error::header_version);
+
+		highest_offset = sizeof(header);
 
 		// Load program headers
 		std::vector<phdr_t> _phdrs;
@@ -528,6 +529,7 @@ public:
 			clear();
 
 		m_error = error;
+		highest_offset = 0;
 		return *this;
 	}
 

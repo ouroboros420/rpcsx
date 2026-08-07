@@ -618,13 +618,13 @@ namespace rsx
 			{
 				const auto key = hash(local_addr, data_length);
 				const auto found = vertex_ranges.find(key);
+
 				if (found == vertex_ranges.end())
 				{
 					return nullptr;
 				}
 
-				// Check if data at local_address changed vs what was stored in the cache
-				// (game reused the address with new vertex data). Re-upload if so.
+				// Check if data in local_address changed vs what was stored in the vertex_cache
 				if (auto sudo_ptr = vm::get_super_ptr<char>(local_addr);
 					data_length >= 8 && found->second.fingerprint != *utils::bless<u64>(sudo_ptr))
 				{
@@ -644,7 +644,6 @@ namespace rsx
 
 				if (auto sudo_ptr = vm::get_super_ptr<char>(local_addr); data_length >= 8)
 				{
-					// bless avoids endian conversion and strict-aliasing UB
 					v.fingerprint = *utils::bless<u64>(sudo_ptr);
 				}
 

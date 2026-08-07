@@ -43,8 +43,6 @@ namespace glsl
 	{
 		switch (elementCount)
 		{
-		default:
-			abort();
 		case 1:
 			return "float";
 		case 2:
@@ -53,6 +51,8 @@ namespace glsl
 			return "vec3";
 		case 4:
 			return "vec4";
+		default:
+			fmt::throw_exception("Unexpected element count %d", elementCount);
 		}
 	}
 
@@ -60,8 +60,6 @@ namespace glsl
 	{
 		switch (elementCount)
 		{
-		default:
-			abort();
 		case 1:
 			return "float16_t";
 		case 2:
@@ -70,10 +68,12 @@ namespace glsl
 			return "f16vec3";
 		case 4:
 			return "f16vec4";
+		default:
+			fmt::throw_exception("Unexpected element count %d", elementCount);
 		}
 	}
 
-	std::string compareFunctionImpl(COMPARE f, const std::string& Op0, const std::string& Op1, bool scalar)
+	std::string compareFunctionImpl(COMPARE f, std::string_view Op0, std::string_view Op1, bool scalar)
 	{
 		if (scalar)
 		{
@@ -175,19 +175,11 @@ namespace glsl
 			enabled_options.push_back("_ENABLE_LIT_EMULATION");
 		}
 
-		OS << "#define _select mix\n";
-		OS << "#define _saturate(x) clamp(x, 0., 1.)\n";
-		OS << "#define _get_bits(x, off, count) bitfieldExtract(x, off, count)\n";
-		OS << "#define _set_bits(x, y, off, count) bitfieldInsert(x, y, off, count)\n";
-		OS << "#define _test_bit(x, y) (_get_bits(x, y, 1) != 0)\n";
-		OS << "#define _rand(seed) fract(sin(dot(seed.xy, vec2(12.9898f, 78.233f))) * 43758.5453f)\n\n";
-
 		if (props.require_clip_plane_functions)
 		{
-			OS <<
-				"#define CLIP_PLANE_DISABLED 1\n"
-				"#define is_user_clip_enabled(idx) (_get_bits(get_user_clip_config(), idx * 2, 2) != CLIP_PLANE_DISABLED)\n"
-				"#define user_clip_factor(idx) (float(_get_bits(get_user_clip_config(), idx * 2, 2)) - 1.f)\n\n";
+			OS << "#define CLIP_PLANE_DISABLED 1\n"
+				  "#define is_user_clip_enabled(idx) (_get_bits(get_user_clip_config(), idx * 2, 2) != CLIP_PLANE_DISABLED)\n"
+				  "#define user_clip_factor(idx) (float(_get_bits(get_user_clip_config(), idx * 2, 2)) - 1.f)\n\n";
 		}
 
 		if (props.domain == glsl::program_domain::glsl_fragment_program)
@@ -375,7 +367,7 @@ namespace glsl
 					{"CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT},
 
 					{"FORMAT_FEATURE_SIGNED_BIT", rsx::texture_control_bits::FF_SIGNED_BIT},
-					{"FORMAT_FEATURE_GAMMA_BIT",  rsx::texture_control_bits::FF_GAMMA_BIT},
+					{"FORMAT_FEATURE_GAMMA_BIT", rsx::texture_control_bits::FF_GAMMA_BIT},
 					{"FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT", rsx::texture_control_bits::FF_BIASED_RENORM_BIT},
 					{"FORMAT_FEATURE_16BIT_CHANNELS_BIT", rsx::texture_control_bits::FF_16BIT_CHANNELS_BIT}});
 
@@ -473,8 +465,6 @@ namespace glsl
 	{
 		switch (f)
 		{
-		default:
-			abort();
 		case FUNCTION::DP2:
 			return "$Ty(dot($0.xy, $1.xy))";
 		case FUNCTION::DP2A:
@@ -577,6 +567,8 @@ namespace glsl
 			return "textureLod($t, $0.xyz, 0)";
 		case FUNCTION::VERTEX_TEXTURE_FETCH2DMS:
 			return "texelFetch($t, ivec2($0.xy * textureSize($t)), 0)";
+		default:
+			fmt::throw_exception("Unexpected function request: %d", static_cast<int>(f));
 		}
 
 		rsx_log.error("Unexpected function request: %d", static_cast<int>(f));
@@ -636,7 +628,7 @@ namespace glsl
 					}
 				}
 
-				varying_list.push_back({reg_location, var_name, PT.type});
+				varying_list.push_back({ reg_location, std::move(var_name), PT.type });
 			}
 		}
 

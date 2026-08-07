@@ -838,7 +838,7 @@ struct color4_base
 		a += rhs.a;
 	}
 
-	constexpr color4_base<T> operator * (const color4_base<T>& rhs) const
+	constexpr color4_base<T> operator*(const color4_base<T>& rhs) const
 	{
 		return {r * rhs.r, g * rhs.g, b * rhs.b, a * rhs.a};
 	}

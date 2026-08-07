@@ -174,11 +174,13 @@ error_code sys_rsx_memory_allocate(cpu_thread &cpu, vm::ptr<u32> mem_handle,
 
   cpu.state += cpu_flag::wait;
 
-  if (vm::falloc(rsx::constants::local_mem_base, size, vm::video)) {
-    rsx::get_current_renderer()->local_mem_size = size;
+  const u32 mem_size = static_cast<u32>(size);
+
+  if (vm::falloc(rsx::constants::local_mem_base, mem_size, vm::video)) {
+    rsx::get_current_renderer()->local_mem_size = mem_size;
 
     if (u32 addr = rsx::get_current_renderer()->driver_info) {
-      vm::_ref<RsxDriverInfo>(addr).memory_size = size;
+      vm::_ptr<RsxDriverInfo>(addr)->memory_size = mem_size;
     }
 
     *mem_addr = rsx::constants::local_mem_base;
@@ -266,17 +268,17 @@ error_code sys_rsx_context_allocate(cpu_thread &cpu, vm::ptr<u32> context_id,
   *lpar_driver_info = dma_address + 0x100000;
   *lpar_reports = dma_address + 0x200000;
 
-  auto &reports = vm::_ref<RsxReports>(vm::cast(*lpar_reports));
+  auto &reports = *vm::_ptr<RsxReports>(vm::cast(*lpar_reports));
   std::memset(&reports, 0, sizeof(RsxReports));
 
   for (usz i = 0; i < std::size(reports.notify); ++i)
     reports.notify[i].timestamp = -1;
 
   for (usz i = 0; i < std::size(reports.semaphore); i += 4) {
-    reports.semaphore[i + 0].val.raw() = 0x1337C0D3;
-    reports.semaphore[i + 1].val.raw() = 0x1337BABE;
-    reports.semaphore[i + 2].val.raw() = 0x1337BEEF;
-    reports.semaphore[i + 3].val.raw() = 0x1337F001;
+    reports.semaphore[i + 0] = 0x1337C0D3;
+    reports.semaphore[i + 1] = 0x1337BABE;
+    reports.semaphore[i + 2] = 0x1337BEEF;
+    reports.semaphore[i + 3] = 0x1337F001;
   }
 
   for (usz i = 0; i < std::size(reports.report); ++i) {
@@ -285,7 +287,7 @@ error_code sys_rsx_context_allocate(cpu_thread &cpu, vm::ptr<u32> context_id,
     reports.report[i].pad = -1;
   }
 
-  auto &driverInfo = vm::_ref<RsxDriverInfo>(vm::cast(*lpar_driver_info));
+  auto &driverInfo = *vm::_ptr<RsxDriverInfo>(vm::cast(*lpar_driver_info));
 
   std::memset(&driverInfo, 0, sizeof(RsxDriverInfo));
 
@@ -302,7 +304,7 @@ error_code sys_rsx_context_allocate(cpu_thread &cpu, vm::ptr<u32> context_id,
 
   render->driver_info = vm::cast(*lpar_driver_info);
 
-  auto &dmaControl = vm::_ref<RsxDmaControl>(vm::cast(*lpar_dma_control));
+  auto &dmaControl = *vm::_ptr<RsxDmaControl>(vm::cast(*lpar_dma_control));
   dmaControl.get = 0;
   dmaControl.put = 0;
   dmaControl.ref = 0; // Set later to -1 by cellGcmSys
@@ -408,7 +410,7 @@ error_code sys_rsx_context_iomap(cpu_thread &cpu, u32 context_id, u64 io,
   const auto render = rsx::get_current_renderer();
 
   if (!size || io & 0xFFFFF || size > 0x200'00000 ||
-      size > std::min<u64>(~io, ~size) || ea & 0xFFFFF || size & 0xFFFFF) {
+      size > std::min<u64>(~io, ~ea) || ea & 0xFFFFF || size & 0xFFFFF) {
     return CELL_EINVAL;
   }
 
@@ -423,7 +425,8 @@ error_code sys_rsx_context_iomap(cpu_thread &cpu, u32 context_id, u64 io,
 
   // Wait until we have no active RSX locks and reserve iomap for use. Must do
   // so before acquiring vm lock to avoid deadlocks
-  rsx::reservation_lock<true> rsx_lock(ea, size);
+  rsx::reservation_lock<true> rsx_lock(::narrow<u32>(ea),
+                                       static_cast<u32>(size));
 
   vm::writer_lock rlock;
 
@@ -434,7 +437,7 @@ error_code sys_rsx_context_iomap(cpu_thread &cpu, u32 context_id, u64 io,
     }
 
     if ((addr == ea || !(addr % 0x1000'0000)) &&
-        idm::check_unlocked<sys_vm_t>(sys_vm_t::find_id(addr))) {
+        idm::check_unlocked<sys_vm_t>(sys_vm_t::find_id(::narrow<u32>(addr)))) {
       // Virtual memory is disallowed
       return CELL_EINVAL;
     }
@@ -450,10 +453,10 @@ error_code sys_rsx_context_iomap(cpu_thread &cpu, u32 context_id, u64 io,
 
     // TODO: Investigate relaxed memory ordering
     const u32 prev_ea = table.ea[io + i];
-    table.ea[io + i].release((ea + i) << 20);
+    table.ea[io + i].release(static_cast<u32>(ea + i) << 20);
     if (prev_ea + 1)
       table.io[prev_ea >> 20].release(-1); // Clear previous mapping if exists
-    table.io[ea + i].release((io + i) << 20);
+    table.io[ea + i].release(static_cast<u32>(io + i) << 20);
   }
 
   return CELL_OK;
@@ -543,7 +546,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3,
     return {CELL_EINVAL, "context_id is 0x%x", context_id};
   }
 
-  auto &driverInfo = vm::_ref<RsxDriverInfo>(render->driver_info);
+  auto &driverInfo = *vm::_ptr<RsxDriverInfo>(render->driver_info);
   switch (package_id) {
   case 0x001: // FIFO
   {
@@ -881,7 +884,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3,
 
     // seems gcmSysWaitLabel uses this offset, so lets set it to 0 every flip
     // NOTE: Realhw resets 16 bytes of this semaphore for some reason
-    vm::_ref<atomic_t<u128>>(render->label_addr + 0x10).store(u128{});
+    vm::_ptr<atomic_t<u128>>(render->label_addr + 0x10)->store(u128{});
 
     render->send_event(0, SYS_RSX_EVENT_FLIP_BASE << 1, 0);
     break;

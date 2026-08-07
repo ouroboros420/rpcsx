@@ -5,14 +5,14 @@
 // Error Codes
 enum CellLibmixerError : u32
 {
-	CELL_LIBMIXER_ERROR_NOT_INITIALIZED = 0x80310002,
+	CELL_LIBMIXER_ERROR_NOT_INITIALIZED   = 0x80310002,
 	CELL_LIBMIXER_ERROR_INVALID_PARAMATER = 0x80310003,
-	CELL_LIBMIXER_ERROR_NO_MEMORY = 0x80310005,
-	CELL_LIBMIXER_ERROR_ALREADY_EXIST = 0x80310006,
-	CELL_LIBMIXER_ERROR_FULL = 0x80310007,
-	CELL_LIBMIXER_ERROR_NOT_EXIST = 0x80310008,
-	CELL_LIBMIXER_ERROR_TYPE_MISMATCH = 0x80310009,
-	CELL_LIBMIXER_ERROR_NOT_FOUND = 0x8031000a,
+	CELL_LIBMIXER_ERROR_NO_MEMORY         = 0x80310005,
+	CELL_LIBMIXER_ERROR_ALREADY_EXIST     = 0x80310006,
+	CELL_LIBMIXER_ERROR_FULL              = 0x80310007,
+	CELL_LIBMIXER_ERROR_NOT_EXIST         = 0x80310008,
+	CELL_LIBMIXER_ERROR_TYPE_MISMATCH     = 0x80310009,
+	CELL_LIBMIXER_ERROR_NOT_FOUND         = 0x8031000a,
 };
 
 enum
@@ -37,12 +37,12 @@ enum
 	CELL_SURMIXER_PARAM_REVERBLEVEL_LINEAR = 9,
 	CELL_SURMIXER_PARAM_TOTALMUTE = 12,
 
-	CELL_SURMIXER_PARAM_TOTALLEVEL = 40,  // in dB
+	CELL_SURMIXER_PARAM_TOTALLEVEL = 40, // in dB
 	CELL_SURMIXER_PARAM_REVERBLEVEL = 41, // in dB
 };
 
-static const float CELL_SURMIXER_CONT_MUTEON = 1.0;
-static const float CELL_SURMIXER_CONT_MUTEOFF = 0.0;
+static constexpr f32 CELL_SURMIXER_CONT_MUTEON = 1.0f;
+static constexpr f32 CELL_SURMIXER_CONT_MUTEOFF = 0.0f;
 
 enum
 {
@@ -137,15 +137,15 @@ struct CellSSPlayerCommonParam
 
 struct CellSurMixerPosition
 {
-	be_t<float> x;
-	be_t<float> y;
-	be_t<float> z;
+	be_t<f32> x;
+	be_t<f32> y;
+	be_t<f32> z;
 };
 
 struct CellSSPlayerRuntimeInfo
 {
-	be_t<float> level;
-	be_t<float> speed;
+	be_t<f32> level;
+	be_t<f32> speed;
 	CellSurMixerPosition position;
 };
 
@@ -163,6 +163,6 @@ struct CellSurMixerChStripParam
 	be_t<u32> param;
 	be_t<u32> attribute_addr;
 	be_t<s32> dBSwitch;
-	be_t<float> floatVal;
+	be_t<f32> floatVal;
 	be_t<s32> intVal;
 };

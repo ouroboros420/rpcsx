@@ -1,9 +1,10 @@
 #include "stdafx.h"
 #include "games_config.h"
-#include "Loader/ISO.h"
 #include "util/logs.hpp"
 #include "util/yaml.hpp"
 #include "util/File.h"
+
+#include "Loader/ISO.h"
 
 LOG_CHANNEL(cfg_log, "CFG");
 
@@ -47,12 +48,8 @@ games_config::result games_config::add_game(const std::string& key, const std::s
 {
 	if (path == iso_device::virtual_device_name + "/")
 	{
-		// Never store the virtual overlay prefix: translate back to the real
-		// .iso path so the entry survives across boots.
-		std::string_view dev_path;
-		const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/", &dev_path);
-		if (!device)
-			return result::failure;
+		const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/");
+		if (!device) return result::failure;
 
 		const auto iso_dev = dynamic_cast<const iso_device*>(device.get());
 		return add_game(key, iso_dev->get_loaded_iso());

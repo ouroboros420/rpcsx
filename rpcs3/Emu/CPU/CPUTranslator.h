@@ -27,6 +27,18 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/KnownBits.h"
+#include "llvm/Config/llvm-config.h" // LLVM_VERSION_MAJOR for the guard below
+#if LLVM_VERSION_MAJOR >= 21
+// llvm::KnownFPClass moved to its own header in LLVM 21. On the LLVM version
+// RPCSX actually builds against it still lives in llvm/Analysis/ValueTracking.h,
+// which is included a couple of lines below - so nothing else is needed there.
+// NOTE: the Android build does NOT compile the 3rdparty/llvm submodule despite
+// BUILD_LLVM=on; it downloads a prebuilt keyed on USE_LLVM_VERSION
+// (3rdparty/llvm/CMakeLists.txt, currently 20.1.3). Check that value, not the
+// submodule revision, when deciding what LLVM API is available.
+#include "llvm/Support/KnownFPClass.h"
+#endif
+#include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IntrinsicsX86.h"
@@ -435,7 +447,7 @@ struct llvm_value_t<T*> : llvm_value_t<T>
 
 	static llvm::Type* get_type(llvm::LLVMContext& context)
 	{
-		return llvm_value_t<T>::get_type(context)->getPointerTo();
+		return llvm::PointerType::getUnqual(context);
 	}
 };
 
@@ -1177,7 +1189,7 @@ struct llvm_fshl
 	static llvm::Function* get_fshl(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -1249,7 +1261,7 @@ struct llvm_fshr
 	static llvm::Function* get_fshr(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -1312,10 +1324,95 @@ struct llvm_rol
 
 	llvm_expr_t<A1> a1;
 	llvm_expr_t<A2> a2;
+	bool use_sve_xar = false;
 
 	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint, "llvm_rol<>: invalid type");
 
 	static constexpr bool is_ok = llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint;
+
+#ifdef ARCH_ARM64
+	static bool get_constant_splat(llvm::Value* value, u64& result)
+	{
+		if (const auto constant = llvm::dyn_cast<llvm::ConstantInt>(value))
+		{
+			result = constant->getZExtValue();
+			return true;
+		}
+
+		if (llvm::isa<llvm::ConstantAggregateZero>(value))
+		{
+			result = 0;
+			return true;
+		}
+
+		const auto vector_type = llvm::dyn_cast<llvm::FixedVectorType>(value->getType());
+
+		if (!vector_type)
+		{
+			return false;
+		}
+
+		const auto element_count = vector_type->getNumElements();
+		const auto get_element = [&](u32 index) -> llvm::Constant*
+		{
+			if (const auto data = llvm::dyn_cast<llvm::ConstantDataVector>(value))
+			{
+				return data->getElementAsConstant(index);
+			}
+
+			if (const auto vector = llvm::dyn_cast<llvm::ConstantVector>(value))
+			{
+				return vector->getAggregateElement(index);
+			}
+
+			return nullptr;
+		};
+
+		const auto first_element = llvm::dyn_cast_or_null<llvm::ConstantInt>(get_element(0));
+
+		if (!first_element)
+		{
+			return false;
+		}
+
+		result = first_element->getZExtValue();
+
+		for (u32 i = 1; i < element_count; i++)
+		{
+			const auto element = llvm::dyn_cast_or_null<llvm::ConstantInt>(get_element(i));
+
+			if (!element || element->getZExtValue() != result)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static llvm::Value* to_sve_vector(llvm::IRBuilder<>* ir, llvm::Value* value)
+	{
+		if (llvm::isa<llvm::ScalableVectorType>(value->getType()))
+		{
+			return value;
+		}
+
+		const auto fixed_type = llvm::cast<llvm::FixedVectorType>(value->getType());
+		const auto scalable_type = llvm::ScalableVectorType::get(fixed_type->getElementType(), fixed_type->getNumElements());
+
+		return ir->CreateInsertVector(scalable_type, llvm::UndefValue::get(scalable_type), value, ir->getInt64(0));
+	}
+
+	static llvm::Value* from_sve_vector(llvm::IRBuilder<>* ir, llvm::Value* value, llvm::FixedVectorType* fixed_type)
+	{
+		if (value->getType() == fixed_type)
+		{
+			return value;
+		}
+
+		return ir->CreateExtractVector(fixed_type, value, ir->getInt64(0));
+	}
+#endif
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
 	{
@@ -1326,6 +1423,28 @@ struct llvm_rol
 		{
 			return llvm_fshl<A1, A1, A2>::fold(ir, v1, v1, v2);
 		}
+
+#ifdef ARCH_ARM64
+		u64 rotate = 0;
+
+		if (use_sve_xar && llvm::isa<llvm::FixedVectorType>(v1->getType()) && get_constant_splat(v2, rotate))
+		{
+			constexpr u64 element_size = llvm_value_t<T>::esize;
+			const u32 rotate_right = static_cast<u32>((element_size - (rotate % element_size)) % element_size);
+
+			if (rotate_right == 0)
+			{
+				return v1;
+			}
+
+			const auto fixed_type = llvm::cast<llvm::FixedVectorType>(v1->getType());
+			const auto data = to_sve_vector(ir, v1);
+			const auto zero = llvm::Constant::getNullValue(data->getType());
+			const auto result = ir->CreateIntrinsic(llvm::Intrinsic::aarch64_sve_xar, {data->getType()}, {data, zero, ir->getInt32(rotate_right)});
+
+			return from_sve_vector(ir, result, fixed_type);
+		}
+#endif
 
 		return ir->CreateCall(llvm_fshl<A1, A1, A2>::get_fshl(ir), {v1, v1, v2});
 	}
@@ -2253,7 +2372,7 @@ struct llvm_add_sat
 	static llvm::Function* get_add_sat(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -2336,7 +2455,7 @@ struct llvm_sub_sat
 	static llvm::Function* get_sub_sat(llvm::IRBuilder<>* ir)
 	{
 		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -3099,23 +3218,35 @@ protected:
 
 	// Allow PSHUFB intrinsic
 	bool m_use_ssse3 = true;
-
-	// Allow FMA
 #ifdef ARCH_ARM64
-	// All ARM64 CPUs have hardware (fused, IEEE-correct) FMA - enable unconditionally
-	// so non-Cortex prime cores (e.g. Qualcomm Oryon) get it too (port eaebd3426).
+	// all arm CPUS have FMA
 	bool m_use_fma = true;
-#else
-	bool m_use_fma = false;
-#endif
 
-	// Allow AVX (on ARM64 this flag only speeds up SPU verification, no intrinsic path)
-#ifdef ARCH_ARM64
+	// Should be nonsense to set this for ARM,
+	// but this flag is only used in SPU verification
+	// For now, setting this flag will speed up SPU verification
+	// but I will remove this later with explicit parralelism - Whatcookie
 	bool m_use_avx = true;
+
+	// ARMv8 SDOT/UDOT
+	bool m_use_dotprod = false;
+
+	// ARMv8.6 SMMLA/UMMLA
+	bool m_use_i8mm = false;
+
+	// Allow direct TBL2/TBX2 emission.
+	bool m_use_tbl2 = true;
+
+	bool m_use_sve_128 = false;
+
+	bool m_use_sve2_128 = false;
 #else
+	// Allow FMA
+	bool m_use_fma = false;
+
+	// Allow AVX
 	bool m_use_avx = false;
 #endif
-
 	// Allow skylake-x tier AVX-512
 	bool m_use_avx512 = false;
 
@@ -3127,15 +3258,6 @@ protected:
 
 	// Allow Icelake tier AVX-512
 	bool m_use_avx512_icl = false;
-
-	// Allow ARMv8.2 dot product instructions (UDOT/SDOT)
-	bool m_use_dotprod = false;
-
-	// Allow ARMv8.6 matrix multiply-accumulate instructions (SMMLA/UMMLA)
-	bool m_use_i8mm = false;
-
-	// Allow direct ARM64 TBL2/TBX2 emission (retry disables on scavenger failure)
-	bool m_use_tbl2 = true;
 
 	// IR builder
 	llvm::IRBuilder<>* m_ir = nullptr;
@@ -3396,9 +3518,13 @@ public:
 
 	template <typename T, typename U>
 		requires llvm_rol<T, U>::is_ok
-	static auto rol(T&& a, U&& b)
+	auto rol(T&& a, U&& b)
 	{
+#ifdef ARCH_ARM64
+		return llvm_rol<T, U>{std::forward<T>(a), std::forward<U>(b), m_use_sve2_128};
+#else
 		return llvm_rol<T, U>{std::forward<T>(a), std::forward<U>(b)};
+#endif
 	}
 
 	template <typename T, typename U>
@@ -3678,7 +3804,24 @@ public:
 	llvm::Function* get_intrinsic(llvm::Intrinsic::ID id)
 	{
 		const auto _module = m_ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(_module, id, {get_type<Types>()...});
+		return llvm::Intrinsic::getOrInsertDeclaration(_module, id, {get_type<Types>()...});
+	}
+
+	template <typename T1, typename T2, typename T3>
+	value_t<u32[4]> vperm2d128From512(T1 a, T2 b, T3 c)
+	{
+		value_t<u32[4]> result;
+		value_t<u32[16]> perm512;
+
+		const auto data0 = a.eval(m_ir);
+		const auto index128 = b.eval(m_ir);
+		const auto data1 = c.eval(m_ir);
+
+		const auto index512 = m_ir->CreateInsertVector(get_type<u32[16]>(), llvm::UndefValue::get(get_type<u32[16]>()), index128, m_ir->getInt64(0));
+		perm512.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpermi2var_d_512), {data0, index512, data1});
+
+		result.value = m_ir->CreateExtractVector(get_type<u32[4]>(), perm512.value, m_ir->getInt64(0));
+		return result;
 	}
 
 	template <typename T1, typename T2>
@@ -3705,13 +3848,8 @@ public:
 		const auto data1 = b.eval(m_ir);
 		const auto data2 = c.eval(m_ir);
 
-#if LLVM_VERSION_MAJOR >= 22
-		// LLVM 22+ changed the intrinsic signature from v4i32 to v16i8 for operands 2 and 3
 		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpdpbusd_128),
 			{data0, m_ir->CreateBitCast(data1, get_type<u8[16]>()), m_ir->CreateBitCast(data2, get_type<u8[16]>())});
-#else
-		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpdpbusd_128), {data0, data1, data2});
-#endif
 		return result;
 	}
 
@@ -3791,6 +3929,118 @@ template <typename T1, typename T2, typename T3>
 		result.value = m_ir->CreateCall(get_intrinsic<u32[4]>(llvm::Intrinsic::aarch64_neon_umull), {data0, data1});
 		return result;
 	}
+	
+	llvm::Value* to_sve_vector(llvm::Value* value)
+	{
+		if (llvm::isa<llvm::ScalableVectorType>(value->getType()))
+		{
+			return value;
+		}
+
+		const auto fixed_type = llvm::cast<llvm::FixedVectorType>(value->getType());
+		const auto scalable_type = llvm::ScalableVectorType::get(fixed_type->getElementType(), fixed_type->getNumElements());
+		return m_ir->CreateInsertVector(scalable_type, llvm::UndefValue::get(scalable_type), value, m_ir->getInt64(0));
+	}
+
+	llvm::Value* from_sve_vector(llvm::Value* value, llvm::FixedVectorType* fixed_type)
+	{
+		if (value->getType() == fixed_type)
+		{
+			return value;
+		}
+
+		return m_ir->CreateExtractVector(fixed_type, value, m_ir->getInt64(0));
+	}
+
+	llvm::Value* sve_ptrue(llvm::FixedVectorType* fixed_type)
+	{
+		const auto pred_type = llvm::ScalableVectorType::get(m_ir->getInt1Ty(), fixed_type->getNumElements());
+		return m_ir->CreateIntrinsic(llvm::Intrinsic::aarch64_sve_ptrue, {pred_type}, {m_ir->getInt32(31)});
+	}
+
+	llvm::Value* sve_fnmls(llvm::Value* acc, llvm::Value* lhs, llvm::Value* rhs)
+	{
+		const auto fixed_type = llvm::cast<llvm::FixedVectorType>(acc->getType());
+		const auto vacc = to_sve_vector(acc);
+		const auto vlhs = to_sve_vector(lhs);
+		const auto vrhs = to_sve_vector(rhs);
+		const auto result = m_ir->CreateIntrinsic(llvm::Intrinsic::aarch64_sve_fnmls, {vacc->getType()}, {sve_ptrue(fixed_type), vacc, vlhs, vrhs});
+
+		return from_sve_vector(result, fixed_type);
+	}
+
+	template <typename T, typename T1, typename T2>
+	value_t<T> sve_mull(llvm::Intrinsic::ID id, T1 a, T2 b)
+	{
+		value_t<T> result;
+
+		const auto fixed_type = llvm::cast<llvm::FixedVectorType>(get_type<T>());
+		const auto scalable_type = llvm::ScalableVectorType::get(fixed_type->getElementType(), fixed_type->getNumElements());
+		const auto data0 = to_sve_vector(a.eval(m_ir));
+		const auto data1 = to_sve_vector(b.eval(m_ir));
+		const std::array<llvm::Type*, 1> types{scalable_type};
+
+		result.value = from_sve_vector(m_ir->CreateIntrinsic(id, types, {data0, data1}), fixed_type);
+		return result;
+	}
+
+	template <typename T, typename T0, typename T1, typename T2>
+	value_t<T> sve_mlal(llvm::Intrinsic::ID id, T0 acc, T1 a, T2 b)
+	{
+		value_t<T> result;
+
+		const auto fixed_type = llvm::cast<llvm::FixedVectorType>(get_type<T>());
+		const auto scalable_type = llvm::ScalableVectorType::get(fixed_type->getElementType(), fixed_type->getNumElements());
+		const auto data0 = to_sve_vector(acc.eval(m_ir));
+		const auto data1 = to_sve_vector(a.eval(m_ir));
+		const auto data2 = to_sve_vector(b.eval(m_ir));
+		const std::array<llvm::Type*, 1> types{scalable_type};
+
+		result.value = from_sve_vector(m_ir->CreateIntrinsic(id, types, {data0, data1, data2}), fixed_type);
+		return result;
+	}
+
+	template <typename T1, typename T2>
+	value_t<s32[4]> sve_smullb(T1 a, T2 b)
+	{
+		return sve_mull<s32[4]>(llvm::Intrinsic::aarch64_sve_smullb, a, b);
+	}
+
+	template <typename T1, typename T2>
+	value_t<s32[4]> sve_smullt(T1 a, T2 b)
+	{
+		return sve_mull<s32[4]>(llvm::Intrinsic::aarch64_sve_smullt, a, b);
+	}
+
+	template <typename T1, typename T2>
+	value_t<u32[4]> sve_umullb(T1 a, T2 b)
+	{
+		return sve_mull<u32[4]>(llvm::Intrinsic::aarch64_sve_umullb, a, b);
+	}
+
+	template <typename T1, typename T2>
+	value_t<u32[4]> sve_umullt(T1 a, T2 b)
+	{
+		return sve_mull<u32[4]>(llvm::Intrinsic::aarch64_sve_umullt, a, b);
+	}
+
+	template <typename T0, typename T1, typename T2>
+	value_t<s32[4]> sve_smlalb(T0 acc, T1 a, T2 b)
+	{
+		return sve_mlal<s32[4]>(llvm::Intrinsic::aarch64_sve_smlalb, acc, a, b);
+	}
+
+	template <typename T0, typename T1, typename T2>
+	value_t<s32[4]> sve_smlalt(T0 acc, T1 a, T2 b)
+	{
+		return sve_mlal<s32[4]>(llvm::Intrinsic::aarch64_sve_smlalt, acc, a, b);
+	}
+
+	template <typename T0, typename T1, typename T2>
+	value_t<u32[4]> sve_umlalt(T0 acc, T1 a, T2 b)
+	{
+		return sve_mlal<u32[4]>(llvm::Intrinsic::aarch64_sve_umlalt, acc, a, b);
+	}
 
 	template <typename T1, typename T2, typename T = llvm_common_t<T1, T2>>
 	value_t<T> ushl(T1 a, T2 b)
@@ -3804,7 +4054,7 @@ template <typename T1, typename T2, typename T3>
 		return result;
 	}
 
-	template <typename T1, typename T2>
+template <typename T1, typename T2>
 	auto addp(T1 a, T2 b)
 	{
 		using T_vector = typename is_llvm_expr<T1>::type;
@@ -4012,16 +4262,75 @@ template <typename T1, typename T2, typename T3>
 	template <typename T = v128>
 	llvm::Constant* make_const_vector(T, llvm::Type*, u32 = __builtin_LINE());
 
+	// IR is emitted in a single pass: phi nodes may still be missing their back-edge incoming
+	// values, so any known bits computeKnownBits derives through a phi are unsound for the
+	// final IR. Whether a phi is complete cannot be queried (the CFG edges from not-yet-emitted
+	// predecessors don't exist either), so reject every value whose bits may derive from a phi.
+	static bool is_known_bits_safe(llvm::Value* value)
+	{
+		llvm::SmallPtrSet<const llvm::Value*, 32> visited;
+		llvm::SmallVector<const llvm::Value*, 32> worklist{value};
+
+		while (!worklist.empty())
+		{
+			const llvm::Value* v = worklist.pop_back_val();
+
+			if (!visited.insert(v).second)
+			{
+				continue;
+			}
+
+			if (llvm::isa<llvm::PHINode>(v) || visited.size() > 256)
+			{
+				return false;
+			}
+
+			// Loads don't propagate operand bits; constants and arguments are leaves
+			if (auto i = llvm::dyn_cast<llvm::Instruction>(v); i && !llvm::isa<llvm::LoadInst>(i))
+			{
+				for (const llvm::Use& op : i->operands())
+				{
+					worklist.push_back(op.get());
+				}
+			}
+		}
+
+		return true;
+	}
+
+	llvm::KnownBits get_known_bits_fallback(llvm::Value* value);
+
 	template <typename T>
 	llvm::KnownBits get_known_bits(T a)
 	{
-		return llvm::computeKnownBits(a.eval(m_ir), m_module->getDataLayout());
+		llvm::Value* value = a.eval(m_ir);
+
+		if (!is_known_bits_safe(value))
+		{
+			return get_known_bits_fallback(value);
+		}
+
+		return llvm::computeKnownBits(value, m_module->getDataLayout());
 	}
 
 	template <typename T>
 	llvm::KnownBits kbc(T value)
 	{
 		return llvm::KnownBits::makeConstant(llvm::APInt(sizeof(T) * 8, u64(value)));
+	}
+
+	template <unsigned depth = llvm::MaxAnalysisRecursionDepth, typename T>
+	llvm::KnownFPClass get_known_fp_class(T a, llvm::FPClassTest interested_classes)
+	{
+		static_assert(depth <= llvm::MaxAnalysisRecursionDepth, "Depth parameter can only decrease search. Default is max.");
+
+		const llvm::SimplifyQuery SQ(m_module->getDataLayout());
+#if LLVM_VERSION_MAJOR >= 21
+		return llvm::computeKnownFPClass(a.eval(m_ir), interested_classes, SQ, llvm::MaxAnalysisRecursionDepth - depth);
+#else
+		// LLVM 20 takes (V, InterestedClasses, Depth, SQ) - Depth and SQ are swapped.
+		return llvm::computeKnownFPClass(a.eval(m_ir), interested_classes, llvm::MaxAnalysisRecursionDepth - depth, SQ);
+#endif
 	}
 
 private:
@@ -4336,7 +4645,7 @@ static inline llvm::CallInst* llvm_asm(
 	const std::string& constraints,
 	llvm::LLVMContext& context)
 {
-	llvm::ArrayRef<llvm::Type*> types_ref = std::nullopt;
+	llvm::ArrayRef<llvm::Type*> types_ref {};
 	std::vector<llvm::Type*> types;
 	types.reserve(args.size());
 

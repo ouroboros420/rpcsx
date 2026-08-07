@@ -83,7 +83,7 @@ error_code sys_mutex_create(ppu_thread &ppu, vm::ptr<u32> mutex_id,
   }
 
   if (auto error = lv2_obj::create<lv2_mutex>(
-          _attr.pshared, _attr.ipc_key, _attr.flags, [&]() {
+          _attr.pshared, ipc_key, _attr.flags, [&]() {
             return make_shared<lv2_mutex>(_attr.protocol, _attr.recursive,
                                           _attr.adaptive, ipc_key,
                                           _attr.name_u64);
@@ -92,7 +92,7 @@ error_code sys_mutex_create(ppu_thread &ppu, vm::ptr<u32> mutex_id,
   }
 
   ppu.check_state();
-  *mutex_id = idm::last_id();
+  *mutex_id = idm::last_id<lv2_mutex>();
   return CELL_OK;
 }
 
@@ -307,9 +307,7 @@ error_code sys_mutex_unlock(ppu_thread &ppu, u32 mutex_id) {
       mutex_id,
       [&, notify = lv2_obj::notify_all_t()](lv2_mutex &mutex) -> CellError {
         // At unlock, we have some time to do other jobs when the thread is
-        // unlikely to be in other critical sections (upstream cfe1eca18 hunk
-        // our snapshot missed): flush any postponed reservation notification
-        // so SPU MFC-event waiters are not left sleeping.
+        // unlikely to be in other critical sections
         notify.enqueue_on_top(vm::reservation_notifier_notify(
             ppu.res_notify, ppu.res_notify_time, true));
 

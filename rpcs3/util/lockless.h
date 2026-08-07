@@ -384,6 +384,7 @@ public:
 template <typename T>
 class lf_queue final
 {
+private:
 	struct fat_ptr
 	{
 		u64 ptr{};
@@ -453,7 +454,7 @@ public:
 		}
 	}
 
-	atomic_t<u32>& get_wait_atomic()
+	atomic_t<u32> &get_wait_atomic()
 	{
 		return *utils::bless<atomic_t<u32>>(&m_head.raw().is_non_null);
 	}

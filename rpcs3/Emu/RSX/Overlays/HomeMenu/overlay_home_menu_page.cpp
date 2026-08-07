@@ -8,12 +8,7 @@ namespace rsx
 	namespace overlays
 	{
 		home_menu_page::home_menu_page(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent, const std::string& title)
-			: list_view(width, height, use_separators)
-			, parent(parent)
-			, title(title)
-			, m_reset_btn(120, 30)
-			, m_save_btn(120, 30)
-			, m_discard_btn(120, 30)
+			: list_view(width, height, use_separators), parent(parent), title(title), m_reset_btn(120, 30), m_save_btn(120, 30), m_discard_btn(120, 30)
 		{
 			if (parent)
 			{
@@ -99,13 +94,14 @@ namespace rsx
 			m_pages.push_back(page);
 
 			add_item(elem, [this, page](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
+				{
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
 
-				rsx_log.notice("User selected '%s' in '%s'", page->title, title);
-				set_current_page(page.get());
-				return page_navigation::next;
-			});
+					rsx_log.notice("User selected '%s' in '%s'", page->title, title);
+					set_current_page(page.get());
+					return page_navigation::next;
+				});
 		}
 
 		void home_menu_page::add_item(std::unique_ptr<overlay_element>& element, std::function<page_navigation(pad_button)> callback)
@@ -129,18 +125,18 @@ namespace rsx
 
 			clear_items();
 
-			usz total_height = 0;
+				usz total_height = 0;
 
-			for (auto& entry : m_entries)
-			{
-				total_height += entry->h;
-			}
+				for (auto& entry : m_entries)
+				{
+					total_height += entry->h;
+				}
 
 			// Center vertically if necessary
 			if (total_height < h && center_vertically)
-			{
-				advance_pos = (h - ::narrow<u16>(total_height)) / 2;
-			}
+				{
+					advance_pos = (h - ::narrow<u16>(total_height)) / 2;
+				}
 			else
 			{
 				advance_pos = menu_entry_margin;
@@ -155,7 +151,7 @@ namespace rsx
 			refresh();
 		}
 
-		void home_menu_page::show_dialog(const std::string& text, std::function<void()> on_accept, std::function<void()> on_cancel)
+		void home_menu_page::show_dialog(std::string_view text, std::function<void()> on_accept, std::function<void()> on_cancel)
 		{
 			if (m_message_box && !m_message_box->visible)
 			{
@@ -231,17 +227,17 @@ namespace rsx
 				if (m_config_changed && *m_config_changed)
 				{
 					show_dialog(get_localized_string(localized_string_id::HOME_MENU_SETTINGS_DISCARD), [this]()
-					{
-						rsx_log.notice("home_menu_page: discarding settings...");
-
-						if (m_config_changed && *m_config_changed)
 						{
-							g_cfg.from_string(g_backup_cfg.to_string());
-							Emu.GetCallbacks().update_emu_settings();
-							*m_config_changed = false;
+							rsx_log.notice("home_menu_page: discarding settings...");
+
+							if (m_config_changed && *m_config_changed)
+							{
+								g_cfg.from_string(g_backup_cfg.to_string());
+								Emu.GetCallbacks().update_emu_settings();
+								*m_config_changed = false;
 							refresh();
-						}
-					});
+							}
+						});
 				}
 				break;
 			}
@@ -250,16 +246,16 @@ namespace rsx
 				if (m_config_changed && *m_config_changed)
 				{
 					show_dialog(get_localized_string(localized_string_id::HOME_MENU_SETTINGS_SAVE), [this]()
-					{
-						rsx_log.notice("home_menu_page: saving settings...");
-						Emu.GetCallbacks().save_emu_settings();
-
-						if (m_config_changed)
 						{
-							*m_config_changed = false;
+							rsx_log.notice("home_menu_page: saving settings...");
+							Emu.GetCallbacks().save_emu_settings();
+
+							if (m_config_changed)
+							{
+								*m_config_changed = false;
 							refresh();
-						}
-					});
+							}
+						});
 				}
 				break;
 			}
@@ -269,8 +265,8 @@ namespace rsx
 				if (get_selected_index() <= 0)
 				{
 					if (!is_auto_repeat)
-					{
-						select_entry(get_elements_count() - 1);
+				{
+					select_entry(get_elements_count() - 1);
 					}
 					break;
 				}
@@ -284,8 +280,8 @@ namespace rsx
 				if (get_selected_index() >= (get_elements_count() - 1))
 				{
 					if (!is_auto_repeat)
-					{
-						select_entry(0);
+				{
+					select_entry(0);
 					}
 					break;
 				}
@@ -392,5 +388,5 @@ namespace rsx
 			m_is_compiled = true;
 			return compiled_resources;
 		}
-	}
-}
+	} // namespace overlays
+} // namespace rsx

@@ -5,6 +5,7 @@ add_library(rpcs3_emu STATIC
     localized_string.cpp
     savestate_utils.cpp
     scoped_progress_dialog.cpp
+    stb_image.cpp
     System.cpp
     system_config.cpp
     system_config_types.cpp
@@ -28,20 +29,24 @@ if(USE_ASAN)
     set_source_files_properties(../../Utilities/Thread.cpp PROPERTIES COMPILE_DEFINITIONS USE_ASAN)
 endif()
 
+# GCC overemits weak type information when using LTO
+# This causes an issue with LLVM 22 which is build without RTTI
+# Issue is specifically related to vfs::ProxyFileSystem
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(
+        Cell/PPUThread.cpp
+        Cell/SPULLVMRecompiler.cpp
+        PROPERTIES COMPILE_OPTIONS -fno-lto
+    )
+endif()
+
+if(NOT USE_SYSTEM_OPENAL)
+    target_compile_definitions(rpcs3_emu PUBLIC AL_LIBTYPE_STATIC)
+endif()
+
 if(HAS_MEMORY_BREAKPOINTS)
     target_compile_definitions(rpcs3_emu PRIVATE RPCS3_HAS_MEMORY_BREAKPOINTS)
 endif()
-
-target_link_libraries(rpcs3_emu
-    PRIVATE
-        3rdparty::zlib 3rdparty::yaml-cpp 3rdparty::zstd
-    PUBLIC
-        3rdparty::libevdev 3rdparty::protobuf)
-
-
-find_package(Threads REQUIRED)
-target_link_libraries(rpcs3_emu
-    PUBLIC Threads::Threads)
 
 # For stdafx.h
 target_include_directories(rpcs3_emu
@@ -57,9 +62,6 @@ target_include_directories(rpcs3_emu
 
 target_include_directories(rpcs3_emu PUBLIC "${CMAKE_SOURCE_DIR}")
 
-target_link_libraries(rpcs3_emu
-    PUBLIC
-        3rdparty::pugixml)
 
 # Audio
 target_sources(rpcs3_emu PRIVATE
@@ -94,16 +96,8 @@ if(WIN32)
         Audio/XAudio2/xaudio2_enumerator.cpp
     )
     target_compile_definitions(rpcs3_emu PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00)
+    target_link_libraries(rpcs3_emu PRIVATE pdh bcrypt dbghelp)
 endif()
-
-target_link_libraries(rpcs3_emu
-    PUBLIC
-        3rdparty::openal
-        3rdparty::cubeb
-        3rdparty::soundtouch
-        3rdparty::miniupnpc
-        3rdparty::json
-)
 
 # Cell
 target_sources(rpcs3_emu PRIVATE
@@ -133,12 +127,6 @@ if(NOT MSVC)
     )
 endif()
 
-target_link_libraries(rpcs3_emu
-    PRIVATE
-        3rdparty::stblib 3rdparty::libpng
-)
-
-
 # CPU
 target_sources(rpcs3_emu PRIVATE
     CPU/CPUThread.cpp
@@ -154,21 +142,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64")
     )
 endif()
 
-target_link_libraries(rpcs3_emu
-    PUBLIC 3rdparty::llvm 3rdparty::asmjit cellos-kernel
-)
-
 
 # Io
 target_sources(rpcs3_emu PRIVATE
     Io/Buzz.cpp
     Io/camera_config.cpp
     Io/Dimensions.cpp
+    Io/evdev_gun_handler.cpp
     Io/GameTablet.cpp
+    Io/gem_config.cpp
     Io/GHLtar.cpp
     Io/GunCon3.cpp
     Io/Infinity.cpp
     Io/interception.cpp
+    Io/KamenRider.cpp
     Io/KeyboardHandler.cpp
     Io/midi_config_types.cpp
     Io/mouse_config.cpp
@@ -177,6 +164,7 @@ target_sources(rpcs3_emu PRIVATE
     Io/pad_config_types.cpp
     Io/pad_types.cpp
     Io/PadHandler.cpp
+    Io/ps_move_data.cpp
     Io/rb3drums_config.cpp
     Io/RB3MidiDrums.cpp
     Io/RB3MidiGuitar.cpp
@@ -187,12 +175,11 @@ target_sources(rpcs3_emu PRIVATE
     Io/TopShotFearmaster.cpp
     Io/Turntable.cpp
     Io/usb_device.cpp
+    Io/usb_microphone.cpp
     Io/usb_vfs.cpp
     Io/usio.cpp
-)
-
-target_link_libraries(rpcs3_emu PRIVATE
-    3rdparty::rtmidi
+    Io/LogitechG27.cpp
+    Io/LogitechG27Config.cpp
 )
 
 # Np
@@ -209,6 +196,8 @@ target_sources(rpcs3_emu PRIVATE
     NP/np_requests.cpp
     NP/signaling_handler.cpp
     NP/np_structs_extra.cpp
+    NP/clans_client.cpp
+    NP/clans_config.cpp
     NP/rpcn_client.cpp
     NP/rpcn_config.cpp
     NP/rpcn_countries.cpp
@@ -250,8 +239,8 @@ target_sources(rpcs3_emu PRIVATE
     RSX/NV47/HW/nv406e.cpp
     RSX/NV47/HW/nv4097.cpp
     RSX/Overlays/FriendsList/overlay_friends_list_dialog.cpp
-    RSX/Overlays/HomeMenu/overlay_home_menu.cpp
     RSX/Overlays/HomeMenu/overlay_home_icons.cpp
+    RSX/Overlays/HomeMenu/overlay_home_menu.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu_components.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu_main_menu.cpp
     RSX/Overlays/HomeMenu/overlay_home_menu_message_box.cpp
@@ -291,18 +280,18 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Overlays/overlay_video.cpp
     RSX/Overlays/Shaders/shader_loading_dialog.cpp
     RSX/Overlays/Shaders/shader_loading_dialog_native.cpp
-    RSX/Program/CgBinaryFragmentProgram.cpp
-    RSX/Program/CgBinaryVertexProgram.cpp
-    RSX/Program/FragmentProgramDecompiler.cpp
     RSX/Program/Assembler/FPASM.cpp
     RSX/Program/Assembler/FPOpcodes.cpp
     RSX/Program/Assembler/FPToCFG.cpp
     RSX/Program/Assembler/Passes/FP/RegisterAnnotationPass.cpp
     RSX/Program/Assembler/Passes/FP/RegisterDependencyPass.cpp
+    RSX/Program/CgBinaryFragmentProgram.cpp
+    RSX/Program/CgBinaryVertexProgram.cpp
+    RSX/Program/FragmentProgramDecompiler.cpp
     RSX/Program/GLSLCommon.cpp
     RSX/Program/ProgramStateCache.cpp
-    RSX/Program/ShaderInterpreter.cpp
     RSX/Program/program_util.cpp
+    RSX/Program/ShaderInterpreter.cpp
     RSX/Program/SPIRVCommon.cpp
     RSX/Program/VertexProgramDecompiler.cpp
     RSX/GSFrameBase.cpp
@@ -317,7 +306,7 @@ target_sources(rpcs3_emu PRIVATE
     RSX/rsx_vertex_data.cpp
 )
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT APPLE)
     target_sources(rpcs3_emu PRIVATE
         RSX/GL/GLCommonDecompiler.cpp
         RSX/GL/GLCompute.cpp
@@ -338,6 +327,7 @@ if(NOT ANDROID)
         RSX/GL/glutils/buffer_object.cpp
         RSX/GL/glutils/capabilities.cpp
         RSX/GL/glutils/common.cpp
+        RSX/GL/glutils/ex.cpp
         RSX/GL/glutils/fbo.cpp
         RSX/GL/glutils/image.cpp
         RSX/GL/glutils/program.cpp
@@ -357,6 +347,7 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/vkutils/buffer_object.cpp
         RSX/VK/vkutils/chip_class.cpp
         RSX/VK/vkutils/commands.cpp
+        RSX/VK/vkutils/ex.cpp
         RSX/VK/vkutils/data_heap.cpp
         RSX/VK/vkutils/descriptors.cpp
         RSX/VK/vkutils/image.cpp
@@ -369,11 +360,13 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/vkutils/device.cpp
         RSX/VK/vkutils/sampler.cpp
         RSX/VK/vkutils/shared.cpp
+        RSX/VK/vkutils/unique_resource.cpp
         RSX/VK/VKAsyncScheduler.cpp
         RSX/VK/VKCommandStream.cpp
         RSX/VK/VKCommonDecompiler.cpp
         RSX/VK/VKCommonPipelineLayout.cpp
         RSX/VK/VKCompute.cpp
+        RSX/VK/VKDataHeapManager.cpp
         RSX/VK/VKDMA.cpp
         RSX/VK/VKDraw.cpp
         RSX/VK/VKFormats.cpp
@@ -396,24 +389,55 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/VKVertexBuffers.cpp
         RSX/VK/VKVertexProgram.cpp
         RSX/VK/VKTextureCache.cpp
+        RSX/VK/VulkanAPI.cpp
     )
+    if(APPLE)
+        target_sources(rpcs3_emu PRIVATE
+            RSX/VK/vkutils/metal_layer.mm
+        )
+    endif()
 endif()
+
+if(NOT WIN32)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+endif()
+find_package(Threads REQUIRED)
 
 target_link_libraries(rpcs3_emu
     PUBLIC
-        3rdparty::ffmpeg 3rdparty::sdl3
-        3rdparty::opengl 3rdparty::stblib
-        3rdparty::vulkan 3rdparty::glew
-        3rdparty::libusb 3rdparty::wolfssl
-        3rdparty::libcurl
+        3rdparty::llvm
+        3rdparty::asmjit
+        3rdparty::ffmpeg
+        3rdparty::sdl3
+        3rdparty::opengl
+        3rdparty::stblib
+        3rdparty::vulkan
+        3rdparty::glew
+        3rdparty::libusb
+        3rdparty::wolfssl
+        3rdparty::openal
+        3rdparty::cubeb
+        3rdparty::soundtouch
+        3rdparty::miniupnpc
+        3rdparty::libevdev
+        3rdparty::protobuf
+        3rdparty::pugixml
+        3rdparty::json
+        3rdparty::vulkanmemoryallocator
+        Threads::Threads
         Vulkan::Headers
         rpcsx::fw::ps3::api
         rpcsx::cpu::cell::ppu
         rpcsx::cpu::cell::ppu::semantic
         cellos-kernel
-
     PRIVATE
         3rdparty::glslang
+        3rdparty::libpng
+        3rdparty::rtmidi
+        3rdparty::yaml-cpp
+        3rdparty::zlib
+        3rdparty::zstd
+        3rdparty::libcurl
 )
 
 if(APPLE)

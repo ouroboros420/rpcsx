@@ -18,9 +18,8 @@ namespace rsx
 
 	static inline std::string_view location_tostring(u32 location)
 	{
-		ensure(location < 2);
 		constexpr const char* location_names[2] = {"CELL_GCM_LOCATION_LOCAL", "CELL_GCM_LOCATION_MAIN"};
-		return location_names[location];
+		return ::at32(location_names, location);
 	}
 
 	static inline u32 classify_location(u32 address)
@@ -109,7 +108,7 @@ namespace rsx
 
 		protected:
 			bool unit_enabled = false;        // The ZCULL unit is on
-			bool write_enabled = false;       // A surface in the ZCULL-monitored tile region has been loaded for rasterization
+			bool surface_active = false;         // A surface in the ZCULL-monitored tile region has been loaded for rasterization
 			bool stats_enabled = false;       // Collecting of ZCULL statistics is enabled (not same as pixels passing Z test!)
 			bool zpass_count_enabled = false; // Collecting of ZPASS statistics is enabled. If this is off, the counter does not increment
 			bool host_queries_active = false; // The backend/host is gathering Z data for the ZCULL unit

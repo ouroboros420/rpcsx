@@ -246,10 +246,8 @@ namespace iso_cache
 			}
 		}
 	}
-}
 
-namespace iso_cache
-{
+	// their 43a86c0: must stay in sync with the png_path save() writes above.
 	std::string get_icon_file_path(std::string_view cache_key)
 	{
 		return get_cache_dir() + get_cache_stem(cache_key) + ".png";

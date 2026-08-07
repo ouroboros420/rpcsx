@@ -9,9 +9,9 @@ namespace program_common
 		enum compiler_option : u32
 		{
 			// FS Mix-N-Match
-			COMPILER_OPT_ENABLE_TEXTURES       = (1 << 0),
-			COMPILER_OPT_ENABLE_DEPTH_EXPORT   = (1 << 1),
-			COMPILER_OPT_ENABLE_F32_EXPORT     = (1 << 2),
+			COMPILER_OPT_ENABLE_TEXTURES = (1 << 0),
+			COMPILER_OPT_ENABLE_DEPTH_EXPORT = (1 << 1),
+			COMPILER_OPT_ENABLE_F32_EXPORT = (1 << 2),
 			COMPILER_OPT_ENABLE_PACKING        = (1 << 3),
 			COMPILER_OPT_ENABLE_KIL            = (1 << 4),
 			COMPILER_OPT_ENABLE_STIPPLING      = (1 << 5),
@@ -55,16 +55,16 @@ namespace program_common
 		[[maybe_unused]] static std::string get_vertex_interpreter()
 		{
 			const char* s =
-			#include "../Program/GLSLInterpreter/VertexInterpreter.glsl"
-			;
+#include "../Program/GLSLInterpreter/VertexInterpreter.glsl"
+				;
 			return s;
 		}
 
 		[[maybe_unused]] static std::string get_fragment_interpreter()
 		{
 			const char* s =
-			#include "../Program/GLSLInterpreter/FragmentInterpreter.glsl"
-			;
+#include "../Program/GLSLInterpreter/FragmentInterpreter.glsl"
+				;
 			return s;
 		}
 
@@ -87,5 +87,5 @@ namespace program_common
 		};
 
 		interpreter_variants_t get_interpreter_variants();
-	}
-}
+	} // namespace interpreter
+} // namespace program_common

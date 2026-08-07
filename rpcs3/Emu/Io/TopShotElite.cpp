@@ -217,7 +217,7 @@ void usb_device_topshotelite::control_transfer(u8 bmRequestType, u8 bRequest, u1
 
 extern bool is_input_allowed();
 
-static void set_sensor_pos(struct TopShotElite_data* ts, s32 led_lx, s32 led_ly, s32 led_rx, s32 led_ry, s32 detect_l, s32 detect_r)
+static void set_sensor_pos(TopShotElite_data* ts, s32 led_lx, s32 led_ly, s32 led_rx, s32 led_ry, s32 detect_l, s32 detect_r)
 {
 	ts->led_lx_hi = led_lx >> 2;
 	ts->led_lx_lo = led_lx & 0x3;
@@ -248,7 +248,7 @@ void usb_device_topshotelite::interrupt_transfer(u32 buf_size, u8* buf, u32 /*en
 	transfer->expected_result = HC_CC_NOERR;
 	transfer->expected_time = get_timestamp() + 4000;
 
-	struct TopShotElite_data ts{};
+	TopShotElite_data ts{};
 	ts.dpad = Dpad_None;
 	ts.stick_lx = ts.stick_ly = ts.stick_rx = ts.stick_ry = 0x7f;
 	if (m_mode)
@@ -272,18 +272,18 @@ void usb_device_topshotelite::interrupt_transfer(u32 buf_size, u8* buf, u32 /*en
 
 	if (m_controller_index >= g_cfg_topshotelite.players.size())
 	{
-		topshotelite_log.warning("Top Shot Fearmaster controllers are only supported for Player1 to Player%d", g_cfg_topshotelite.players.size());
+		topshotelite_log.warning("Top Shot Elite controllers are only supported for Player1 to Player%d", g_cfg_topshotelite.players.size());
 		prepare_data(&ts, buf);
 		return;
 	}
 
 	bool up = false, right = false, down = false, left = false;
-	const auto input_callback = [&ts, &up, &down, &left, &right](topshotelite_btn btn, pad_button /*pad_button*/, u16 value, bool pressed, bool& /*abort*/)
+	const auto input_callback = [&ts, &up, &down, &left, &right](const emulated_pad_config<topshotelite_btn>::input_value& value, bool& /*abort*/)
 	{
-		if (!pressed)
+		if (!value.pressed)
 			return;
 
-		switch (btn)
+		switch (value.btn)
 		{
 		case topshotelite_btn::trigger: ts.btn_trigger |= 1; break;
 		case topshotelite_btn::reload: ts.btn_reload |= 1; break;
@@ -300,11 +300,11 @@ void usb_device_topshotelite::interrupt_transfer(u32 buf_size, u8* buf, u32 /*en
 		case topshotelite_btn::dpad_down: down = true; break;
 		case topshotelite_btn::dpad_left: left = true; break;
 		case topshotelite_btn::dpad_right: right = true; break;
-		case topshotelite_btn::ls_x: ts.stick_lx = static_cast<uint8_t>(value); break;
+		case topshotelite_btn::ls_x: ts.stick_lx = static_cast<uint8_t>(value.value); break;
 		// you know you have a «Top» controller when the games are programmed to ignore a perfect controller, so we have to simulate a drift
-		case topshotelite_btn::ls_y: ts.stick_ly = std::min(0xff, 1 + static_cast<uint8_t>(value)); break;
-		case topshotelite_btn::rs_x: ts.stick_rx = static_cast<uint8_t>(value); break;
-		case topshotelite_btn::rs_y: ts.stick_ry = static_cast<uint8_t>(value); break;
+		case topshotelite_btn::ls_y: ts.stick_ly = std::min(0xff, 1 + static_cast<uint8_t>(value.value)); break;
+		case topshotelite_btn::rs_x: ts.stick_rx = static_cast<uint8_t>(value.value); break;
+		case topshotelite_btn::rs_y: ts.stick_ry = static_cast<uint8_t>(value.value); break;
 		case topshotelite_btn::count: break;
 		}
 	};
@@ -316,7 +316,7 @@ void usb_device_topshotelite::interrupt_transfer(u32 buf_size, u8* buf, u32 /*en
 		const auto gamepad_handler = pad::get_pad_thread();
 		const auto& pads = gamepad_handler->GetPads();
 		const auto& pad = ::at32(pads, m_controller_index);
-		if (pad->m_port_status & CELL_PAD_STATUS_CONNECTED)
+		if (pad->is_connected() && !pad->is_copilot())
 		{
 			cfg->handle_input(pad, true, input_callback);
 		}

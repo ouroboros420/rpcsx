@@ -41,13 +41,13 @@ void semaphore_base::imp_wait()
 					// Add waiter
 					value += c_waiter;
 				}
-				else
-				{
-					return false;
-				}
+			else
+			{
+				return false;
+			}
 
-				return true;
-			}).first;
+			return true;
+		}).first;
 
 		if (value & c_value_mask)
 		{

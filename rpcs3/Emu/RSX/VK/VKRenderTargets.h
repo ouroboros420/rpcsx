@@ -160,7 +160,7 @@ namespace vk
 			// If we have driver support for FBO loops, set the usage flag for it.
 			if (vk::get_current_renderer()->get_framebuffer_loops_support())
 			{
-				return {VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, 0};
+				return { VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT };
 			}
 
 			// Workarounds to force transition to GENERAL to decompress.
@@ -195,7 +195,8 @@ namespace vk
 			case driver_vendor::HONEYKRISP:
 			case driver_vendor::PANVK:
 			case driver_vendor::ARM_MALI:
-			case driver_vendor::ADRENO:
+			case driver_vendor::TURNIP:
+			case driver_vendor::QUALCOMM_PROPRIETARY:
 				// These vendors need no special attachment-creation flags for FBO loops.
 				break;
 			}
@@ -350,7 +351,9 @@ namespace vk
 		{
 			if (!sink)
 			{
-				const auto [new_w, new_h] = rsx::apply_resolution_scale<true>(prev.width, prev.height,
+				const auto [new_w, new_h] = rsx::apply_resolution_scale<true>(
+					scaling_config,
+					prev.width, prev.height,
 					ref->get_surface_width<rsx::surface_metrics::pixels>(), ref->get_surface_height<rsx::surface_metrics::pixels>());
 
 				auto& dev = cmd.get_command_pool().get_owner();
@@ -368,6 +371,10 @@ namespace vk
 					ref->format_class());
 
 				sink->add_ref();
+
+				sink->sample_layout = ref->sample_layout;
+				sink->resolution_scaling_config = scaling_config;
+
 				sink->set_spp(ref->get_spp());
 				sink->format_info = ref->format_info;
 				sink->memory_usage_flags = rsx::surface_usage_flags::storage;
@@ -538,8 +545,8 @@ namespace vk
 
 			return (surface->info.format == format &&
 					surface->get_spp() == get_format_sample_count(antialias) &&
-					surface->matches_dimensions(static_cast<u16>(width), static_cast<u16>(height))) &&
-					surface->resolution_scaling_config == scaling_config;
+				surface->matches_dimensions(static_cast<u16>(width), static_cast<u16>(height))) &&
+				surface->resolution_scaling_config == scaling_config;
 		}
 
 		static bool surface_matches_properties(
@@ -700,4 +707,3 @@ namespace vk
 		void trim(vk::command_buffer& cmd, rsx::problem_severity memory_pressure);
 	};
 } // namespace vk
-// h

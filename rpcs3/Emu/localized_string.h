@@ -1,6 +1,5 @@
 #pragma once
 
-#include <string>
 #include "localized_string_id.h"
 #include "util/StrFmt.h"
 

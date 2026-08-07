@@ -21,7 +21,7 @@ std::string GLFragmentDecompilerThread::getFunction(FUNCTION f)
 	return glsl::getFunctionImpl(f);
 }
 
-std::string GLFragmentDecompilerThread::compareFunction(COMPARE f, const std::string& Op0, const std::string& Op1)
+std::string GLFragmentDecompilerThread::compareFunction(COMPARE f, std::string_view Op0, std::string_view Op1)
 {
 	return glsl::compareFunctionImpl(f, Op0, Op1);
 }
@@ -33,7 +33,7 @@ void GLFragmentDecompilerThread::insertHeader(std::stringstream& OS)
 
 	if (device_props.has_native_half_support)
 	{
-		const auto driver_caps = gl::get_driver_caps();
+		const auto& driver_caps = gl::get_driver_caps();
 		if (driver_caps.NV_gpu_shader5_supported)
 		{
 			required_extensions.push_back("GL_NV_gpu_shader5");
@@ -47,7 +47,7 @@ void GLFragmentDecompilerThread::insertHeader(std::stringstream& OS)
 	if (properties.multisampled_sampler_mask)
 	{
 		// Requires this extension or GLSL 450
-		const auto driver_caps = gl::get_driver_caps();
+		const auto& driver_caps = gl::get_driver_caps();
 		if (driver_caps.glsl_version.version >= 450)
 		{
 			gl_version = 450;
@@ -90,10 +90,10 @@ void GLFragmentDecompilerThread::insertOutputs(std::stringstream& OS)
 {
 	const std::pair<std::string, std::string> table[] =
 		{
-			{"ocol0", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r0" : "h0"},
-			{"ocol1", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r2" : "h4"},
-			{"ocol2", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r3" : "h6"},
-			{"ocol3", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r4" : "h8"},
+		{ "ocol0", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r0" : "h0" },
+		{ "ocol1", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r2" : "h4" },
+		{ "ocol2", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r3" : "h6" },
+		{ "ocol3", m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS ? "r4" : "h8" },
 		};
 
 	const bool float_type = (m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) || !device_props.has_native_half_support;
@@ -112,7 +112,7 @@ void GLFragmentDecompilerThread::insertOutputs(std::stringstream& OS)
 			continue;
 		}
 
-		OS << "layout(location=" << i << ") out vec4 " << table[i].first << ";\n";
+			OS << "layout(location=" << i << ") out vec4 " << table[i].first << ";\n";
 	}
 }
 
@@ -164,41 +164,51 @@ void GLFragmentDecompilerThread::insertConstants(std::stringstream& OS)
 		}
 	}
 
-	OS << "\n";
-
-	// The upstream decompiler addresses fragment constants by index via _fetch_constant(N)
-	// over a flat vec4 array (mirrors the VK backend). Declare that array + the macro so the
-	// shared decompiler output is valid for GL too; the flat CPU fill is unchanged.
-	if (!properties.constant_offsets.empty())
+	if (m_prog.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
 	{
-		OS << "layout(std140, binding = " << GL_FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT << ") uniform FragmentConstantsBuffer\n";
-		OS << "{\n";
-		OS << "	vec4 fc[" << properties.constant_offsets.size() << "];\n";
-		OS << "};\n";
-		OS << "#define _fetch_constant(x) fc[x]\n\n";
+		const auto frag_depth_type = (m_prog.ctrl & RSX_SHADER_CONTROL_MULTISAMPLED_ZBUFFER)
+			? "sampler2DMS"
+			: "sampler2D";
+
+		OS << "uniform " << frag_depth_type << " frag_depth;\n";
 	}
 
-	OS << "layout(std140, binding = " << GL_FRAGMENT_STATE_BIND_SLOT << ") uniform FragmentStateBuffer\n";
-	OS << "{\n";
-	OS << "	float fog_param0;\n";
-	OS << "	float fog_param1;\n";
-	OS << "	uint rop_control;\n";
-	OS << "	float alpha_ref;\n";
-	OS << "	uint reserved;\n";
-	OS << "	uint fog_mode;\n";
-	OS << "	float wpos_scale;\n";
-	OS << "	float wpos_bias;\n";
-	OS << "};\n\n";
+	OS << "\n";
 
-	OS << "layout(std140, binding = " << GL_FRAGMENT_TEXTURE_PARAMS_BIND_SLOT << ") uniform TextureParametersBuffer\n";
-	OS << "{\n";
-	OS << "	sampler_info texture_parameters[16];\n";
-	OS << "};\n\n";
+	if (!properties.constant_offsets.empty())
+	{
+		OS <<
+			"layout(std140, binding = " << GL_FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT << ") uniform FragmentConstantsBuffer\n"
+			"{\n"
+			"	vec4 fc[" << properties.constant_offsets.size() << "];\n"
+			"};\n"
+			"#define _fetch_constant(x) fc[x]\n\n";
+	}
 
-	OS << "layout(std140, binding = " << GL_RASTERIZER_STATE_BIND_SLOT << ") uniform RasterizerHeap\n";
-	OS << "{\n";
-	OS << "	uvec4 stipple_pattern[8];\n";
-	OS << "};\n\n";
+	OS <<
+	"layout(std140, binding = " << GL_FRAGMENT_STATE_BIND_SLOT << ") uniform FragmentStateBuffer\n"
+	"{\n"
+	"	float fog_param0;\n"
+	"	float fog_param1;\n"
+	"	uint rop_control;\n"
+	"	float alpha_ref;\n"
+	"	uint fog_mode;\n"
+	"	float wpos_scale;\n"
+	"	vec2 wpos_bias;\n"
+	"};\n\n"
+
+	"layout(std140, binding = " << GL_FRAGMENT_TEXTURE_PARAMS_BIND_SLOT << ") uniform TextureParametersBuffer\n"
+	"{\n"
+	"	sampler_info texture_parameters[16];\n"
+	"};\n\n"
+
+	"layout(std140, binding = " << GL_RASTERIZER_STATE_BIND_SLOT << ") uniform RasterizerHeap\n"
+	"{\n"
+	"	uvec4 stipple_pattern[8];\n"
+	"};\n\n"
+
+	"#define texture_base_index 0\n"
+	"#define TEX_PARAM(index) texture_parameters[index]\n\n";
 }
 
 void GLFragmentDecompilerThread::insertGlobalFunctions(std::stringstream& OS)
@@ -216,6 +226,7 @@ void GLFragmentDecompilerThread::insertGlobalFunctions(std::stringstream& OS)
 	m_shader_props.require_linear_to_srgb = properties.has_pkg;
 	m_shader_props.require_fog_read = properties.in_register_mask & in_fogc;
 	m_shader_props.emulate_shadow_compare = device_props.emulate_depth_compare;
+
 	m_shader_props.low_precision_tests = ::gl::get_driver_caps().vendor_NVIDIA && !(m_prog.ctrl & RSX_SHADER_CONTROL_ATTRIBUTE_INTERPOLATION);
 	m_shader_props.disable_early_discard = !::gl::get_driver_caps().vendor_NVIDIA;
 	m_shader_props.supports_native_fp16 = device_props.has_native_half_support;
@@ -334,6 +345,14 @@ void GLFragmentDecompilerThread::insertMainEnd(std::stringstream& OS)
 	OS << "\n"
 	   << "	fs_main();\n\n";
 
+	if (m_prog.ctrl & RSX_SHADER_CONTROL_DISABLE_EARLY_Z)
+	{
+		// This is effectively pointless code, but good enough to trick the GPU to skip early Z
+		OS <<
+			"	// Insert pseudo-barrier sequence to disable early-Z\n"
+			"	gl_FragDepth = gl_FragCoord.z;\n\n";
+	}
+
 	glsl::insert_rop(OS, m_shader_props);
 
 	if (m_prog.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
@@ -374,21 +393,14 @@ void GLFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 
 	if (g_cfg.video.shader_precision == gpu_preset_level::low)
 	{
-		const auto driver_caps = gl::get_driver_caps();
+		const auto& driver_caps = gl::get_driver_caps();
 		decompiler.device_props.has_native_half_support = driver_caps.NV_gpu_shader5_supported || driver_caps.AMD_gpu_shader_half_float_supported;
 		decompiler.device_props.has_low_precision_rounding = driver_caps.vendor_NVIDIA;
 	}
 
 	decompiler.Task();
 
-	// Source the constant offset cache from the decompiler's index-ordered constant_offsets
-	// (mirrors the VK backend); the old 'fcN' param-name parsing no longer applies because
-	// the upstream decompiler emits no named constant params.
-	for (const auto offset : decompiler.properties.constant_offsets)
-	{
-		FragmentConstantOffsetCache.push_back(offset);
-	}
-
+	constant_offsets = std::move(decompiler.properties.constant_offsets);
 	shader.create(::glsl::program_domain::glsl_fragment_program, source);
 	id = shader.id();
 }

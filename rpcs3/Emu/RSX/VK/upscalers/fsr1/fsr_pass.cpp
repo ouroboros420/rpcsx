@@ -58,7 +58,10 @@ namespace vk
 			m_src = fmt::replace_all(m_src, replacement_table);
 
 			// Fill with 0 to avoid sending incomplete/unused variables to the GPU
-			memset(m_constants_buf, 0, sizeof(m_constants_buf));
+			std::fill(m_constants_buf.begin(), m_constants_buf.end(), 0u);
+
+			// No ssbo usage
+			ssbo_count = 0;
 
 			// Enable push constants
 			use_push_constants = true;
@@ -67,32 +70,29 @@ namespace vk
 			create();
 		}
 
-		std::vector<std::pair<VkDescriptorType, u8>> fsr_pass::get_descriptor_layout()
-		{
-			return {
-				{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
-				{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
-		}
-
-		void fsr_pass::declare_inputs()
+		std::vector<glsl::program_input> fsr_pass::get_inputs()
 		{
 			std::vector<vk::glsl::program_input> inputs =
 				{
-					{::glsl::program_domain::glsl_compute_program,
-						vk::glsl::program_input_type::input_type_texture,
-						{}, {},
+					glsl::program_input::make(
+						::glsl::program_domain::glsl_compute_program,
+						"InputTexture",
+						vk::glsl::input_type_texture,
 						0,
-						"InputTexture"},
-					{::glsl::program_domain::glsl_compute_program,
-						vk::glsl::program_input_type::input_type_texture,
-						{}, {},
-						1,
-						"OutputTexture"}};
+						0),
+					glsl::program_input::make(
+						::glsl::program_domain::glsl_compute_program,
+						"OutputTexture",
+						vk::glsl::input_type_storage_texture,
+						0,
+						1)};
 
-			m_program->load_uniforms(inputs);
+			auto result = compute_task::get_inputs();
+			result.insert(result.end(), inputs.begin(), inputs.end());
+			return result;
 		}
 
-		void fsr_pass::bind_resources()
+		void fsr_pass::bind_resources(const vk::command_buffer& /*cmd*/)
 		{
 			// Bind relevant stuff
 			if (!m_sampler)
@@ -103,8 +103,8 @@ namespace vk
 					VK_FALSE, 0.f, 1.f, 0.f, 0.f, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
 			}
 
-			m_program->bind_uniform({m_sampler->value, m_input_image->value, m_input_image->image()->current_layout}, "InputTexture", VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_descriptor_set);
-			m_program->bind_uniform({VK_NULL_HANDLE, m_output_image->value, m_output_image->image()->current_layout}, "OutputTexture", VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, m_descriptor_set);
+			m_program->bind_uniform({ *m_input_image, *m_sampler }, 0, 0);
+			m_program->bind_uniform({ *m_output_image }, 0, 1);
 		}
 
 		void fsr_pass::run(const vk::command_buffer& cmd, vk::viewable_image* src, vk::viewable_image* dst, const size2u& input_size, const size2u& output_size)
@@ -113,6 +113,11 @@ namespace vk
 			m_output_image = dst->get_view(rsx::default_remap_vector.with_encoding(VK_REMAP_IDENTITY));
 			m_input_size = input_size;
 			m_output_size = output_size;
+
+			if (!m_program)
+			{
+				load_program(cmd);
+			}
 
 			configure(cmd);
 
@@ -151,7 +156,8 @@ namespace vk
 				static_cast<f32>(src_image->width()), static_cast<f32>(src_image->height()),    // Size of the raw image to upscale (in case viewport does not cover it all)
 				static_cast<f32>(m_output_size.width), static_cast<f32>(m_output_size.height)); // Size of output viewport (target size)
 
-			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf);
+			ensure(push_constants_size <= (m_constants_buf.size() * sizeof(decltype(m_constants_buf)::value_type)));
+			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf.data());
 		}
 
 		rcas_pass::rcas_pass()
@@ -168,10 +174,11 @@ namespace vk
 		void rcas_pass::configure(const vk::command_buffer& cmd)
 		{
 			// 0 is actually the sharpest with 2 being the chosen limit. Each progressive unit 'halves' the sharpening intensity.
-			auto cas_attenuation = 2.f - (g_cfg.video.vk.rcas_sharpening_intensity / 50.f);
+			auto cas_attenuation = 2.f - (g_cfg.video.rcas_sharpening_intensity / 50.f);
 			FsrRcasCon(&m_constants_buf[0], cas_attenuation);
 
-			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf);
+			ensure(push_constants_size <= (m_constants_buf.size() * sizeof(decltype(m_constants_buf)::value_type)));
+			VK_GET_SYMBOL(vkCmdPushConstants)(cmd, m_program->layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constants_size, m_constants_buf.data());
 		}
 
 	} // Namespace FidelityFX

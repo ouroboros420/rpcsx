@@ -74,6 +74,7 @@ struct music_decode
 			cellMusicDecode.notice("set_decode_command(START): context: %s", current_selection_context.to_string());
 
 			music_selection_context context = current_selection_context;
+			context.current_track = context.first_track;
 
 			for (usz i = 0; i < context.playlist.size(); i++)
 			{
@@ -196,7 +197,7 @@ error_code cell_music_decode_read(vm::ptr<void> buf, vm::ptr<u32> startTime, u64
 
 	if (dec.decoder.m_size == 0)
 	{
-		return CELL_MUSIC_DECODE_ERROR_NO_LPCM_DATA;
+		return { CELL_MUSIC_DECODE_ERROR_NO_LPCM_DATA, "m_size == 0" };
 	}
 
 	ensure(dec.decoder.m_size >= dec.read_pos);
@@ -231,7 +232,7 @@ error_code cell_music_decode_read(vm::ptr<void> buf, vm::ptr<u32> startTime, u64
 
 	if (size_to_read == 0)
 	{
-		return CELL_MUSIC_DECODE_ERROR_NO_LPCM_DATA; // TODO: speculative
+		return { CELL_MUSIC_DECODE_ERROR_NO_LPCM_DATA, "size_to_read == 0" }; // TODO: speculative
 	}
 
 	std::memcpy(buf.get_ptr(), &::at32(dec.decoder.data, dec.read_pos), size_to_read);
@@ -385,6 +386,12 @@ error_code cellMusicDecodeSetDecodeCommand(s32 command)
 			dec.func(ppu, CELL_MUSIC_DECODE_EVENT_SET_DECODE_COMMAND_RESULT, vm::addr_t(s32{result}), dec.userData);
 			return CELL_OK;
 		});
+
+	//sysutil_register_cb([&dec, command](ppu_thread& ppu) -> s32
+	//{
+	//	dec.func(ppu, CELL_MUSIC_DECODE_EVENT_STATUS_NOTIFICATION, vm::addr_t(command), dec.userData);
+	//	return CELL_OK;
+	//});
 
 	return CELL_OK;
 }

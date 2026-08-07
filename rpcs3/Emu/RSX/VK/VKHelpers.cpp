@@ -15,6 +15,17 @@
 
 namespace vk
 {
+	std::string ubo_array_dim(u32 element_size)
+	{
+		const auto* pdev = vk::get_current_renderer();
+		if (!pdev || pdev->get_unsized_array_support())
+		{
+			return "[]";
+		}
+
+		return fmt::format("[%u]", pdev->ubo_array_bound(element_size));
+	}
+
 	extern chip_class g_chip_class;
 
 	std::unordered_map<u32, std::unique_ptr<vk::compute_task>> g_compute_tasks;
@@ -149,7 +160,8 @@ namespace vk
 		case driver_vendor::ARM_MALI:
 			// Needs more testing
 			break;
-		case driver_vendor::ADRENO:
+		case driver_vendor::TURNIP:
+		case driver_vendor::QUALCOMM_PROPRIETARY:
 			// Primary Android target (Qualcomm proprietary and Mesa Turnip). No global driver
 			// quirks needed here; per-feature handling lives where the relevant caps are probed.
 			break;

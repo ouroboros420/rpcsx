@@ -53,8 +53,7 @@ namespace vk
 			auto new_texture = static_cast<vk::viewable_image*>(image);
 			ensure(!exists() || !is_managed() || vram_texture == new_texture);
 
-			// Don't fire the swap-out/swap-in handlers when replacing self (upstream f4dc18c87)
-			if (vram_texture && vram_texture != new_texture && !managed_texture && get_protection() == utils::protection::no)
+			if (vram_texture != new_texture && !managed_texture && get_protection() == utils::protection::no)
 			{
 				// In-place image swap, still locked. Likely a color buffer that got rebound as depth buffer or vice-versa.
 				vk::as_rtt(vram_texture)->on_swap_out();
@@ -305,7 +304,7 @@ namespace vk
 			if (const auto tiled_region = rsx::get_current_renderer()->get_tiled_memory_region(range))
 			{
 				auto real_data = vm::get_super_ptr<u8>(range.start);
-				auto out_data = std::vector<u8>(tiled_region.tile->size);
+				auto out_data = rsx::simple_array<u8>(tiled_region.tile->size);
 				rsx::tile_texel_data<u32>(
 					out_data.data(),
 					real_data,
@@ -328,7 +327,7 @@ namespace vk
 
 				// Read-modify-write to avoid corrupting already resident memory outside texture region
 				void* data = get_ptr(range.start);
-				std::vector<u8> tmp_data(rsx_pitch * height);
+				rsx::simple_array<u8> tmp_data(rsx_pitch * height);
 				std::memcpy(tmp_data.data(), data, tmp_data.size());
 
 				switch (gcm_format)
@@ -421,7 +420,8 @@ namespace vk
 		{
 			initialize_image_contents = 1,
 			do_not_reuse = 2,
-			shareable = 4
+			shareable = 4,
+			mutable_format = 8
 		};
 
 		void on_section_destroyed(cached_texture_section& tex) override;
@@ -457,25 +457,19 @@ namespace vk
 		vk::image_view* create_temporary_subresource_view_impl(vk::command_buffer& cmd, vk::image* source, VkImageType image_type, VkImageViewType view_type,
 			u32 gcm_format, u16 x, u16 y, u16 w, u16 h, u16 d, u8 mips, const rsx::texture_channel_remap_t& remap_vector, bool copy);
 
-		vk::image_view* create_temporary_subresource_view(vk::command_buffer& cmd, vk::image* source, u32 gcm_format,
-			u16 x, u16 y, u16 w, u16 h, const rsx::texture_channel_remap_t& remap_vector) override;
+		vk::image_view* create_temporary_subresource_view(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
-		vk::image_view* create_temporary_subresource_view(vk::command_buffer& cmd, vk::image** source, u32 gcm_format,
-			u16 x, u16 y, u16 w, u16 h, const rsx::texture_channel_remap_t& remap_vector) override;
+		vk::image_view* generate_cubemap_from_images(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
-		vk::image_view* generate_cubemap_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 size,
-			const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector) override;
+		vk::image_view* generate_3d_from_2d_images(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
-		vk::image_view* generate_3d_from_2d_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height, u16 depth,
-			const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector) override;
+		vk::image_view* generate_atlas_from_images(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
-		vk::image_view* generate_atlas_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height,
-			const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector) override;
-
-		vk::image_view* generate_2d_mipmaps_from_images(vk::command_buffer& cmd, u32 gcm_format, u16 width, u16 height,
-			const rsx::simple_array<copy_region_descriptor>& sections_to_copy, const rsx::texture_channel_remap_t& remap_vector) override;
+		vk::image_view* generate_2d_mipmaps_from_images(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
 		void release_temporary_subresource(vk::image_view* view) override;
+
+		void initialize_subresource_from_memory(vk::command_buffer& cmd, vk::image* dst, const deferred_subresource& desc, rsx::texture_dimension_extended type) const;
 
 		void update_image_contents(vk::command_buffer& cmd, vk::image_view* dst_view, vk::image* src, u16 width, u16 height) override;
 

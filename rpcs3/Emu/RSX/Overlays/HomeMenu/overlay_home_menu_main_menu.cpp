@@ -37,36 +37,38 @@ namespace rsx
 			m_sliding_animation.type = animation_type::ease_in_out_cubic;
 
 			add_item(home_menu::fa_icon::back, get_localized_string(localized_string_id::HOME_MENU_RESUME), [](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
+				{
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
 
-				rsx_log.notice("User selected resume in home menu");
-				return page_navigation::exit;
-			});
+					rsx_log.notice("User selected resume in home menu");
+					return page_navigation::exit;
+				});
 
 			add_page(home_menu::fa_icon::settings, std::make_shared<home_menu_settings>(x, y, width, height, use_separators, this));
 
 			if (rsx::overlays::friends_list_dialog::rpcn_configured())
 			{
 				add_item(home_menu::fa_icon::friends, get_localized_string(localized_string_id::HOME_MENU_FRIENDS), [](pad_button btn) -> page_navigation
-				{
-					if (btn != pad_button::cross) return page_navigation::stay;
-
-					rsx_log.notice("User selected friends in home menu");
-					Emu.CallFromMainThread([]()
 					{
-						if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
-						{
-							const error_code result = manager->create<rsx::overlays::friends_list_dialog>()->show(true, [](s32 status)
-							{
-								rsx_log.notice("Closing friends list with status %d", status);
-							});
+						if (btn != pad_button::cross)
+							return page_navigation::stay;
 
-							(result ? rsx_log.error : rsx_log.notice)("Opened friends list with result %d", s32{result});
-						}
+						rsx_log.notice("User selected friends in home menu");
+						Emu.CallFromMainThread([]()
+							{
+								if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
+								{
+									const error_code result = manager->create<rsx::overlays::friends_list_dialog>()->show(true, [](s32 status)
+										{
+											rsx_log.notice("Closing friends list with status %d", status);
+										});
+
+									(result ? rsx_log.error : rsx_log.notice)("Opened friends list with result %d", s32{result});
+								}
+							});
+						return page_navigation::stay;
 					});
-					return page_navigation::stay;
-				});
 			}
 			else
 			{
@@ -83,37 +85,40 @@ namespace rsx
 			if (!trop_name.empty())
 			{
 				add_item(home_menu::fa_icon::trophy, get_localized_string(localized_string_id::HOME_MENU_TROPHIES), [trop_name = std::move(trop_name)](pad_button btn) -> page_navigation
-				{
-					if (btn != pad_button::cross) return page_navigation::stay;
-
-					rsx_log.notice("User selected trophies in home menu");
-					Emu.CallFromMainThread([trop_name]()
 					{
-						if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
-						{
-							manager->create<rsx::overlays::trophy_list_dialog>()->show(trop_name);
-						}
+						if (btn != pad_button::cross)
+							return page_navigation::stay;
+
+						rsx_log.notice("User selected trophies in home menu");
+					Emu.CallFromMainThread([trop_name]()
+							{
+								if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
+								{
+									manager->create<rsx::overlays::trophy_list_dialog>()->show(trop_name);
+								}
+							});
+						return page_navigation::stay;
 					});
-					return page_navigation::stay;
-				});
 			}
 
 			add_item(home_menu::fa_icon::screenshot, get_localized_string(localized_string_id::HOME_MENU_SCREENSHOT), [](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
+				{
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
 
-				rsx_log.notice("User selected screenshot in home menu");
+					rsx_log.notice("User selected screenshot in home menu");
 				return page_navigation::exit_for_screenshot;
-			});
+				});
 
 			add_item(home_menu::fa_icon::video_camera, get_localized_string(localized_string_id::HOME_MENU_RECORDING), [](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
+				{
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
 
-				rsx_log.notice("User selected recording in home menu");
-				g_user_asked_for_recording = true;
-				return page_navigation::exit;
-			});
+					rsx_log.notice("User selected recording in home menu");
+					g_user_asked_for_recording = true;
+					return page_navigation::exit;
+				});
 
 			add_item(home_menu::fa_icon::maximize, get_localized_string(localized_string_id::HOME_MENU_TOGGLE_FULLSCREEN), [](pad_button btn) -> page_navigation
 			{
@@ -128,31 +133,33 @@ namespace rsx
 			add_page(home_menu::fa_icon::floppy, std::make_shared<home_menu_savestate>(x, y, width, height, use_separators, this));
 
 			add_item(home_menu::fa_icon::restart, get_localized_string(localized_string_id::HOME_MENU_RESTART), [](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
-
-				rsx_log.notice("User selected restart in home menu");
-
-				Emu.CallFromMainThread([]()
 				{
-					// Make sure we keep the game window opened
-					Emu.SetContinuousMode(true);
-					Emu.Restart(true);
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
+
+					rsx_log.notice("User selected restart in home menu");
+
+					Emu.CallFromMainThread([]()
+						{
+							// Make sure we keep the game window opened
+							Emu.SetContinuousMode(true);
+							Emu.Restart(true);
+						});
+					return page_navigation::exit;
 				});
-				return page_navigation::exit;
-			});
 
 			add_item(home_menu::fa_icon::poweroff, get_localized_string(localized_string_id::HOME_MENU_EXIT_GAME), [](pad_button btn) -> page_navigation
-			{
-				if (btn != pad_button::cross) return page_navigation::stay;
-
-				rsx_log.notice("User selected exit game in home menu");
-				Emu.CallFromMainThread([]
 				{
-					Emu.GracefulShutdown(true, true);
+					if (btn != pad_button::cross)
+						return page_navigation::stay;
+
+					rsx_log.notice("User selected exit game in home menu");
+					Emu.CallFromMainThread([]
+						{
+							Emu.GracefulShutdown(true, true);
+						});
+					return page_navigation::stay;
 				});
-				return page_navigation::stay;
-			});
 
 			apply_layout();
 		}
@@ -302,5 +309,5 @@ namespace rsx
 			m_sliding_animation.apply(compiled_resources);
 			return compiled_resources;
 		}
-	}
-}
+	} // namespace overlays
+} // namespace rsx

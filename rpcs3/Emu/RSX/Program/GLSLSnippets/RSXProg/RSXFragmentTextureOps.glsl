@@ -33,8 +33,8 @@ R"(
 	bool _texture_bx2_active = false;
 	#define _enable_texture_expand(index) \
 		do { \
-			if (_test_bit(texture_parameters[index].flags, FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT)) { \
-				_texture_flag_override = SIGN_EXPAND_MASK & (_get_bits(texture_parameters[index].remap, 16, 4) << EXPAND_A_BIT); \
+			if (_test_bit(TEX_PARAM(index).flags, FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT)) { \
+				_texture_flag_override = SIGN_EXPAND_MASK & (_get_bits(TEX_PARAM(index).remap, 16, 4) << EXPAND_A_BIT); \
 				_texture_flag_erase = GAMMA_CTRL_MASK; \
 				_texture_bx2_active = true; \
 			} \
@@ -45,9 +45,9 @@ R"(
 			_texture_flag_erase = 0; \
 			_texture_bx2_active = false; \
 		} while (false)
-	#define TEX_FLAGS(index) ((texture_parameters[index].flags & ~(_texture_flag_erase)) | _texture_flag_override)
+	#define TEX_FLAGS(index) ((TEX_PARAM(index).flags & ~(_texture_flag_erase)) | _texture_flag_override)
 #elif defined(_ENABLE_TEXTURE_ALPHA_KILL) || defined(_ENABLE_FORMAT_CONVERSION) || defined(_ENABLE_DEPTH_FORMAT_RECONSTRUCTION) || defined(_ENABLE_TEXTURE_MULTISAMPLE)
-	#define TEX_FLAGS(index) (texture_parameters[index].flags)
+	#define TEX_FLAGS(index) (TEX_PARAM(index).flags)
 #else
 	#define TEX_FLAGS(index) 0
 #endif
@@ -55,9 +55,9 @@ R"(
 #define TEX_NAME(index) tex##index
 #define TEX_NAME_STENCIL(index) tex##index##_stencil
 
-#define COORD_SCALE1(index, coord1) _texcoord_xform(coord1, texture_parameters[index])
-#define COORD_SCALE2(index, coord2) _texcoord_xform(coord2, texture_parameters[index])
-#define COORD_SCALE3(index, coord3) _texcoord_xform(coord3, texture_parameters[index])
+#define COORD_SCALE1(index, coord1) _texcoord_xform(coord1, TEX_PARAM(index))
+#define COORD_SCALE2(index, coord2) _texcoord_xform(coord2, TEX_PARAM(index))
+#define COORD_SCALE3(index, coord3) _texcoord_xform(coord3, TEX_PARAM(index))
 #define COORD_PROJ1(index, coord2) COORD_SCALE1(index, coord2.x / coord2.y)
 #define COORD_PROJ2(index, coord3) COORD_SCALE2(index, coord3.xy / coord3.z)
 #define COORD_PROJ3(index, coord4) COORD_SCALE3(index, coord4.xyz / coord4.w)
@@ -80,9 +80,9 @@ R"(
 
 #ifdef _ENABLE_SHADOW
 #ifdef _EMULATED_TEXSHADOW
-	#define SHADOW_COORD(index, coord3) _texcoord_xform_shadow(coord3, texture_parameters[index])
-	#define SHADOW_COORD4(index, coord4) _texcoord_xform_shadow(coord4, texture_parameters[index])
-	#define SHADOW_COORD_PROJ(index, coord4) _texcoord_xform_shadow(coord4.xyz / coord4.w, texture_parameters[index])
+	#define SHADOW_COORD(index, coord3) _texcoord_xform_shadow(coord3, TEX_PARAM(index))
+	#define SHADOW_COORD4(index, coord4) _texcoord_xform_shadow(coord4, TEX_PARAM(index))
+	#define SHADOW_COORD_PROJ(index, coord4) _texcoord_xform_shadow(coord4.xyz / coord4.w, TEX_PARAM(index))
 
 	#define TEX2D_SHADOW(index, coord3) texture(TEX_NAME(index), SHADOW_COORD(index, coord3))
 	#define TEX3D_SHADOW(index, coord4) texture(TEX_NAME(index), SHADOW_COORD4(index, coord4))

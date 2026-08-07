@@ -17,37 +17,35 @@ namespace rsx
 		using namespace rsx::assembler;
 
 		static const std::string reg_table[] =
-		{
-			"wpos",
-			"diff_color", "spec_color",
-			"fogc",
-			"tc0", "tc1", "tc2", "tc3", "tc4", "tc5", "tc6", "tc7", "tc8", "tc9",
-			"ssa"
-		};
+			{
+				"wpos",
+				"diff_color", "spec_color",
+				"fogc",
+				"tc0", "tc1", "tc2", "tc3", "tc4", "tc5", "tc6", "tc7", "tc8", "tc9",
+				"ssa"};
 
 		static const std::vector<RegisterRef> s_fp32_output_set =
-		{
-			{.reg {.id = 0, .f16 = false }, .mask = 0xf },
-			{.reg {.id = 2, .f16 = false }, .mask = 0xf },
-			{.reg {.id = 3, .f16 = false }, .mask = 0xf },
-			{.reg {.id = 4, .f16 = false }, .mask = 0xf },
-		};
+			{
+				{.reg{.id = 0, .f16 = false}, .mask = 0xf},
+				{.reg{.id = 2, .f16 = false}, .mask = 0xf},
+				{.reg{.id = 3, .f16 = false}, .mask = 0xf},
+				{.reg{.id = 4, .f16 = false}, .mask = 0xf},
+			};
 
 		static const std::vector<RegisterRef> s_fp16_output_set =
-		{
-			{.reg {.id = 0, .f16 = true }, .mask = 0xf },
-			{.reg {.id = 4, .f16 = true }, .mask = 0xf },
-			{.reg {.id = 6, .f16 = true }, .mask = 0xf },
-			{.reg {.id = 8, .f16 = true }, .mask = 0xf },
-		};
+			{
+				{.reg{.id = 0, .f16 = true}, .mask = 0xf},
+				{.reg{.id = 4, .f16 = true}, .mask = 0xf},
+				{.reg{.id = 6, .f16 = true}, .mask = 0xf},
+				{.reg{.id = 8, .f16 = true}, .mask = 0xf},
+			};
 
 		static const RegisterRef s_z_export_reg =
-		{
-			.reg {.id = 1, .f16 = false },
-			.mask = (1u << 2)
-		};
+			{
+				.reg{.id = 1, .f16 = false},
+				.mask = (1u << 2)};
 	}
-}
+} // namespace rsx
 
 using namespace rsx::fragment_program;
 using namespace rsx::assembler;
@@ -81,16 +79,16 @@ std::vector<RegisterRef> get_fragment_program_output_set(u32 ctrl, u32 mrt_count
 	return result;
 }
 
-FragmentProgramDecompiler::FragmentProgramDecompiler(const RSXFragmentProgram &prog, u32& size)
-	: m_size(size)
-	, m_prog(prog)
+FragmentProgramDecompiler::FragmentProgramDecompiler(const RSXFragmentProgram& prog, u32& size)
+	: m_size(size), m_prog(prog)
 {
 	m_size = 0;
 }
 
 void FragmentProgramDecompiler::SetDst(std::string code, u32 flags)
 {
-	if (!src0.exec_if_eq && !src0.exec_if_gr && !src0.exec_if_lt) return;
+	if (!src0.exec_if_eq && !src0.exec_if_gr && !src0.exec_if_lt)
+		return;
 
 	if (src1.scale)
 	{
@@ -98,15 +96,33 @@ void FragmentProgramDecompiler::SetDst(std::string code, u32 flags)
 		switch (src1.scale)
 		{
 		case 0: break;
-		case 1: code = "(" + code + " * "; modifier = "2."; break;
-		case 2: code = "(" + code + " * "; modifier = "4."; break;
-		case 3: code = "(" + code + " * "; modifier = "8."; break;
-		case 5: code = "(" + code + " / "; modifier = "2."; break;
-		case 6: code = "(" + code + " / "; modifier = "4."; break;
-		case 7: code = "(" + code + " / "; modifier = "8."; break;
+		case 1:
+			code = "(" + code + " * ";
+			modifier = "2.";
+			break;
+		case 2:
+			code = "(" + code + " * ";
+			modifier = "4.";
+			break;
+		case 3:
+			code = "(" + code + " * ";
+			modifier = "8.";
+			break;
+		case 5:
+			code = "(" + code + " / ";
+			modifier = "2.";
+			break;
+		case 6:
+			code = "(" + code + " / ";
+			modifier = "4.";
+			break;
+		case 7:
+			code = "(" + code + " / ";
+			modifier = "8.";
+			break;
 
 		default:
-			rsx_log.error("Bad scale: %d", u32{ src1.scale });
+			rsx_log.error("Bad scale: %d", u32{src1.scale});
 			break;
 		}
 
@@ -192,7 +208,7 @@ void FragmentProgramDecompiler::SetDst(std::string code, u32 flags)
 	const std::string decoded_dest = Format(dest);
 
 	AddCodeCond(decoded_dest, code);
-	//AddCode("$ifcond " + dest + code + (append_mask ? "$m;" : ";"));
+	// AddCode("$ifcond " + dest + code + (append_mask ? "$m;" : ";"));
 
 	if (dst.set_cond)
 	{
@@ -216,7 +232,7 @@ void FragmentProgramDecompiler::SetDst(std::string code, u32 flags)
 
 void FragmentProgramDecompiler::AddFlowOp(const std::string& code)
 {
-	//Flow operations can only consider conditionals and have no dst
+	// Flow operations can only consider conditionals and have no dst
 
 	if (src0.exec_if_gr && src0.exec_if_lt && src0.exec_if_eq)
 	{
@@ -229,7 +245,7 @@ void FragmentProgramDecompiler::AddFlowOp(const std::string& code)
 		return;
 	}
 
-	//We have a conditional expression
+	// We have a conditional expression
 	std::string cond = GetRawCond();
 
 	AddCode("if (any(" + cond + ")) " + code + ";");
@@ -248,17 +264,21 @@ std::string FragmentProgramDecompiler::GetMask() const
 	static constexpr std::string_view dst_mask = "xyzw";
 
 	ret += '.';
-	if (dst.mask_x) ret += dst_mask[0];
-	if (dst.mask_y) ret += dst_mask[1];
-	if (dst.mask_z) ret += dst_mask[2];
-	if (dst.mask_w) ret += dst_mask[3];
+	if (dst.mask_x)
+		ret += dst_mask[0];
+	if (dst.mask_y)
+		ret += dst_mask[1];
+	if (dst.mask_z)
+		ret += dst_mask[2];
+	if (dst.mask_w)
+		ret += dst_mask[3];
 
 	return ret == "."sv || ret == ".xyzw"sv ? "" : (ret);
 }
 
 std::string FragmentProgramDecompiler::AddReg(u32 index, bool fp16)
 {
-	const std::string type_name = (fp16 && device_props.has_native_half_support)? getHalfTypeName(4) : getFloatTypeName(4);
+	const std::string type_name = (fp16 && device_props.has_native_half_support) ? getHalfTypeName(4) : getFloatTypeName(4);
 	const std::string reg_name = std::string(fp16 ? "h" : "r") + std::to_string(index);
 
 	return m_parr.AddParam(PF_PARAM_NONE, type_name, reg_name, type_name + "(0.)");
@@ -266,7 +286,7 @@ std::string FragmentProgramDecompiler::AddReg(u32 index, bool fp16)
 
 bool FragmentProgramDecompiler::HasReg(u32 index, bool fp16)
 {
-	const std::string type_name = (fp16 && device_props.has_native_half_support)? getHalfTypeName(4) : getFloatTypeName(4);
+	const std::string type_name = (fp16 && device_props.has_native_half_support) ? getHalfTypeName(4) : getFloatTypeName(4);
 	const std::string reg_name = std::string(fp16 ? "h" : "r") + std::to_string(index);
 
 	return m_parr.HasParam(PF_PARAM_NONE, type_name, reg_name);
@@ -290,7 +310,7 @@ std::string FragmentProgramDecompiler::AddConst()
 	}
 	else
 	{
-		index =::size32(properties.constant_offsets);
+		index = ::size32(properties.constant_offsets);
 		properties.constant_offsets.push_back(constant_id);
 		m_constant_offsets[constant_id] = index;
 	}
@@ -373,10 +393,14 @@ bool FragmentProgramDecompiler::DstExpectsSca() const
 {
 	int writes = 0;
 
-	if (dst.mask_x) writes++;
-	if (dst.mask_y) writes++;
-	if (dst.mask_z) writes++;
-	if (dst.mask_w) writes++;
+	if (dst.mask_x)
+		writes++;
+	if (dst.mask_y)
+		writes++;
+	if (dst.mask_z)
+		writes++;
+	if (dst.mask_w)
+		writes++;
 
 	return (writes == 1);
 }
@@ -384,45 +408,86 @@ bool FragmentProgramDecompiler::DstExpectsSca() const
 std::string FragmentProgramDecompiler::Format(const std::string& code, bool ignore_redirects)
 {
 	const std::pair<std::string_view, std::function<std::string()>> repl_list[] =
-	{
-		{ "$$", []() -> std::string { return "$"; } },
-		{ "$0", [this]() -> std::string {return GetSRC<SRC0>(src0);} },
-		{ "$1", [this]() -> std::string {return GetSRC<SRC1>(src1);} },
-		{ "$2", [this]() -> std::string {return GetSRC<SRC2>(src2);} },
-		{ "$t", [this]() -> std::string { return "tex" + std::to_string(dst.tex_num);} },
-		{ "$_i", [this]() -> std::string {return std::to_string(dst.tex_num);} },
-		{ "$m", std::bind(std::mem_fn(&FragmentProgramDecompiler::GetMask), this) },
-		{ "$ifcond ", [this]() -> std::string
-			{
-				const std::string& cond = GetCond();
-				if (cond == "true") return "";
-				return "if(" + cond + ") ";
-			}
-		},
-		{ "$cond", std::bind(std::mem_fn(&FragmentProgramDecompiler::GetCond), this) },
-		{ "$_c", std::bind(std::mem_fn(&FragmentProgramDecompiler::AddConst), this) },
-		{ "$float4", [this]() -> std::string { return getFloatTypeName(4); } },
-		{ "$float3", [this]() -> std::string { return getFloatTypeName(3); } },
-		{ "$float2", [this]() -> std::string { return getFloatTypeName(2); } },
-		{ "$float_t", [this]() -> std::string { return getFloatTypeName(1); } },
-		{ "$half4", [this]() -> std::string { return getHalfTypeName(4); } },
-		{ "$half3", [this]() -> std::string { return getHalfTypeName(3); } },
-		{ "$half2", [this]() -> std::string { return getHalfTypeName(2); } },
-		{ "$half_t", [this]() -> std::string { return getHalfTypeName(1); } },
-		{ "$Ty", [this]() -> std::string { return (!device_props.has_native_half_support || !dst.fp16)? getFloatTypeName(4) : getHalfTypeName(4); } }
-	};
+		{
+			{"$$", []() -> std::string
+				{
+					return "$";
+				}},
+			{"$0", [this]() -> std::string
+				{
+					return GetSRC<SRC0>(src0);
+				}},
+			{"$1", [this]() -> std::string
+				{
+					return GetSRC<SRC1>(src1);
+				}},
+			{"$2", [this]() -> std::string
+				{
+					return GetSRC<SRC2>(src2);
+				}},
+			{"$t", [this]() -> std::string
+				{
+					return "tex" + std::to_string(dst.tex_num);
+				}},
+			{"$_i", [this]() -> std::string
+				{
+					return std::to_string(dst.tex_num);
+				}},
+			{"$m", std::bind(std::mem_fn(&FragmentProgramDecompiler::GetMask), this)}, {"$ifcond ", [this]() -> std::string
+																						   {
+																							   const std::string& cond = GetCond();
+																							   if (cond == "true")
+																								   return "";
+																							   return "if(" + cond + ") ";
+																						   }},
+			{"$cond", std::bind(std::mem_fn(&FragmentProgramDecompiler::GetCond), this)}, {"$_c", std::bind(std::mem_fn(&FragmentProgramDecompiler::AddConst), this)}, {"$float4", [this]() -> std::string
+																																										   {
+																																											   return getFloatTypeName(4);
+																																										   }},
+			{"$float3", [this]() -> std::string
+				{
+					return getFloatTypeName(3);
+				}},
+			{"$float2", [this]() -> std::string
+				{
+					return getFloatTypeName(2);
+				}},
+			{"$float_t", [this]() -> std::string
+				{
+					return getFloatTypeName(1);
+				}},
+			{"$half4", [this]() -> std::string
+				{
+					return getHalfTypeName(4);
+				}},
+			{"$half3", [this]() -> std::string
+				{
+					return getHalfTypeName(3);
+				}},
+			{"$half2", [this]() -> std::string
+				{
+					return getHalfTypeName(2);
+				}},
+			{"$half_t", [this]() -> std::string
+				{
+					return getHalfTypeName(1);
+				}},
+			{"$Ty", [this]() -> std::string
+				{
+					return (!device_props.has_native_half_support || !dst.fp16) ? getFloatTypeName(4) : getHalfTypeName(4);
+				}}};
 
 	if (!ignore_redirects)
 	{
-		//Special processing redirects
+		// Special processing redirects
 		switch (dst.opcode)
 		{
 		case RSX_FP_OPCODE_TEXBEM:
 		case RSX_FP_OPCODE_TXPBEM:
 		{
-			//Redirect parameter 0 to the x2d temp register for TEXBEM
-			//TODO: Organize this a little better
-			std::pair<std::string_view, std::string> repl[] = { { "$0", "x2d" } };
+			// Redirect parameter 0 to the x2d temp register for TEXBEM
+			// TODO: Organize this a little better
+			std::pair<std::string_view, std::string> repl[] = {{"$0", "x2d"}};
 			std::string result = fmt::replace_all(code, repl);
 
 			return fmt::replace_all(result, repl_list);
@@ -461,7 +526,7 @@ std::string FragmentProgramDecompiler::GetRawCond()
 		cond = compareFunction(COMPARE::SGT, AddCond() + swizzle, zero);
 	else if (src0.exec_if_lt)
 		cond = compareFunction(COMPARE::SLT, AddCond() + swizzle, zero);
-	else //if(src0.exec_if_eq)
+	else // if(src0.exec_if_eq)
 		cond = compareFunction(COMPARE::SEQ, AddCond() + swizzle, zero);
 
 	return cond;
@@ -546,7 +611,8 @@ void FragmentProgramDecompiler::AddCodeCond(const std::string& lhs, const std::s
 	AddCode(lhs + " = _select(" + lhs + ", " + src_prefix + rhs + ", " + cond + ");");
 }
 
-template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
+template <typename T>
+std::string FragmentProgramDecompiler::GetSRC(T src)
 {
 	std::string ret;
 	u32 precision_modifier = 0;
@@ -597,7 +663,7 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 		// - This is explained in NV_fragment_program2 specification page, Fragment Attributes section.
 		// - There is no instruction that writes to the address register directly, it is supposed to be the loop counter!
 		u32 register_id = src2.use_index_reg ? (src2.addr_reg + 4) : dst.src_attr_reg_num;
-		const std::string reg_var = (register_id < std::size(reg_table))? reg_table[register_id] : "unk";
+		const std::string reg_var = (register_id < std::size(reg_table)) ? reg_table[register_id] : "unk";
 		bool insert = true;
 
 		if (reg_var == "unk")
@@ -738,7 +804,7 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 			// UNK
 			if (reg_var == "unk")
 			{
-				rsx_log.error("Bad src reg num: %d", u32{ register_id });
+				rsx_log.error("Bad src reg num: %d", u32{register_id});
 			}
 
 			ret += reg_var;
@@ -762,7 +828,7 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 
 	case RSX_FP_REGISTER_TYPE_UNKNOWN: // ??? Used by a few games, what is it?
 		rsx_log.error("[FP] Invalid Src type 3 used, opcode=0x%X, dst=0x%X s0=0x%X s1=0x%X s2=0x%X",
-				dst.opcode, dst.HEX, src0.HEX, src1.HEX, src2.HEX);
+			dst.opcode, dst.HEX, src0.HEX, src1.HEX, src2.HEX);
 
 		// This is not some special type, it is a bug indicating memory corruption
 		// Shaders that are even slightly off do not execute on realhw to any meaningful degree
@@ -772,7 +838,7 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 		break;
 
 	default:
-		rsx_log.fatal("Bad src type %d", u32{ src.reg_type });
+		rsx_log.fatal("Bad src type %d", u32{src.reg_type});
 		break;
 	}
 
@@ -792,9 +858,12 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 	}
 
 	// Warning: Modifier order matters. e.g neg should be applied after precision clamping (tested with Naruto UNS)
-	if (src.abs) ret = "abs(" + ret + ")";
-	if (precision_modifier) ret = ClampValue(ret, precision_modifier);
-	if (src.neg) ret = "-" + ret;
+	if (src.abs)
+		ret = "abs(" + ret + ")";
+	if (precision_modifier)
+		ret = ClampValue(ret, precision_modifier);
+	if (src.neg)
+		ret = "-" + ret;
 
 	return ret;
 }
@@ -805,7 +874,7 @@ std::string FragmentProgramDecompiler::BuildCode()
 	// Shader must at least write to one output for the body to be considered valid
 
 	const bool fp16_out = !(m_prog.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS);
-	const std::string float4_type = (fp16_out && device_props.has_native_half_support)? getHalfTypeName(4) : getFloatTypeName(4);
+	const std::string float4_type = (fp16_out && device_props.has_native_half_support) ? getHalfTypeName(4) : getFloatTypeName(4);
 	const std::string init_value = float4_type + "(0.)";
 	std::array<std::string, 4> output_register_names;
 
@@ -823,11 +892,11 @@ std::string FragmentProgramDecompiler::BuildCode()
 	// This can be used instead of an explicit clear pass in some games (Motorstorm)
 	if (!fp16_out)
 	{
-		output_register_names = { "r0", "r2", "r3", "r4" };
+		output_register_names = {"r0", "r2", "r3", "r4"};
 	}
 	else
 	{
-		output_register_names = { "h0", "h4", "h6", "h8" };
+		output_register_names = {"h0", "h4", "h6", "h8"};
 	}
 
 	for (u32 n = 0; n < 4; ++n)
@@ -904,24 +973,24 @@ std::string FragmentProgramDecompiler::BuildCode()
 	if (properties.has_clamp)
 	{
 		std::string precision_func =
-		"$float4 precision_clamp($float4 x, float _min, float _max)\n"
-		"{\n"
-		"	// Treat NaNs as 0\n"
-		"	bvec4 nans = isnan(x);\n"
-		"	x = _select(x, $float4(0.), nans);\n"
-		"	return clamp(x, _min, _max);\n"
-		"}\n\n";
+			"$float4 precision_clamp($float4 x, float _min, float _max)\n"
+			"{\n"
+			"	// Treat NaNs as 0\n"
+			"	bvec4 nans = isnan(x);\n"
+			"	x = _select(x, $float4(0.), nans);\n"
+			"	return clamp(x, _min, _max);\n"
+			"}\n\n";
 
 		if (device_props.has_native_half_support)
 		{
 			precision_func +=
-			"$half4 precision_clamp($half4 x, float _min, float _max)\n"
-			"{\n"
-			"	// Treat NaNs as 0\n"
-			"	bvec4 nans = isnan(x);\n"
-			"	x = _select(x, $half4(0.), nans);\n"
-			"	return clamp(x, $half_t(_min), $half_t(_max));\n"
-			"}\n\n";
+				"$half4 precision_clamp($half4 x, float _min, float _max)\n"
+				"{\n"
+				"	// Treat NaNs as 0\n"
+				"	bvec4 nans = isnan(x);\n"
+				"	x = _select(x, $half4(0.), nans);\n"
+				"	return clamp(x, $half_t(_min), $half_t(_max));\n"
+				"}\n\n";
 		}
 
 		OS << Format(precision_func);
@@ -934,20 +1003,20 @@ std::string FragmentProgramDecompiler::BuildCode()
 		if (glsl)
 		{
 			clamp_func +=
-			"vec2 clamp16(vec2 val){ return unpackHalf2x16(packHalf2x16(val)); }\n"
-			"vec4 clamp16(vec4 val){ return vec4(clamp16(val.xy), clamp16(val.zw)); }\n\n";
+				"vec2 clamp16(vec2 val){ return unpackHalf2x16(packHalf2x16(val)); }\n"
+				"vec4 clamp16(vec4 val){ return vec4(clamp16(val.xy), clamp16(val.zw)); }\n\n";
 		}
 		else
 		{
 			clamp_func +=
-			"$float4 clamp16($float4 x)\n"
-			"{\n"
-			"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
-			"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
-			"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
-			"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
-			"	return x;\n"
-			"}\n\n";
+				"$float4 clamp16($float4 x)\n"
+				"{\n"
+				"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
+				"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
+				"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
+				"	if (!isnan(x.x) && !isinf(x.x)) x.x = clamp(x.x, -65504., +65504.);\n"
+				"	return x;\n"
+				"}\n\n";
 		}
 
 		OS << Format(clamp_func);
@@ -955,51 +1024,45 @@ std::string FragmentProgramDecompiler::BuildCode()
 	else
 	{
 		// Define raw casts from f32->f16
-		OS <<
-		"#define clamp16(x) " << getHalfTypeName(4) << "(x)\n";
+		OS << "#define clamp16(x) " << getHalfTypeName(4) << "(x)\n";
 	}
 
-	OS <<
-	"#define _builtin_lit lit_legacy\n"
-	"#define _builtin_log2 log2\n"
-	"#define _builtin_normalize(x) (length(x) > 0? normalize(x) : x)\n" // HACK!! Workaround for some games that generate NaNs unless texture filtering exactly matches PS3 (BFBC)
-	"#define _builtin_sqrt(x) sqrt(abs(x))\n"
-	"#define _builtin_rcp(x) (1. / x)\n"
-	"#define _builtin_rsq(x) (1. / _builtin_sqrt(x))\n"
-	"#define _builtin_div(x, y) (x / y)\n";
+	OS << "#define _builtin_log2 log2\n"
+		  "#define _builtin_normalize(x) (length(x) > 0? normalize(x) : x)\n" // HACK!! Workaround for some games that generate NaNs unless texture filtering exactly matches PS3 (BFBC)
+		  "#define _builtin_sqrt(x) sqrt(abs(x))\n"
+		  "#define _builtin_rcp(x) (1. / x)\n"
+		  "#define _builtin_rsq(x) (1. / _builtin_sqrt(x))\n"
+	"#define _builtin_div(x, y) (x / y)\n"
+	"#define _builtin_lerp mix\n";
 
 	if (device_props.has_low_precision_rounding)
 	{
 		// NVIDIA has terrible rounding errors interpolating constant values across vertices with different w
 		// PS3 games blindly rely on interpolating a constant to not change the values
 		// Calling floor/equality will fail randomly causing a moire pattern
-		OS <<
-		"#define _builtin_floor(x) floor(x + 0.000001)\n\n";
+		OS << "#define _builtin_floor(x) floor(x + 0.000001)\n\n";
 	}
 	else
 	{
-		OS <<
-		"#define _builtin_floor floor\n\n";
+		OS << "#define _builtin_floor floor\n\n";
 	}
 
 	if (properties.has_pkg)
 	{
-		OS <<
-		"vec4 _builtin_pkg(const in vec4 value)\n"
-		"{\n"
-		"	vec4 convert = linear_to_srgb(value);\n"
-		"	return uintBitsToFloat(packUnorm4x8(convert)).xxxx;\n"
-		"}\n\n";
+		OS << "vec4 _builtin_pkg(const in vec4 value)\n"
+			  "{\n"
+			  "	vec4 convert = linear_to_srgb(value);\n"
+			  "	return uintBitsToFloat(packUnorm4x8(convert)).xxxx;\n"
+			  "}\n\n";
 	}
 
 	if (properties.has_upg)
 	{
-		OS <<
-		"vec4 _builtin_upg(const in float value)\n"
-		"{\n"
-		"	vec4 raw = unpackUnorm4x8(floatBitsToUint(value));\n"
-		"	return srgb_to_linear(raw);\n"
-		"}\n\n";
+		OS << "vec4 _builtin_upg(const in float value)\n"
+			  "{\n"
+			  "	vec4 raw = unpackUnorm4x8(floatBitsToUint(value));\n"
+			  "	return srgb_to_linear(raw);\n"
+			  "}\n\n";
 	}
 
 	if (properties.has_divsq)
@@ -1036,24 +1099,23 @@ std::string FragmentProgramDecompiler::BuildCode()
 
 	if (properties.has_dynamic_register_load)
 	{
-		OS <<
-		"vec4 _indexed_load(int index)\n"
-		"{\n"
-		"	switch (index)\n"
-		"	{\n"
-		"		case 0: return tc0;\n"
-		"		case 1: return tc1;\n"
-		"		case 2: return tc2;\n"
-		"		case 3: return tc3;\n"
-		"		case 4: return tc4;\n"
-		"		case 5: return tc5;\n"
-		"		case 6: return tc6;\n"
-		"		case 7: return tc7;\n"
-		"		case 8: return tc8;\n"
-		"		case 9: return tc9;\n"
-		"	}\n"
-		"	return vec4(0., 0., 0., 1.);\n"
-		"}\n\n";
+		OS << "vec4 _indexed_load(int index)\n"
+			  "{\n"
+			  "	switch (index)\n"
+			  "	{\n"
+			  "		case 0: return tc0;\n"
+			  "		case 1: return tc1;\n"
+			  "		case 2: return tc2;\n"
+			  "		case 3: return tc3;\n"
+			  "		case 4: return tc4;\n"
+			  "		case 5: return tc5;\n"
+			  "		case 6: return tc6;\n"
+			  "		case 7: return tc7;\n"
+			  "		case 8: return tc8;\n"
+			  "		case 9: return tc9;\n"
+			  "	}\n"
+			  "	return vec4(0., 0., 0., 1.);\n"
+			  "}\n\n";
 	}
 
 	insertMainStart(OS);
@@ -1118,8 +1180,11 @@ bool FragmentProgramDecompiler::handle_sct_scb(u32 opcode)
 		SetDst("_builtin_lit($0)");
 		properties.has_lit_op = true;
 		return true;
-	case RSX_FP_OPCODE_LIF: SetDst("$Ty(1.0, $0.y, ($0.y > 0 ? exp2($0.w) : 0.0), 1.0)", OPFLAGS::op_extern); return true;
-	case RSX_FP_OPCODE_LRP: SetDst("$Ty($2 * (1 - $0) + $1 * $0)", OPFLAGS::skip_type_cast); return true;
+	case RSX_FP_OPCODE_LIF:
+		SetDst("_builtin_lif($0)");
+		properties.has_lit_op = true;
+		return true;
+	case RSX_FP_OPCODE_LRP: SetDst("_builtin_lerp($2, $1, $0)", OPFLAGS::skip_type_cast); return true;
 	case RSX_FP_OPCODE_LG2: SetDst("_builtin_log2($0.x).xxxx"); return true;
 	// Pack operations. See https://www.khronos.org/registry/OpenGL/extensions/NV/NV_fragment_program.txt
 	// PK2 = PK2H (2 16-bit floats)
@@ -1178,7 +1243,7 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 
 		ensure(func_id <= FUNCTION::TEXTURE_SAMPLE_MAX_BASE_ENUM && func_id >= FUNCTION::TEXTURE_SAMPLE_BASE);
 
-		if (!(m_prog.texture_state.multisampled_textures & ref_mask)) [[ likely ]]
+		if (!(m_prog.texture_state.multisampled_textures & ref_mask)) [[likely]]
 		{
 			// Clamp type to 3 types (1d, 2d, cube+3d) and offset into sampling redirection table
 			const auto type_offset = (std::min(static_cast<int>(type), 2) + 1) * static_cast<int>(FUNCTION::TEXTURE_SAMPLE_BASE_ENUM_COUNT);
@@ -1228,7 +1293,7 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 	case RSX_FP_OPCODE_BEM: SetDst("$0.xyxy + $1.xxxx * $2.xzxz + $1.yyyy * $2.ywyw"); return true;
 	case RSX_FP_OPCODE_TEXBEM:
 	{
-		//Untested, should be x2d followed by TEX
+		// Untested, should be x2d followed by TEX
 		AddX2d();
 		AddCode(Format("x2d = $0.xyxy + $1.xxxx * $2.xzxz + $1.yyyy * $2.ywyw;", true));
 		[[fallthrough]];
@@ -1345,7 +1410,7 @@ std::string FragmentProgramDecompiler::Decompile()
 			loop = std::min(loop, found->second.second);
 		}
 
-		block_data[block] = { level, loop };
+		block_data[block] = {level, loop};
 	};
 
 	auto emit_block = [&](const std::vector<Instruction>& instructions)
@@ -1362,7 +1427,7 @@ std::string FragmentProgramDecompiler::Decompile()
 		}
 	};
 
-	for (const auto &block : graph.blocks)
+	for (const auto& block : graph.blocks)
 	{
 		auto found = block_data.find(&block);
 		if (found != block_data.end())
@@ -1386,7 +1451,7 @@ std::string FragmentProgramDecompiler::Decompile()
 			{
 			case EdgeType::LOOP:
 				m_loop_count++;
-				[[ fallthrough ]];
+				[[fallthrough]];
 			case EdgeType::IF:
 				AddCode("{");
 				m_code_level++;
@@ -1442,8 +1507,10 @@ std::string FragmentProgramDecompiler::Decompile()
 				switch (m_instruction->opcode)
 				{
 				case RSX_FP_OPCODE_BRK:
-					if (m_loop_count) AddFlowOp("break");
-					else rsx_log.error("BRK opcode found outside of a loop");
+					if (m_loop_count)
+						AddFlowOp("break");
+					else
+						rsx_log.error("BRK opcode found outside of a loop");
 					break;
 				case RSX_FP_OPCODE_CAL:
 					rsx_log.error("Unimplemented SIP instruction: CAL");
@@ -1459,11 +1526,11 @@ std::string FragmentProgramDecompiler::Decompile()
 					break;
 				case RSX_FP_OPCODE_LOOP:
 					AddCode(fmt::format("$ifcond for(int i%u = %u; i%u < %u; i%u += %u) //LOOP",
-							m_loop_count, src1.init_counter, m_loop_count, src1.end_counter, m_loop_count, src1.increment));
+						m_loop_count, src1.init_counter, m_loop_count, src1.end_counter, m_loop_count, src1.increment));
 					break;
 				case RSX_FP_OPCODE_REP:
 					AddCode(fmt::format("if($cond) for(int i%u = %u; i%u < %u; i%u += %u) //REP",
-							m_loop_count, src1.init_counter, m_loop_count, src1.end_counter, m_loop_count, src1.increment));
+						m_loop_count, src1.init_counter, m_loop_count, src1.end_counter, m_loop_count, src1.increment));
 					break;
 				case RSX_FP_OPCODE_RET:
 					AddFlowOp("return");
@@ -1485,15 +1552,20 @@ std::string FragmentProgramDecompiler::Decompile()
 				AddFlowOp("_kill()");
 				break;
 			default:
-				if (SIP()) break;
-				if (handle_tex_srb(m_instruction->opcode)) break;
-				if (handle_sct_scb(m_instruction->opcode)) break;
+				if (SIP())
+					break;
+				if (handle_tex_srb(m_instruction->opcode))
+					break;
+				if (handle_sct_scb(m_instruction->opcode))
+					break;
 				rsx_log.error("Unknown/illegal instruction: 0x%x", m_instruction->opcode);
 				break;
 			}
 
 			m_size += m_instruction->length * 4;
-			if (dst.end) break;
+
+			if (dst.end)
+				break;
 		}
 
 		if (!early_epilogue && !block.epilogue.empty())

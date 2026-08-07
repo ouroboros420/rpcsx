@@ -204,18 +204,53 @@ void pad_thread::Init()
 		connect_usb_controller(i, input::get_product_by_vid_pid(pad->m_vendor_id, pad->m_product_id));
 	}
 
+	// Set copilots
+	for (usz i = 0; i < m_pads.size(); i++)
+	{
+		auto& pad = m_pads[i];
+		if (!pad)
+			continue;
+
+		pad->copilots.clear();
+
+		if (pad->is_copilot())
+			continue;
+
+		for (usz j = 0; j < m_pads.size(); j++)
+		{
+			auto& other = m_pads[j];
+			if (i == j || !other || other->copilot_player() != i)
+				continue;
+
+			pad->copilots.push_back(other);
+		}
+	}
+
 	// Initialize active mouse and keyboard. Activate pad handler if one exists.
 	input::set_mouse_and_keyboard(m_handlers.contains(pad_handler::keyboard) ? input::active_mouse_and_keyboard::pad : input::active_mouse_and_keyboard::emulated);
 }
 
-void pad_thread::SetRumble(const u32 pad, u8 large_motor, bool small_motor)
+void pad_thread::SetRumble(u32 pad, u8 large_motor, u8 small_motor)
 {
-	if (pad >= m_pads.size())
+	if (pad >= m_pads.size() || !m_pads[pad])
 		return;
 
-	m_pads[pad]->m_last_rumble_time_us = get_system_time();
-	m_pads[pad]->m_vibrateMotors[0].m_value = large_motor;
-	m_pads[pad]->m_vibrateMotors[1].m_value = small_motor ? 255 : 0;
+	const u64 now_us = get_system_time();
+
+	m_pads[pad]->m_last_rumble_time_us = now_us;
+	m_pads[pad]->m_vibrate_motors[0].value = large_motor;
+	m_pads[pad]->m_vibrate_motors[1].value = small_motor;
+
+	// Rumble copilots as well
+	for (const auto& copilot : m_pads[pad]->copilots)
+	{
+		if (copilot && copilot->is_connected())
+		{
+			copilot->m_last_rumble_time_us = now_us;
+			copilot->m_vibrate_motors[0].value = large_motor;
+			copilot->m_vibrate_motors[1].value = small_motor;
+		}
+	}
 }
 
 void pad_thread::SetIntercepted(bool intercepted)
@@ -231,6 +266,106 @@ void pad_thread::SetIntercepted(bool intercepted)
 	}
 }
 
+void pad_thread::apply_copilots()
+{
+	const auto normalize = [](s32 value)
+	{
+		return (value - 128) / 127.0f;
+	};
+
+	std::lock_guard lock(pad::g_pad_mutex);
+
+	for (auto& pad : m_pads)
+	{
+		if (!pad || !pad->is_connected())
+		{
+			continue;
+		}
+
+		pad->m_buttons_external.resize(pad->m_buttons.size());
+
+		for (usz i = 0; i < pad->m_buttons.size(); i++)
+		{
+			const Button& src = pad->m_buttons[i];
+			ButtonExternal& dst = pad->m_buttons_external[i];
+
+			dst.m_offset = src.m_offset;
+			dst.m_outKeyCode = src.m_outKeyCode;
+			dst.m_value = src.m_value;
+			dst.m_pressed = src.m_pressed;
+		}
+
+		for (usz i = 0; i < pad->m_sticks.size(); i++)
+		{
+			const AnalogStick& src = pad->m_sticks[i];
+			AnalogStickExternal& dst = pad->m_sticks_external[i];
+
+			dst.m_offset = src.m_offset;
+			dst.m_value = src.m_value;
+		}
+
+		if (pad->copilots.empty() || pad->is_copilot())
+		{
+			continue;
+		}
+
+		// Merge buttons
+		for (const auto& copilot : pad->copilots)
+		{
+			if (!copilot || !copilot->is_connected())
+			{
+				continue;
+			}
+
+			for (ButtonExternal& button : pad->m_buttons_external)
+			{
+				for (const Button& other : copilot->m_buttons)
+				{
+					if (button.m_offset == other.m_offset && button.m_outKeyCode == other.m_outKeyCode)
+					{
+						if (other.m_pressed)
+						{
+							button.m_pressed = true;
+
+							if (button.m_value < other.m_value)
+							{
+								button.m_value = other.m_value;
+							}
+						}
+
+						break;
+					}
+				}
+			}
+		}
+
+		// Merge sticks
+		for (AnalogStickExternal& stick : pad->m_sticks_external)
+		{
+			f32 accumulated_value = normalize(stick.m_value);
+
+			for (const auto& copilot : pad->copilots)
+			{
+				if (!copilot || !copilot->is_connected())
+				{
+					continue;
+				}
+
+				for (const AnalogStick& other : copilot->m_sticks)
+				{
+					if (stick.m_offset == other.m_offset)
+					{
+						accumulated_value += normalize(other.m_value);
+						break;
+					}
+				}
+			}
+
+			stick.m_value = static_cast<u16>(std::round(std::clamp(accumulated_value * 127.0f + 128.0f, 0.0f, 255.0f)));
+		}
+	}
+}
+
 void pad_thread::update_pad_states()
 {
 	for (usz i = 0; i < m_pads.size(); i++)
@@ -240,7 +375,7 @@ void pad_thread::update_pad_states()
 		// Simulate unplugging and plugging in a new controller
 		if (pad && pad->m_disconnection_timer > 0)
 		{
-			const bool is_connected = pad->m_port_status & CELL_PAD_STATUS_CONNECTED;
+			const bool is_connected = pad->is_connected();
 			const u64 now = get_system_time();
 
 			if (is_connected && now < pad->m_disconnection_timer)
@@ -255,7 +390,7 @@ void pad_thread::update_pad_states()
 			}
 		}
 
-		const bool connected = pad && !pad->is_fake_pad && !!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED);
+		const bool connected = pad && !pad->is_fake_pad && pad->is_connected();
 
 		if (m_pads_connected[i] == connected)
 			continue;
@@ -286,13 +421,10 @@ void pad_thread::operator()()
 
 		for (auto& thread : threads)
 		{
-			if (thread)
-			{
-				auto& enumeration_thread = *thread;
-				enumeration_thread = thread_state::aborting;
-				enumeration_thread();
-			}
+			// Join thread (ordered explicitly)
+			thread.reset();
 		}
+
 		threads.clear();
 
 		input_log.notice("Pad threads stopped");
@@ -307,14 +439,67 @@ void pad_thread::operator()()
 
 		input_log.notice("Starting pad threads...");
 
-		for (const auto& handler : m_handlers)
-		{
-			if (handler.first == pad_handler::null)
-			{
-				continue;
-			}
+#if defined(__APPLE__)
+		// Let's keep hid handlers on the same thread
+		std::vector<std::shared_ptr<PadHandlerBase>> hid_handlers;
+		std::vector<std::shared_ptr<PadHandlerBase>> handlers;
 
-			threads.push_back(std::make_unique<named_thread<std::function<void()>>>(fmt::format("%s Thread", handler.second->m_type), [&handler = handler.second, &pad_mode]()
+		for (const auto& [type, handler] : m_handlers)
+		{
+			switch (type)
+			{
+			case pad_handler::null:
+				break;
+			case pad_handler::ds3:
+			case pad_handler::ds4:
+			case pad_handler::dualsense:
+			case pad_handler::skateboard:
+			case pad_handler::move:
+				hid_handlers.push_back(handler);
+				break;
+			default:
+				handlers.push_back(handler);
+				break;
+			}
+		}
+
+		if (!hid_handlers.empty())
+		{
+			threads.push_back(std::make_unique<named_thread<std::function<void()>>>("HID Thread", [handlers = std::move(hid_handlers)]()
+			{
+				while (thread_ctrl::state() != thread_state::aborting)
+				{
+					if (!pad::g_enabled || !is_input_allowed())
+					{
+						thread_ctrl::wait_for(30'000);
+						continue;
+					}
+
+					for (auto& handler : handlers)
+					{
+						handler->process();
+					}
+
+					u64 pad_sleep = g_cfg.io.pad_sleep;
+
+					if (Emu.IsPaused())
+					{
+						pad_sleep = std::max<u64>(pad_sleep, 30'000);
+					}
+
+					thread_ctrl::wait_for(pad_sleep);
+				}
+			}));
+		}
+
+		for (const auto& handler : handlers)
+		{
+#else
+		for (const auto& [type, handler] : m_handlers)
+		{
+			if (type == pad_handler::null) continue;
+#endif
+			threads.push_back(std::make_unique<named_thread<std::function<void()>>>(fmt::format("%s Thread", handler->m_type), [handler]()
 				{
 					while (thread_ctrl::state() != thread_state::aborting)
 					{
@@ -393,6 +578,8 @@ void pad_thread::operator()()
 			}
 		}
 
+		apply_copilots();
+
 		if (Emu.IsRunning())
 		{
 			update_pad_states();
@@ -411,21 +598,20 @@ void pad_thread::operator()()
 			{
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
-				for (const auto& button : pad->m_buttons)
+				for (const Button& button : pad->m_buttons)
 				{
-					if (button.m_pressed && (
-							(button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1 && (
-								button.m_outKeyCode == CELL_PAD_CTRL_START ||
-								button.m_outKeyCode == CELL_PAD_CTRL_SELECT)) ||
-							(button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL2 && (
-								button.m_outKeyCode == CELL_PAD_CTRL_CROSS ||
-								button.m_outKeyCode == CELL_PAD_CTRL_CIRCLE ||
-								button.m_outKeyCode == CELL_PAD_CTRL_TRIANGLE ||
-								button.m_outKeyCode == CELL_PAD_CTRL_SQUARE))
-						))
+					if (button.m_pressed &&
+						((button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1 &&
+							 (button.m_outKeyCode == CELL_PAD_CTRL_START ||
+								 button.m_outKeyCode == CELL_PAD_CTRL_SELECT)) ||
+							(button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL2 &&
+								(button.m_outKeyCode == CELL_PAD_CTRL_CROSS ||
+									button.m_outKeyCode == CELL_PAD_CTRL_CIRCLE ||
+									button.m_outKeyCode == CELL_PAD_CTRL_TRIANGLE ||
+									button.m_outKeyCode == CELL_PAD_CTRL_SQUARE))))
 					{
 						any_button_pressed = true;
 						break;
@@ -451,7 +637,7 @@ void pad_thread::operator()()
 
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
 				// Check if an LDD pad pressed the PS button (bit 0 of the first button)
@@ -462,7 +648,7 @@ void pad_thread::operator()()
 					break;
 				}
 
-				for (const auto& button : pad->m_buttons)
+				for (const Button& button : pad->m_buttons)
 				{
 					if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1 && button.m_outKeyCode == CELL_PAD_CTRL_PS && button.m_pressed)
 					{
@@ -518,10 +704,10 @@ void pad_thread::operator()()
 			{
 				const auto& pad = m_pads[i];
 
-				if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+				if (!pad->is_connected())
 					continue;
 
-				for (const auto& button : pad->m_buttons)
+				for (const Button& button : pad->m_buttons)
 				{
 					if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1 && button.m_outKeyCode == CELL_PAD_CTRL_START && button.m_pressed)
 					{
@@ -587,8 +773,9 @@ void pad_thread::InitLddPad(u32 handle, const u32* port_status)
 
 	static const input::product_info product = input::get_product_info(input::product_type::playstation_3_controller);
 
-	m_pads[handle]->ldd = true;
-	m_pads[handle]->Init(
+	auto& pad = m_pads[handle];
+	pad->ldd = true;
+	pad->Init(
 		port_status ? *port_status : CELL_PAD_STATUS_CONNECTED | CELL_PAD_STATUS_ASSIGN_CHANGES | CELL_PAD_STATUS_CUSTOM_CONTROLLER,
 		CELL_PAD_CAPABILITY_PS3_CONFORMITY,
 		CELL_PAD_DEV_TYPE_LDD,
@@ -599,7 +786,7 @@ void pad_thread::InitLddPad(u32 handle, const u32* port_status)
 		50);
 
 	input_log.notice("Pad %d: LDD, VID=0x%x, PID=0x%x, class_type=0x%x, class_profile=0x%x",
-		handle, m_pads[handle]->m_vendor_id, m_pads[handle]->m_product_id, m_pads[handle]->m_class_type, m_pads[handle]->m_class_profile);
+		handle, pad->m_vendor_id, pad->m_product_id, pad->m_class_type, pad->m_class_profile);
 
 	num_ldd_pad++;
 }
@@ -621,11 +808,11 @@ s32 pad_thread::AddLddPad()
 
 void pad_thread::UnregisterLddPad(u32 handle)
 {
-	ensure(handle < m_pads.size());
+	auto& pad = ::at32(m_pads, handle);
 
-	m_pads[handle]->ldd = false;
-	m_pads[handle]->m_port_status &= ~CELL_PAD_STATUS_CONNECTED;
-	m_pads[handle]->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
+	pad->ldd = false;
+	pad->m_port_status &= ~CELL_PAD_STATUS_CONNECTED;
+	pad->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
 
 	num_ldd_pad--;
 }
@@ -637,12 +824,17 @@ std::shared_ptr<PadHandlerBase> pad_thread::GetHandler(pad_handler type, void* t
 
 void pad_thread::InitPadConfig(cfg_pad& cfg, pad_handler type, std::shared_ptr<PadHandlerBase>& handler)
 {
+	// We need to restore the original defaults first.
+	cfg.restore_defaults();
+
 	if (!handler)
 	{
 		handler = GetHandler(type, nullptr, nullptr);
 	}
 
 	ensure(!!handler);
+
+	// Set and apply actual defaults depending on pad handler
 	handler->init_config(&cfg);
 }
 

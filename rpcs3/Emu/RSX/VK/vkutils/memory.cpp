@@ -44,6 +44,16 @@ namespace vk
 		return type_ids.size();
 	}
 
+	u64 memory_type_info::total_bytes() const
+	{
+		u64 result = 0;
+		for (const auto& size : type_sizes)
+		{
+			result += size;
+		}
+		return result;
+	}
+
 	memory_type_info::operator bool() const
 	{
 		return !type_ids.empty();
@@ -153,12 +163,12 @@ namespace vk
 		rsx_log.warning("Rebalanced memory types successfully");
 	}
 
-	mem_allocator_base::mem_allocator_base(const vk::render_device& dev, VkPhysicalDevice)
+	mem_allocator_base::mem_allocator_base(const vk::render_device& dev, VkPhysicalDevice /*pdev*/)
 		: m_device(dev), m_allocation_flags(0)
 	{
 	}
 
-	mem_allocator_vma::mem_allocator_vma(const vk::render_device& dev, VkPhysicalDevice pdev)
+	mem_allocator_vma::mem_allocator_vma(const vk::render_device& dev, VkPhysicalDevice pdev, VkInstance inst)
 		: mem_allocator_base(dev, pdev)
 	{
 		// Initialize stats pool
@@ -167,6 +177,8 @@ namespace vk
 		VmaAllocatorCreateInfo allocatorInfo = {};
 		allocatorInfo.physicalDevice = pdev;
 		allocatorInfo.device = dev;
+		allocatorInfo.instance = inst;
+		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
 
 		std::vector<VkDeviceSize> heap_limits;
 		const auto vram_allocation_limit = g_cfg.video.vk.vram_allocation_limit * 0x100000ull;
@@ -187,6 +199,23 @@ namespace vk
 
 		// Allow fastest possible allocation on start
 		set_fastest_allocation_flags();
+
+		// Determine the rebar heap. We will exclude it from stats
+		const auto& memory_map = dev.get_memory_mapping();
+		if (memory_map.device_bar_total_bytes !=
+			memory_map.device_local_total_bytes)
+		{
+			for (u32 i = 0; i < ::size32(memory_map.heaps); ++i)
+			{
+				const auto& heap = memory_map.heaps[i];
+				if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+					heap.size == memory_map.device_bar_total_bytes)
+				{
+					m_rebar_heap_idx = i;
+					break;
+				}
+			}
+		}
 	}
 
 	void mem_allocator_vma::destroy()
@@ -194,7 +223,7 @@ namespace vk
 		vmaDestroyAllocator(m_allocator);
 	}
 
-	mem_allocator_vk::mem_handle_t mem_allocator_vma::alloc(u64 block_sz, u64 alignment, const memory_type_info& memory_type, vmm_allocation_pool pool, bool throw_on_fail)
+	mem_allocator_vk::mem_handle_t mem_allocator_vma::alloc(const memory_allocation_request& request)
 	{
 		VmaAllocation vma_alloc;
 		VkMemoryRequirements mem_req = {};
@@ -203,11 +232,11 @@ namespace vk
 
 		auto do_vma_alloc = [&]() -> std::tuple<VkResult, u32>
 		{
-			for (const auto& memory_type_index : memory_type)
+			for (const auto& memory_type_index : *request.memory_type)
 			{
 				mem_req.memoryTypeBits = 1u << memory_type_index;
-				mem_req.size = ::align2(block_sz, alignment);
-				mem_req.alignment = alignment;
+				mem_req.size = ::align2(request.size, request.alignment);
+				mem_req.alignment = request.alignment;
 				create_info.memoryTypeBits = 1u << memory_type_index;
 				create_info.flags = m_allocation_flags;
 
@@ -226,12 +255,14 @@ namespace vk
 			const auto [status, type] = do_vma_alloc();
 			if (status == VK_SUCCESS)
 			{
-				vmm_notify_memory_allocated(vma_alloc, type, block_sz, pool);
+				vmm_notify_memory_allocated(vma_alloc, type, request.size, request.pool);
 				return vma_alloc;
 			}
 		}
 
-		const auto severity = (throw_on_fail) ? rsx::problem_severity::fatal : rsx::problem_severity::severe;
+		if (request.recover_vmem_on_fail)
+		{
+			const auto severity = (request.throw_on_fail) ? rsx::problem_severity::fatal : rsx::problem_severity::severe;
 		if (error_code == VK_ERROR_OUT_OF_DEVICE_MEMORY &&
 			vmm_handle_memory_pressure(severity))
 		{
@@ -240,12 +271,13 @@ namespace vk
 			if (status == VK_SUCCESS)
 			{
 				rsx_log.warning("Renderer ran out of video memory but successfully recovered.");
-				vmm_notify_memory_allocated(vma_alloc, type, block_sz, pool);
+					vmm_notify_memory_allocated(vma_alloc, type, request.size, request.pool);
 				return vma_alloc;
 			}
 		}
+		}
 
-		if (!throw_on_fail)
+		if (!request.throw_on_fail)
 		{
 			return VK_NULL_HANDLE;
 		}
@@ -298,7 +330,13 @@ namespace vk
 
 	f32 mem_allocator_vma::get_memory_usage()
 	{
-		vmaGetBudget(m_allocator, stats.data());
+		vmaGetHeapBudgets(m_allocator, stats.data());
+
+		// Filter out the Re-BAR heap
+		if (::size32(stats) > m_rebar_heap_idx)
+		{
+			stats[m_rebar_heap_idx].budget = 0;
+		}
 
 		float max_usage = 0.f;
 		for (const auto& info : stats)
@@ -325,18 +363,18 @@ namespace vk
 		m_allocation_flags = VMA_ALLOCATION_CREATE_STRATEGY_MIN_TIME_BIT;
 	}
 
-	mem_allocator_vk::mem_handle_t mem_allocator_vk::alloc(u64 block_sz, u64 /*alignment*/, const memory_type_info& memory_type, vmm_allocation_pool pool, bool throw_on_fail)
+	mem_allocator_vk::mem_handle_t mem_allocator_vk::alloc(const memory_allocation_request& request)
 	{
 		VkResult error_code = VK_ERROR_UNKNOWN;
 		VkDeviceMemory memory;
 
 		VkMemoryAllocateInfo info = {};
 		info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		info.allocationSize = block_sz;
+		info.allocationSize = request.size;
 
 		auto do_vk_alloc = [&]() -> std::tuple<VkResult, u32>
 		{
-			for (const auto& memory_type_index : memory_type)
+			for (const auto& memory_type_index : *request.memory_type)
 			{
 				info.memoryTypeIndex = memory_type_index;
 				error_code = VK_GET_SYMBOL(vkAllocateMemory)(m_device, &info, nullptr, &memory);
@@ -353,12 +391,14 @@ namespace vk
 			const auto [status, type] = do_vk_alloc();
 			if (status == VK_SUCCESS)
 			{
-				vmm_notify_memory_allocated(memory, type, block_sz, pool);
+				vmm_notify_memory_allocated(memory, type, request.size, request.pool);
 				return memory;
 			}
 		}
 
-		const auto severity = (throw_on_fail) ? rsx::problem_severity::fatal : rsx::problem_severity::severe;
+		if (request.recover_vmem_on_fail)
+		{
+			const auto severity = (request.throw_on_fail) ? rsx::problem_severity::fatal : rsx::problem_severity::severe;
 		if (error_code == VK_ERROR_OUT_OF_DEVICE_MEMORY &&
 			vmm_handle_memory_pressure(severity))
 		{
@@ -367,12 +407,13 @@ namespace vk
 			if (status == VK_SUCCESS)
 			{
 				rsx_log.warning("Renderer ran out of video memory but successfully recovered.");
-				vmm_notify_memory_allocated(memory, type, block_sz, pool);
+					vmm_notify_memory_allocated(memory, type, request.size, request.pool);
 				return memory;
 			}
 		}
+		}
 
-		if (!throw_on_fail)
+		if (!request.throw_on_fail)
 		{
 			return VK_NULL_HANDLE;
 		}
@@ -419,11 +460,11 @@ namespace vk
 		return g_render_device->get_allocator();
 	}
 
-	memory_block::memory_block(VkDevice dev, u64 block_sz, u64 alignment, const memory_type_info& memory_type, vmm_allocation_pool pool, bool nullable)
-		: m_device(dev), m_size(block_sz)
+	memory_block::memory_block(VkDevice dev, const memory_allocation_request& alloc_request)
+		: m_device(dev), m_size(alloc_request.size)
 	{
 		m_mem_allocator = get_current_mem_allocator();
-		m_mem_handle = m_mem_allocator->alloc(block_sz, alignment, memory_type, pool, !nullable);
+		m_mem_handle    = m_mem_allocator->alloc(alloc_request);
 	}
 
 	memory_block::~memory_block()

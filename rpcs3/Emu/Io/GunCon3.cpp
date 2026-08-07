@@ -223,12 +223,12 @@ void usb_device_guncon3::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint,
 		return;
 	}
 
-	const auto input_callback = [&gc](guncon3_btn btn, pad_button /*pad_button*/, u16 value, bool pressed, bool& /*abort*/)
+	const auto input_callback = [&gc](const emulated_pad_config<guncon3_btn>::input_value& value, bool& /*abort*/)
 	{
-		if (!pressed)
+		if (!value.pressed)
 			return;
 
-		switch (btn)
+		switch (value.btn)
 		{
 		case guncon3_btn::trigger: gc.btn_trigger |= 1; break;
 		case guncon3_btn::a1: gc.btn_a1 |= 1; break;
@@ -239,10 +239,10 @@ void usb_device_guncon3::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint,
 		case guncon3_btn::b3: gc.btn_b3 |= 1; break;
 		case guncon3_btn::c1: gc.btn_c1 |= 1; break;
 		case guncon3_btn::c2: gc.btn_c2 |= 1; break;
-		case guncon3_btn::as_x: gc.stick_ax = static_cast<uint8_t>(value); break;
-		case guncon3_btn::as_y: gc.stick_ay = static_cast<uint8_t>(value); break;
-		case guncon3_btn::bs_x: gc.stick_bx = static_cast<uint8_t>(value); break;
-		case guncon3_btn::bs_y: gc.stick_by = static_cast<uint8_t>(value); break;
+		case guncon3_btn::as_x: gc.stick_ax = static_cast<uint8_t>(value.value); break;
+		case guncon3_btn::as_y: gc.stick_ay = static_cast<uint8_t>(value.value); break;
+		case guncon3_btn::bs_x: gc.stick_bx = static_cast<uint8_t>(value.value); break;
+		case guncon3_btn::bs_y: gc.stick_by = static_cast<uint8_t>(value.value); break;
 		case guncon3_btn::count: break;
 		}
 	};
@@ -254,7 +254,7 @@ void usb_device_guncon3::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint,
 		const auto gamepad_handler = pad::get_pad_thread();
 		const auto& pads = gamepad_handler->GetPads();
 		const auto& pad = ::at32(pads, m_controller_index);
-		if (pad->m_port_status & CELL_PAD_STATUS_CONNECTED)
+		if (pad->is_connected() && !pad->is_copilot())
 		{
 			cfg->handle_input(pad, true, input_callback);
 		}

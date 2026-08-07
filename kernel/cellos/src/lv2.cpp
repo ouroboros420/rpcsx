@@ -1536,18 +1536,9 @@ extern void ppu_execute_syscall(ppu_thread &ppu, u64 code) {
     g_fxo->get<named_thread<ppu_syscall_usage>>().stat[code]++;
 
     if (const auto func = g_ppu_syscall_table[code].first) {
-#ifdef __APPLE__
-      pthread_jit_write_protect_np(false);
-#endif
       func(ppu, {}, vm::_ptr<u32>(ppu.cia), nullptr);
       ppu_log.trace("Syscall '%s' (%llu) finished, r3=0x%llx",
                     ppu_syscall_code(code), code, ppu.gpr[3]);
-
-#ifdef __APPLE__
-      pthread_jit_write_protect_np(true);
-      // No need to flush cache lines after a syscall, since we didn't generate
-      // any code.
-#endif
       return;
     }
   }
@@ -1616,22 +1607,24 @@ bool lv2_obj::sleep(cpu_thread &cpu, const u64 timeout) {
   }
 
   if (cpu.get_class() == thread_class::ppu) {
-    if (u32 addr = static_cast<ppu_thread &>(cpu).res_notify) {
-      static_cast<ppu_thread &>(cpu).res_notify = 0;
-      static_cast<ppu_thread &>(cpu).res_notify_postpone_streak = 0;
+    ppu_thread &ppu = static_cast<ppu_thread &>(cpu);
+
+    if (u32 addr = ppu.res_notify) {
+      ppu.res_notify = 0;
+      ppu.res_notify_postpone_streak = 0;
 
       if (auto it = std::find(g_to_notify, std::end(g_to_notify),
                               std::add_pointer_t<const void>{});
           it != std::end(g_to_notify)) {
-        if ((*it++ = vm::reservation_notifier_notify(
-                 addr, static_cast<ppu_thread &>(cpu).res_notify_time, true)))
+        if ((*it++ = vm::reservation_notifier_notify(addr, ppu.res_notify_time,
+                                                     true))) {
           if (it < std::end(g_to_notify)) {
             // Null-terminate the list if it ends before last slot
             *it = nullptr;
           }
+        }
       } else {
-        vm::reservation_notifier_notify(
-            addr, static_cast<ppu_thread &>(cpu).res_notify_time);
+        vm::reservation_notifier_notify(addr, ppu.res_notify_time);
       }
     }
   }
@@ -1667,12 +1660,13 @@ bool lv2_obj::awake(cpu_thread *thread, s32 prio) {
       if (auto it = std::find(g_to_notify, std::end(g_to_notify),
                               std::add_pointer_t<const void>{});
           it != std::end(g_to_notify)) {
-        if ((*it++ = vm::reservation_notifier_notify(
-                 addr, ppu->res_notify_time, true)))
+        if ((*it++ = vm::reservation_notifier_notify(addr, ppu->res_notify_time,
+                                                     true))) {
           if (it < std::end(g_to_notify)) {
             // Null-terminate the list if it ends before last slot
             *it = nullptr;
           }
+        }
       } else {
         vm::reservation_notifier_notify(addr, ppu->res_notify_time);
       }
@@ -2413,17 +2407,34 @@ void lv2_obj::prepare_for_sleep(cpu_thread &cpu) {
   cpu_counter::remove(&cpu);
 }
 
+ppu_thread *lv2_obj::get_running_ppu(u32 index) {
+  usz thread_count = g_cfg.core.ppu_threads;
+
+  if (index >= thread_count) {
+    return nullptr;
+  }
+
+  auto target = atomic_storage<ppu_thread *>::load(g_ppu);
+
+  for (usz cur = 0; target;
+       target = atomic_storage<ppu_thread *>::load(target->next_ppu), cur++) {
+    if (cur == index) {
+      return target;
+    }
+  }
+
+  return nullptr;
+}
+
 void lv2_obj::notify_all() noexcept {
   for (auto cpu : g_to_notify) {
     if (!cpu) {
       break;
     }
 
-    if (cpu != &g_to_notify) {
-      // Note: by the time of notification the thread could have been
-      // deallocated which is why the direct function is used
-      atomic_wait_engine::notify_all(cpu);
-    }
+    // Note: by the time of notification the thread could have been
+    // deallocated which is why the direct function is used
+    atomic_wait_engine::notify_all(cpu);
   }
 
   g_to_notify[0] = nullptr;
@@ -2451,10 +2462,12 @@ void lv2_obj::notify_all() noexcept {
   // Instead, check 2 at max, but use the CPU ID index to tell which index to
   // start checking so the work would be distributed across all threads
 
-  atomic_t<u64, 64> *range_lock = nullptr;
+  atomic_t<u64, 128> *range_lock = nullptr;
 
-  // Match upstream: scan up to 4 of the 6 SPU reservation-waiter slots per
-  // pass (we scanned 3 - one slot less coverage in the SPU wakeup path).
+  if (cpu->get_class() == thread_class::spu) {
+    range_lock = static_cast<spu_thread *>(cpu)->range_lock;
+  }
+
   for (usz i = 0, checked = 0; checked < 4 && i < total_waiters; i++) {
     auto &waiter =
         spu_thread::g_spu_waiters_by_value[(i + cpu->id) % total_waiters];
@@ -2512,7 +2525,7 @@ void lv2_obj::notify_all() noexcept {
     }
   }
 
-  if (range_lock) {
+  if (range_lock && cpu->get_class() != thread_class::spu) {
     vm::free_range_lock(range_lock);
   }
 

@@ -1,7 +1,6 @@
 #include "stdafx.h"
 
 #include "Emu/System.h"
-#include "Emu/system_utils.hpp"
 #include "RSXFIFO.h"
 #include "RSXThread.h"
 #include "Capture/rsx_capture.h"
@@ -14,7 +13,6 @@
 #include "rx/asm.hpp"
 
 #include <thread>
-#include <bitset>
 
 using spu_rdata_t = std::byte[128];
 
@@ -40,39 +38,6 @@ namespace rsx
 		void FIFO_control::sync_get() const
 		{
 			m_ctrl->get.release(m_internal_get);
-		}
-
-		void FIFO_control::idle_wait() const
-		{
-#if defined(ARCH_ARM64)
-			// Gated on the explicit WFE toggle (default off), NOT battery-saver:
-			// the park trades a little wake latency for power, so it stays opt-in to
-			// keep the default smooth. Battery-saver still does the bigger, jitter-
-			// free getllar/present wins.
-			if (rx::wfe_enabled())
-			{
-				// Park on the FIFO 'put' register (raw bytes). The CPU writes put to
-				// submit new commands, which clears the WFE monitor and wakes us
-				// immediately; emulation stop SEVs parked threads. wfe_park bails at
-				// once if put already changed (no lost wakeup), and the run_FIFO loop
-				// re-reads put + checks stop on every wake, so the worst case is a
-				// brief re-poll rather than a stall.
-				const u32* put_word = reinterpret_cast<const u32*>(&m_ctrl->put);
-				const u32 keep = *put_word;
-				// Short hot spin first: at a frame boundary the CPU usually writes
-				// 'put' within microseconds. Catch that hot to avoid WFE wake latency
-				// (which showed up as frametime jitter); only park on sustained idle.
-				for (int i = 0; i < 8; i++)
-				{
-					if (*put_word != keep)
-						return;
-					rx::busy_wait();
-				}
-				rx::wfe_park(put_word, keep);
-				return;
-			}
-#endif
-			std::this_thread::yield();
 		}
 
 		void FIFO_control::restore_state(u32 cmd, u32 count)
@@ -174,7 +139,7 @@ namespace rsx
 				u32 bytes_read = 0;
 
 				// Find the next set bit after every iteration
-				for (int i = 0;; i = (std::countr_zero<u32>(rx::rol8(to_fetch, 0 - i - 1)) + i + 1) % 8)
+				for (int i = 0;; i = (std::countr_zero<u32>(std::rotl<u8>(to_fetch, 0 - i - 1)) + i + 1) % 8)
 				{
 					// If a reservation is being updated, try to load another
 					const auto& res = vm::reservation_acquire(addr1 + i * 128);
@@ -238,7 +203,7 @@ namespace rsx
 				}
 			}
 
-			const auto ret = read_from_ptr<be_t<u32>>(+m_cache[0], addr - m_cache_addr);
+			const auto ret = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr);
 			return {true, ret};
 		}
 
@@ -705,7 +670,7 @@ namespace rsx
 				}
 				else
 				{
-					fifo_ctrl->idle_wait();
+					std::this_thread::yield();
 				}
 
 				return;
@@ -724,16 +689,16 @@ namespace rsx
 			}
 
 			// Check for flow control
-			if (std::bitset<2> jump_type; jump_type
-					.set(0, (cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
-					.set(1, (cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
+			if (bit_set<2> jump_type; jump_type
+				.set_unsafe(0, (cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
+				.set_unsafe(1, (cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
 					.any())
 			{
-				const u32 offs = cmd & (jump_type.test(0) ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
+				const u32 offs = cmd & (jump_type.test_unsafe(0) ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
 
 				// Don't follow a jump into unmapped IO space (a desynced/corrupt
 				// command stream). Recovering here avoids executing whatever stale
-				// memory the GET pointer would land on.
+				// memory the GET pointer would land on. (ouroboros c9049b3a1)
 				if (iomap_table.get_addr(offs) == umax) [[unlikely]]
 				{
 					rsx_log.error("FIFO: jump to unmapped IO address 0x%x (last cmd = 0x%x)", offs, get_fifo_cmd());
@@ -774,7 +739,7 @@ namespace rsx
 				const u32 offs = cmd & RSX_METHOD_CALL_OFFSET_MASK;
 
 				// Don't follow a call into unmapped IO space (a desynced/corrupt
-				// command stream) - recover instead of running off into stale memory.
+				// command stream) - recover instead of running off into stale memory. (ouroboros c9049b3a1)
 				if (iomap_table.get_addr(offs) == umax) [[unlikely]]
 				{
 					rsx_log.error("FIFO: call to unmapped IO address 0x%x (last cmd = 0x%x)", offs, get_fifo_cmd());

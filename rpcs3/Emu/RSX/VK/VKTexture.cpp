@@ -763,7 +763,7 @@ namespace vk
 	template <typename BaseType, typename BlockType>
 	cs_deswizzle_base* get_deswizzle_transformation_swapped(bool swap_bytes)
 	{
-		if (swap_bytes) [[likely]]
+		if (swap_bytes) [[ likely ]]
 		{
 			return vk::get_compute_task<cs_deswizzle_3d<BaseType, BlockType, true>>();
 		}
@@ -797,20 +797,20 @@ namespace vk
 		const u32 block_size = (word_size * word_count);
 		const u32 scale_x = std::max(block_size / 4u, 1u); // Virtual width multiplier. RSX only does texel sizes upto 32 bits.
 
-		switch (word_size)
-		{
-		case 1:
+			switch (word_size)
+			{
+			case 1:
 			job = get_deswizzle_transformation<u8>(block_size, swap_bytes);
-			break;
-		case 2:
+				break;
+			case 2:
 			job = get_deswizzle_transformation<u16>(block_size, swap_bytes);
-			break;
-		case 4:
+				break;
+			case 4:
 			job = get_deswizzle_transformation<u32>(block_size, swap_bytes);
-			break;
-		default:
-			fmt::throw_exception("Unimplemented deswizzle for format.");
-		}
+				break;
+			default:
+				fmt::throw_exception("Unimplemented deswizzle for format.");
+			}
 
 		ensure(job);
 
@@ -1007,6 +1007,12 @@ namespace vk
 
 		for (const rsx::subresource_layout& layout : subresource_layout)
 		{
+			if (layout.level >= dst_image->mipmaps())
+			{
+				rsx_log.error("Invalid subresource definition for the output texture. Mip level does not exist.");
+				continue;
+			}
+
 			const auto [row_pitch, upload_pitch_in_texel] = calculate_upload_pitch(format, heap_align, dst_image, layout, caps);
 			caps.alignment = row_pitch;
 
@@ -1198,13 +1204,17 @@ namespace vk
 					range_ptr += op.second;
 				}
 			}
-			else if (!buffer_copies.empty())
+			else
 			{
+				ensure(!buffer_copies.empty());
 				VK_GET_SYMBOL(vkCmdCopyBuffer)(cmd2, upload_buffer->value, scratch_buf->value, static_cast<u32>(buffer_copies.size()), buffer_copies.data());
 			}
 
-			insert_buffer_memory_barrier(cmd2, scratch_buf->value, 0, scratch_offset, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+			insert_buffer_memory_barrier(
+				cmd2, scratch_buf->value, 0, scratch_offset,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 		}
 
 		// Swap and deswizzle if requested
@@ -1275,9 +1285,10 @@ namespace vk
 		vk::load_dma(range.start, section_length);
 
 		// Allocate scratch and prepare for the GPU job
-		const auto scratch_buf = vk::get_scratch_buffer(cmd, section_length * 3, // 0 = linear data, 1 = padding (deswz), 2 = tiled data
+		const auto scratch_buf = vk::get_scratch_buffer(cmd, section_length * 3,       // 0 = linear data, 1 = padding (deswz), 2 = tiled data
 			VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
 		const auto tiled_data_scratch_offset = section_length * 2;
 		const auto linear_data_scratch_offset = 0u;
 
@@ -1329,7 +1340,7 @@ namespace vk
 		// Detile
 		vk::get_compute_task<vk::cs_tile_memcpy<RSX_detiler_op::decode>>()->run(cmd, config);
 
-		// Barrier
+		// Post-Compute barrier
 		vk::insert_buffer_memory_barrier(
 			cmd, scratch_buf->value, linear_data_scratch_offset, static_cast<u32>(width) * height * bpp,
 			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

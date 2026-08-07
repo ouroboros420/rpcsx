@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include <cstdio>
 
 #include "rx/debug.hpp"
 #include "Emu/Cell/timers.hpp"
@@ -11,8 +10,8 @@
 #include "cellos/sys_process.h"
 #include "Thread.h"
 #include "util/JIT.h"
-#include <thread>
 #include <cfenv>
+#include <cstdio> // detect_android_big_mask(): snprintf/fopen/fscanf on sysfs
 
 #ifdef ARCH_ARM64
 #include "Emu/CPU/Backends/AArch64/AArch64Signal.h"
@@ -115,6 +114,11 @@ thread_local u64 g_tls_wait_time = 0;
 thread_local u64 g_tls_wait_fail = 0;
 thread_local u64 g_tls_access_violation_recovered = umax;
 extern thread_local std::string (*g_tls_log_prefix)();
+
+namespace stx
+{
+	atomic_t<u32> g_launch_retainer{0};
+}
 
 // Report error and call std::abort(), defined in main.cpp
 [[noreturn]] void report_fatal_error(std::string_view text, bool is_html = false, bool include_help_text = true);
@@ -1205,20 +1209,296 @@ usz get_x64_access_size(x64_context* context, x64_op_t op, x64_reg_t reg, usz d_
 
 #elif defined(ARCH_ARM64)
 
-#if defined(__APPLE__)
+#ifdef _WIN32
+#define RIP(context) (reinterpret_cast<CONTEXT*>((context))->Pc)
+#define GPR(context, index) (reinterpret_cast<CONTEXT*>((context))->X[index])
+#elif defined(__APPLE__)
 // https://github.com/bombela/backward-cpp/issues/200
 #define RIP(context) ((context)->uc_mcontext->__ss.__pc)
+#define GPR(context, index) ((context)->uc_mcontext->__ss.__x[(index)])
 #elif defined(__FreeBSD__)
 #define RIP(context) ((context)->uc_mcontext.mc_gpregs.gp_elr)
+#define GPR(context, index) ((context)->uc_mcontext.mc_gpregs.gp_x[(index)])
 #elif defined(__NetBSD__)
 #define RIP(context) ((context)->uc_mcontext.__gregs[_REG_PC])
+#define GPR(context, index) ((context)->uc_mcontext.__gregs[(index)])
 #elif defined(__OpenBSD__)
 #define RIP(context) ((context)->sc_elr)
+#define GPR(context, index) ((context)->sc_x[(index)])
 #else
 #define RIP(context) ((context)->uc_mcontext.pc)
+#define GPR(context, index) ((context)->uc_mcontext.regs[(index)])
 #endif
 
-#endif /* ARCH_ */
+enum mem_a64_op_t
+{
+	A64_INVALID = 0,
+	A64_LOAD,
+	A64_STORE,
+};
+
+struct a64_mem_info_t
+{
+	mem_a64_op_t op;
+	u32 mem_size;   // Bytes accessed in memory
+	u32 reg_size;   // Register width (4 or 8 bytes)
+	u32 reg_num;
+	bool reg_signed;
+};
+
+a64_mem_info_t decode_a64_mem_inst(u32 inst)
+{
+	a64_mem_info_t r{ A64_INVALID, 0, 0, inst % 32, false };
+
+	// Exclude SIMD/FP loads/stores
+	if ((inst >> 26) & 1)
+	{
+		return r;
+	}
+
+	// Scalar load/store immediate, unsigned offset variants only:
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	// class bits[29:24] = 111001
+	if ((inst & 0x3B000000) == 0x39000000)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STR
+			r.op = A64_STORE;
+			r.reg_size = r.mem_size;
+			return r;
+		}
+		case 1:
+		{
+			// LDR unsigned zero-extend
+			// size=3 (64-bit) -> Xt; everything else -> Wt
+			r.op = A64_LOAD;
+			r.reg_size = (size == 3) ? 8u : 4u;
+			r.reg_signed = false;
+			return r;
+		}
+		case 2:
+		case 3:
+		{
+			if (size == 3)
+			{
+				return r;
+			}
+
+			if (size == 2 && opc == 3)
+			{
+				// Invalid LDRSW
+				return r;
+			}
+
+			// LDRSB/LDRSH/LDRSW
+			// size determines extension type:
+			// 00 LDRSB
+			// 01 LDRSH
+			// 10 LDRSW
+			r.op = A64_LOAD;
+
+			if (size == 2)
+			{
+				// LDUSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDRSB/LDRSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			r.reg_signed = true;
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// Scalar load/store unscaled immediate (LDUR/STUR)
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	if ((inst & 0x3B200C00u) == 0x38000000u)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STURB/STURH/STUR Wt/STUR Xt
+			r.op = A64_STORE;
+
+			// Source register width
+			r.reg_size = r.mem_size;
+			return r;
+		}
+
+		case 1:
+		{
+			// LDURB/LDURH/LDUR Wt/LDUR Xt
+			r.op = A64_LOAD;
+
+			// Destination register width
+			r.reg_size = (size == 3) ? 8 : 4;
+			r.reg_signed = false;
+			return r;
+		}
+
+		case 2:
+		case 3:
+		{
+			// LDURSB/LDURSH/LDURSW
+			if (size == 3)
+			{
+				return r;
+			}
+
+			r.op = A64_LOAD;
+			r.reg_signed = true;
+
+			if (size == 2)
+			{
+				// LDURSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDURSB/LDURSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// 
+	// Literal loads:
+	// 
+	// LDR Wt, label
+	// LDR Xt, label
+	// LDRSW Xt, label
+	//
+
+	// This is not needed for MMIO (which is the only use for this function)
+
+	// if ((inst & 0x3B000000) == 0x18000000)
+	// {
+	// 	u32 opc = (inst >> 30) & 3;
+
+	// 	r.op = A64_LOAD;
+
+	// 	switch (opc)
+	// 	{
+	// 	case 0: // LDR Wt literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 4;
+	// 		return r;
+	// 	}
+	// 	case 1: // LDR Xt literal
+	// 	{
+	// 		r.mem_size = 8;
+	// 		r.reg_size = 8;
+	// 		return r;
+	// 	}
+	// 	case 2: // LDRSW literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 8;
+	// 		r.reg_signed = true;
+	// 		return r;
+	// 	}
+	// 	default:
+	// 	{
+	// 		break;
+	// 	}
+	// 	}
+	// }
+
+	return r;
+}
+
+void put_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size, bool reg_signed, u32 mem_size, u64 value)
+{
+	ensure(mem_size == 1 || mem_size == 2 || mem_size == 4 || mem_size == 8);
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_size >= mem_size);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register" 
+		ensure(false);
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	// Mask for sign-extending the value
+	const u64 sign_bit = value & (make_mask(mem_size) / 2 + 1);
+	const u64 sign_mask = (reg_signed && sign_bit != 0 && reg_size > mem_size) ? (make_mask(reg_size) & ~make_mask(mem_size)) : 0;
+
+	u64 temp_reg_value = 0;
+	temp_reg_value |= (value & make_mask(mem_size)); // Set value (adjusted by size)
+	temp_reg_value |= sign_mask; // Apply sign-extension
+	GPR(context, reg_index) = temp_reg_value;
+}
+
+u64 get_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size)
+{
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register"
+		return 0;
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	return (GPR(context, reg_index) & make_mask(reg_size));
+}
+
+#endif /* ARCH_ARM64 */
 
 namespace rsx
 {
@@ -1328,7 +1608,7 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 		{
 			auto thread = idm::get_unlocked<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
 
-			if (!thread)
+		if (!thread || is_exec)
 			{
 				break;
 			}
@@ -1340,11 +1620,7 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 				return false;
 			}
 
-			if (a_size != 4)
-			{
-				// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
-				break;
-			}
+		bool handled = true;
 
 			switch (op)
 			{
@@ -1354,15 +1630,38 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			case X64OP_LOAD_TEST:
 			{
 				u32 value;
-				if (is_writing || !thread->read_reg(addr, value))
+			const u32 addr_aligned = addr & -4;
+
+			if (addr % 4 + a_size > 4)
+			{
+				handled = false;
+				break;
+			}
+
+			if (is_writing || !thread->read_reg(addr_aligned, value))
 				{
 					return false;
 				}
 
+			// Adjust value for 8-bit and 16-bit reads
+			value >>= ((4 - a_size) * 8) - ((addr % 4) * 8);
+			value &= a_size == 4 ? u32{umax} : ((1u << (a_size * 8)) - 1);
+
 				if (op != X64OP_LOAD_BE)
+				{
+				if (a_size == 4)
 				{
 					value = stx::se_storage<u32>::swap(value);
 				}
+				else if (a_size == 2)
+				{
+					value = stx::se_storage<u16>::swap(value);
+				}
+				else
+				{
+					ensure(a_size == 1);
+				}
+			}
 
 				if (op == X64OP_LOAD_CMP)
 				{
@@ -1396,12 +1695,35 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			case X64OP_BEXTR:
 			{
 				u32 value;
-				if (is_writing || !thread->read_reg(addr, value))
+			const u32 addr_aligned = addr & -4;
+
+			if (addr % 4 + a_size > 4)
+			{
+				handled = false;
+				break;
+			}
+
+			if (is_writing || !thread->read_reg(addr_aligned, value))
 				{
 					return false;
 				}
 
-				value = stx::se_storage<u32>::swap(value);
+			// Adjust value for 8-bit and 16-bit reads
+			value >>= ((4 - a_size) * 8) - ((addr % 4) * 8);
+			value &= a_size == 4 ? u32{umax} : ((1u << (a_size * 8)) - 1);
+
+			if (a_size == 4)
+			{
+				value = std::bit_cast<be_t<u32>>(value);
+			}
+			else if (a_size == 2)
+			{
+				value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
+			}
+			else
+			{
+				ensure(a_size == 1);
+			}
 
 				u64 ctrl;
 				if (!get_x64_reg_value(context, s_tls_reg3, d_size, i_size, ctrl))
@@ -1427,6 +1749,13 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			case X64OP_STORE:
 			case X64OP_STORE_BE:
 			{
+			if (a_size != 4)
+			{
+				// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+				handled = false;
+				break;
+			}
+
 				u64 reg_value;
 				if (!is_writing || !get_x64_reg_value(context, reg, d_size, i_size, reg_value))
 				{
@@ -1445,11 +1774,18 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			case X64OP_STOS:
 			default:
 			{
-				sig_log.error("Invalid or unsupported operation (op=%d, reg=%d, d_size=%lld, i_size=%lld)", +op, +reg, d_size, i_size);
+			sig_log.error("Invalid or unsupported operation (op=%d, addr=0x%x, reg=%d, d_size=%lld, i_size=%lld, a_size=%d)", +op, addr, +reg, d_size, i_size, a_size);
 				report_opcode();
 				return false;
 			}
 			}
+
+		if (!handled)
+		{
+			sig_log.error("Invalid or unsupported operation (op=%d, addr=0x%x, reg=%d, d_size=%lld, i_size=%lld, a_size=%d)", +op, addr, +reg, d_size, i_size, a_size);
+			report_opcode();
+			break;
+		}
 
 			// skip processed instruction
 			RIP(context) += i_size;
@@ -1457,8 +1793,128 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			return true;
 		}
 	while (0);
-#else
-	static_cast<void>(context);
+#elif defined(ARCH_ARM64)
+	const u8* const code = reinterpret_cast<u8*>(RIP(context));
+
+	const u32 instruction = read_from_ptr_unsafe<u32>(code);
+
+	const auto [op, mem_size, reg_size, reg_index, reg_signed] = decode_a64_mem_inst(instruction);
+
+	auto report_opcode = [&]()
+	{
+		sig_log.error("decode_a64_mem_inst(%p): unsupported opcode: %s", code, +std::bit_cast<be_t<u32>>(instruction));
+	};
+
+	if (0x1'0000'0000ull - addr < mem_size)
+	{
+		sig_log.error("Invalid mem_size (0x%llx)", mem_size);
+		report_opcode();
+		return false;
+	}
+
+	// check if address is RawSPU MMIO register
+	do
+		if (addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
+		{
+			auto thread = idm::get_unlocked<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
+
+			if (!thread || is_exec)
+			{
+				break;
+			}
+
+			if (!mem_size)
+			{
+				sig_log.error("Invalid or unsupported instruction (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+
+			bool handled = true;
+
+			switch (op)
+			{
+			case A64_LOAD:
+			{
+				u32 value;
+				const u32 addr_aligned = addr & -4;
+
+				if (addr % 4 + mem_size > 4)
+				{
+					handled = false;
+					break;
+				}
+
+				if (is_writing || !thread->read_reg(addr_aligned, value))
+				{
+					return false;
+				}
+
+				// Adjust value for 8-bit and 16-bit reads
+				value >>= ((4 - mem_size) * 8) - ((addr % 4) * 8);
+				value &= mem_size == 4 ? u32{umax} : ((1u << (mem_size * 8)) - 1);
+
+				if (mem_size == 4)
+				{
+					value = std::bit_cast<be_t<u32>>(value);
+				}
+				else if (mem_size == 2)
+				{
+					value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
+				}
+				else
+				{
+					ensure(mem_size == 1);
+				}
+
+				// Update register value
+				put_a64_reg_value(context, reg_index, reg_size, reg_signed, mem_size, value);
+				break;
+			}
+			case A64_STORE:
+			{
+				if (mem_size != 4)
+				{
+					// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+					handled = false;
+					break;
+				}
+
+				if (!is_writing)
+				{
+					return false;
+				}
+
+				const u64 reg_value = get_a64_reg_value(context, reg_index, reg_size);
+				const u32 val32 = static_cast<u32>(reg_value);
+				if (!thread->write_reg(addr, std::bit_cast<be_t<u32>>(val32)))
+				{
+					return false;
+				}
+
+				break;
+			}
+			default:
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+			}
+
+			if (!handled)
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				break;
+			}
+
+			// skip processed instruction
+			RIP(context) = reinterpret_cast<std::remove_cvref_t<decltype(RIP(context))>>(reinterpret_cast<const char*>(RIP(context)) + 4);
+			g_tls_fault_spu++;
+			return true;
+		}
+	while (0);
 #endif /* ARCH_ */
 
 	const auto required_page_perms = (is_writing ? vm::page_writable : vm::page_readable) + (is_exec ? vm::page_executable : 0);
@@ -1812,7 +2268,7 @@ static LONG exception_handler(PEXCEPTION_POINTERS pExp) noexcept
 			is_exec = true;
 			addr = static_cast<u32>(exec64);
 		}
-		else 
+		else
 		{
 			std::this_thread::sleep_for(1ms);
 			return EXCEPTION_CONTINUE_SEARCH;
@@ -1939,7 +2395,7 @@ static LONG exception_filter(PEXCEPTION_POINTERS pExp) noexcept
 	}
 
 	fmt::append(msg, "RPCS3 image base: %p.\n", GetModuleHandle(NULL));
-	
+
 #if defined(ARCH_X64)
 	fmt::append(msg, "RAX: %016llX	RBX: %016llX\n", pExp->ContextRecord->Rax, pExp->ContextRecord->Rbx);
 	fmt::append(msg, "RCX: %016llX	RDX: %016llX\n", pExp->ContextRecord->Rcx, pExp->ContextRecord->Rdx);
@@ -1971,7 +2427,7 @@ static LONG exception_filter(PEXCEPTION_POINTERS pExp) noexcept
 	{
 		fmt::append(msg, "%s\n", symbol);
 	}
-	
+
 	sys_log.fatal("\n%s", msg);
 	logs::listener::sync_all();
 
@@ -2034,7 +2490,7 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 #else
-	const u32 insn = is_executing ? 0 : *reinterpret_cast<u32*>(RIP(context));
+	const u32 insn = is_executing ? 0 : read_from_ptr_unsafe<u32>(RIP(context));
 	const bool is_writing =
 		(insn & 0xbfff0000) == 0x0c000000 || // STR <Wt>, [<Xn>, #<imm>] (store word with immediate offset)
 		(insn & 0xbfe00000) == 0x0c800000 || // STP <Wt1>, <Wt2>, [<Xn>, #<imm>] (store pair of registers with immediate offset)
@@ -2056,6 +2512,7 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 #endif
 
 	const u64 exec64 = (reinterpret_cast<u64>(info->si_addr) - reinterpret_cast<u64>(vm::g_exec_addr)) / 2;
+	const u64 exec64_2 = (reinterpret_cast<u64>(info->si_addr) - reinterpret_cast<u64>(vm::g_exec_addr)) - vm::g_exec_addr_seg_offset;
 	const auto cause = is_executing ? "executing" : is_writing ? "writing" :
 	                                                             "reading";
 
@@ -2075,6 +2532,13 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 			return;
 		}
 	}
+	else if (exec64_2 < 0x100000000ull && !is_executing)
+	{
+		if (thread_ctrl::get_current() && handle_access_violation(static_cast<u32>(exec64_2), is_writing, true, context))
+		{
+			return;
+		}
+	}
 
 	std::string msg = fmt::format("Segfault %s location %p at %p.\n", cause, info->si_addr, RIP(context));
 
@@ -2084,6 +2548,37 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 	append_thread_name(msg);
+
+#ifdef __APPLE__
+	thread_local bool s_tls_is_attempting_recovery = false;
+	thread_local bool s_tls_last_cause_is_executing = false;
+
+	if (reinterpret_cast<u64>(info->si_addr) < 0x10000)
+	{
+		// Do not recover from the virtual page of 0x0 (such as nullptr)
+	}
+	else if (is_executing || is_writing)
+	{
+		if (s_tls_is_attempting_recovery && s_tls_last_cause_is_executing != is_executing)
+		{
+			// Cause changed, inform recovery
+			s_tls_is_attempting_recovery = false;
+		}
+
+		if (!s_tls_is_attempting_recovery)
+		{
+			s_tls_last_cause_is_executing = is_executing;
+			s_tls_is_attempting_recovery = true;
+			pthread_jit_write_protect_np(is_executing ? true : false);
+
+			sys_log.error("\n%s", msg);
+			sys_log.notice("\n%s", dump_useful_thread_info());
+			sys_log.error("Attempting recovery using pthread_jit_write_protect_np()");
+			logs::listener::sync_all();
+			return;
+		}
+	}
+#endif
 
 #ifdef ANDROID
 	// Resolve the faulting PC to "<module>+0x<offset>" with a single dladdr (no stack
@@ -2184,12 +2679,14 @@ void sigpipe_signaling_handler(int)
 }
 
 #ifdef ANDROID
+// Graft of ouroboros420 e0528f6 (+ re-entrancy guard from 2816549): silent process
+// deaths left nothing in the log because only SIGSEGV/SIGILL were captured.
 static void sigabrt_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noexcept
 {
 	// Re-entrancy guard: the diagnostics below allocate (std::string, the logger,
 	// backtrace symbolication). During a memory-exhaustion SIGABRT those allocations
-	// can themselves abort/terminate, which previously spun into an endless terminate
-	// storm that buried the real aborting frame. If this handler is re-entered, restore
+	// can themselves abort/terminate, which otherwise spins into an endless terminate
+	// storm that buries the real aborting frame. If this handler is re-entered, restore
 	// the default action and re-raise so we get a single clean tombstone instead.
 	static atomic_t<int> s_in_sigabrt{0};
 	if (s_in_sigabrt.exchange(1) != 0)
@@ -2230,9 +2727,9 @@ static void sigabrt_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noe
 	::raise(SIGABRT);
 }
 
-// SIGTRAP: release-LLVM llvm_unreachable/llvm_trap paths emit a BRK instruction;
-// with no handler the process died instantly with ZERO log output (observed:
-// Dante's Inferno silent death mid RuntimeDyld link). Log + tombstone like SIGABRT.
+// Graft of ouroboros420 5bb2b4c: release-LLVM llvm_unreachable/__builtin_trap paths
+// emit a BRK instruction; with no handler the process died instantly with ZERO log
+// output. Log + tombstone like SIGABRT.
 static void sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noexcept
 {
 	std::string msg = "Process trap (SIGTRAP) - llvm_unreachable/__builtin_trap (BRK) or debug break.\n";
@@ -2252,12 +2749,6 @@ static void sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noe
 const bool s_exception_handler_set = []() -> bool
 {
 	struct ::sigaction sa;
-	// NOTE: deliberately NOT SA_ONSTACK. signal_handler is the hot guest access-
-	// violation fast path (handle_access_violation, a deep call), fired on every
-	// guest memory fault. Routing it onto the (small, unverified) bionic per-thread
-	// alternate signal stack risks overflowing that stack in the AV path - and only
-	// helps the rare stack-overflow-death case, which would need an explicitly sized
-	// sigaltstack() anyway. Matches upstream RPCS3 (plain SA_SIGINFO).
 	sa.sa_flags = SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_sigaction = signal_handler;
@@ -2269,8 +2760,8 @@ const bool s_exception_handler_set = []() -> bool
 	}
 
 #if defined(__APPLE__) || defined(ANDROID)
-	// On ARM Android SIGBUS (alignment faults, truncated mmaps) would otherwise
-	// kill the process with nothing written to the log.
+	// ouroboros420 e0528f6: on ARM Android SIGBUS (alignment faults, truncated mmaps)
+	// would otherwise kill the process with nothing written to the log.
 	if (::sigaction(SIGBUS, &sa, NULL) == -1)
 	{
 		std::fprintf(stderr, "sigaction(SIGBUS) failed (%d).\n", errno);
@@ -2321,17 +2812,18 @@ const bool s_terminate_handler_set = []() -> bool
 {
 	std::set_terminate([]()
 		{
-			// Re-entrancy guard. Under memory exhaustion the terminate path itself
-			// allocates (report_fatal_error formats a message -> operator new; with
+			// Graft of ouroboros420 2816549: under memory exhaustion the terminate path
+			// itself allocates (report_fatal_error formats a message -> operator new; with
 			// -fno-exceptions a failed allocation calls std::terminate again), which
-			// recurses forever (terminate -> get_new_handler -> terminate ...) and
-			// buries the real crash - exactly what the Skate 2 patch-enable OOM
-			// produced (100+ stacked aborts). If terminate re-enters, hard-stop
+			// recurses forever (terminate -> get_new_handler -> terminate ...) and buries
+			// the real crash under 100+ stacked aborts. If terminate re-enters, hard-stop
 			// without allocating.
 			static atomic_t<int> s_terminating{0};
 			if (s_terminating.exchange(1) != 0)
 			{
+#ifndef _WIN32
 				::signal(SIGABRT, SIG_DFL);
+#endif
 				std::abort();
 			}
 
@@ -2366,23 +2858,47 @@ void thread_base::start()
 	ensure(m_thread);
 	ensure(::ResumeThread(reinterpret_cast<HANDLE>(+m_thread)) != static_cast<DWORD>(-1));
 #elif defined(__APPLE__) || defined(ANDROID)
+	pthread_t thread_id{};
 	pthread_attr_t stack_size_attr;
 	pthread_attr_init(&stack_size_attr);
 	pthread_attr_setstacksize(&stack_size_attr, 0x800000);
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), &stack_size_attr, entry_point, this) == 0);
+	ensure(pthread_create(&thread_id, &stack_size_attr, entry_point, this) == 0);
 #else
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), nullptr, entry_point, this) == 0);
+	pthread_t thread_id{};
+	ensure(pthread_create(&thread_id, nullptr, entry_point, this) == 0);
+#endif
+
+#ifndef _WIN32
+	// Update m_thread atomically
+	u64 dest_id = 0;
+	std::memcpy(&dest_id, &thread_id, sizeof(thread_id));
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, dest_id))
+	{
+		ensure(m_thread == dest_id);
+	}
 #endif
 }
 
 void thread_base::initialize(void (*error_cb)())
 {
 #ifndef _WIN32
-#ifdef ANDROID
-	m_thread.release(pthread_self());
+#ifdef __APPLE__
+	while (!m_thread)
+	{
+		rx::busy_wait();
+	}
+	[[maybe_unused]] u64 new_tid = 0;
+#elif defined(ANDROID)
+	const u64 new_tid = pthread_self();
 #else
-	m_thread.release(reinterpret_cast<u64>(pthread_self()));
+	const u64 new_tid = reinterpret_cast<u64>(pthread_self());
 #endif
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, new_tid))
+	{
+		ensure(m_thread == new_tid);
+	}
 #endif
 
 	// Initialize TLS variables
@@ -2848,10 +3364,11 @@ bool thread_base::join(bool dtor) const
 	// Hacked for too sleepy threads (1ms) TODO: make sure it's unneeded and remove
 	auto timeout = dtor && Emu.IsStopped() ? atomic_wait_timeout{1'000'000} : atomic_wait_timeout::inf;
 
-	// With opt-in WFE low-power waits, the joined thread may be parked on a watched
-	// cacheline (rx::wfe_park) rather than this sync word, so it can't see a stop on
-	// its own. Cap the wait so we periodically wake to SEV it (below); otherwise the
-	// join would hang waiting for a thread that never observes its stop flag.
+	// Graft of ouroboros420 7aa6c17: with opt-in WFE low-power waits, the joined thread
+	// may be parked on a watched cacheline (rx::wfe_park) rather than this sync word, so
+	// it can't see a stop on its own. Cap the wait so we periodically wake to SEV it
+	// (below); otherwise the join hangs waiting for a thread that never observes its stop
+	// flag (on-device: savestate save froze for 34s -> ANR).
 	if (rx::wfe_enabled() && timeout == atomic_wait_timeout::inf)
 	{
 		timeout = atomic_wait_timeout{1'000'000};
@@ -3011,33 +3528,25 @@ void thread_base::exec()
 	}
 }
 
-[[noreturn]] void thread_ctrl::silent_exit() noexcept
+void thread_ctrl::set_name(std::string name)
 {
-	if (const auto _this = g_tls_this_thread)
+	// Tolerate being called from a thread that is not a named_thread, matching
+	// get_name()'s existing behaviour (it returns "not named_thread" rather than
+	// asserting). The two are used as a pair - save the old name, set a new one,
+	// restore it - so a hard assert here turns any such caller into a SIGTRAP
+	// while the get_name() half succeeds silently.
+	//
+	// This is reachable on Android: the app drives PPU precompilation from a
+	// platform service thread, which never goes through named_thread, so
+	// ppu_initialize()'s worker-naming traps on entry. The name is purely
+	// cosmetic (debugger/profiler labelling), so skipping it is harmless.
+	if (!g_tls_this_thread)
 	{
-		if (g_tls_error_callback)
-		{
-			g_tls_error_callback();
-		}
-
-		const u64 _self = _this->finalize(thread_state::errored);
-
-		if (_self == umax)
-		{
-			// Unused, detached thread support remnant
-			delete _this;
-		}
-
-		thread_base::finalize(umax);
+		return;
 	}
 
-#ifdef _WIN32
-	_endthreadex(0);
-#else
-	pthread_exit(nullptr);
-#endif
-
-	std::abort();
+	g_tls_this_thread->m_tname.store(make_single<std::string>(name));
+	g_tls_this_thread->set_name(std::move(name));
 }
 
 [[noreturn]] void thread_ctrl::emergency_exit(std::string_view reason)
@@ -3111,7 +3620,9 @@ void thread_base::exec()
 							})
 				.second)
 		{
+#ifndef __APPLE__
 			rx::breakpoint();
+#endif
 		}
 	}
 
@@ -3137,6 +3648,32 @@ void thread_base::exec()
 	}
 
 	report_fatal_error(reason);
+}
+
+void thread_ctrl::silent_exit() noexcept
+{
+	if (const auto _this = g_tls_this_thread)
+	{
+		g_tls_error_callback();
+
+		u64 _self = _this->finalize(thread_state::errored);
+
+		if (_self == umax)
+		{
+			// Unused, detached thread support remnant
+			delete _this;
+		}
+
+		thread_base::finalize(umax);
+	}
+
+#ifdef _WIN32
+	_endthreadex(0);
+#else
+	pthread_exit(nullptr);
+#endif
+
+	std::abort();
 }
 
 void thread_ctrl::detect_cpu_layout()
@@ -3206,6 +3743,10 @@ namespace
 
 	// Big cluster = cores whose max frequency is above the lowest tier (the
 	// efficiency cores). 0 if detection fails or all cores are equal.
+	//
+	// Grafted from ouroboros420 6a3f2e0 (rebase-rpcs3-jun2026). Kept verbatim in
+	// behaviour: it is the big.LITTLE pinning this tree never had, and it is
+	// additive - nothing changes unless set_android_affinity(true) is called.
 	u64 detect_android_big_mask()
 	{
 		const u32 n = std::min<u32>(std::thread::hardware_concurrency(), 64u);
@@ -3227,10 +3768,12 @@ namespace
 				std::fclose(f);
 			}
 		}
+
 		if (maxf == 0 || minf == maxf)
 		{
 			return 0;
 		}
+
 		u64 mask = 0;
 		for (u32 i = 0; i < n; i++)
 		{
@@ -3241,8 +3784,11 @@ namespace
 		}
 		return mask;
 	}
-}
+} // namespace
 
+// NOTE: these two stay OUTSIDE #ifdef ANDROID. They are declared unconditionally
+// in Thread.h and referenced from CPUThread/RSXThread/RSXOffload and the overlay
+// settings page, so guarding them would break every non-Android build.
 void thread_ctrl::set_android_affinity(bool enable)
 {
 	g_android_affinity.store(enable, std::memory_order_relaxed);
@@ -3256,6 +3802,7 @@ bool thread_ctrl::android_affinity_enabled()
 u64 thread_ctrl::get_affinity_mask(thread_class group)
 {
 #ifdef ANDROID
+	// Opt-in big-cluster pinning. Detected once, lazily.
 	if (g_android_affinity.load(std::memory_order_relaxed))
 	{
 		if (!g_android_clusters_done.load(std::memory_order_relaxed))
@@ -3528,13 +4075,12 @@ void thread_ctrl::set_native_priority(int priority)
 	{
 		sig_log.error("SetThreadPriority() failed: %s", fmt::win_error{GetLastError(), nullptr});
 	}
-#else
-	// Linux/Android: JIT/compile threads run under SCHED_OTHER, whose
-	// sched_priority range is [0,0]. The old pthread_setschedparam() path was
-	// therefore a no-op, so "low priority" compile threads still ran at full
-	// normal priority and saturated every core - starving the UI thread and
-	// causing ANRs ("app not responding") while a game compiled. SCHED_OTHER is
-	// (de)prioritised via the nice value, so use setpriority() instead.
+#elif defined(ANDROID)
+	// Graft of ouroboros420 201cc3b: JIT/compile threads run under SCHED_OTHER, whose
+	// sched_priority range is [0,0] on Linux/Android. The pthread_setschedparam() path
+	// below is therefore a no-op there, so "low priority" compile threads still ran at
+	// full normal priority and saturated every core - starving the UI thread and causing
+	// ANRs while a game compiled. SCHED_OTHER is (de)prioritised via the nice value.
 	//   priority < 0  -> nice +10 (Android THREAD_PRIORITY_BACKGROUND): keeps the
 	//                    compile running but lets the foreground UI preempt it.
 	//   priority == 0 -> nice 0 (restore to normal).
@@ -3546,6 +4092,21 @@ void thread_ctrl::set_native_priority(int priority)
 		// Only the lowering path matters for responsiveness; raising can fail
 		// without CAP_SYS_NICE, which is fine - don't spam the log for it.
 		sig_log.error("setpriority(nice=%d) failed", nice_value);
+	}
+#else
+	int policy;
+	struct sched_param param;
+
+	pthread_getschedparam(pthread_self(), &policy, &param);
+
+	if (priority > 0)
+		param.sched_priority = sched_get_priority_max(policy);
+	if (priority < 0)
+		param.sched_priority = sched_get_priority_min(policy);
+
+	if (int err = pthread_setschedparam(pthread_self(), policy, &param))
+	{
+		sig_log.error("pthread_setschedparam() failed: %d", err);
 	}
 #endif
 }
@@ -3713,15 +4274,26 @@ std::pair<void*, usz> thread_ctrl::get_thread_stack()
 
 u64 thread_ctrl::get_tid()
 {
+	static thread_local u64 s_tls_tid = []() -> u64
+	{
 #ifdef _WIN32
-	return GetCurrentThreadId();
+		return GetCurrentThreadId();
 #elif defined(ANDROID)
-	return static_cast<u64>(pthread_self());
+		return pthread_gettid_np(pthread_self());
 #elif defined(__linux__)
-	return syscall(SYS_gettid);
+		return syscall(SYS_gettid);
+#elif defined(__APPLE__)
+		u64 tid{};
+		pthread_threadid_np(nullptr, &tid);
+		return tid;
+#elif defined(__FreeBSD__)
+		return pthread_getthreadid_np();
 #else
-	return reinterpret_cast<u64>(pthread_self());
+		return static_cast<u64>(pthread_self());
 #endif
+	}();
+
+	return s_tls_tid;
 }
 
 bool thread_ctrl::is_main()

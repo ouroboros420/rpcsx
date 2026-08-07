@@ -97,23 +97,26 @@ u32 gcmGetLocalMemorySize(u32 sdk_version)
 
 error_code gcmMapEaIoAddress(ppu_thread& ppu, u32 ea, u32 io, u32 size, bool is_strict);
 
-u32 gcmIoOffsetToAddress(u32 ioOffset)
+u32 gcmIoOffsetToAddress(u32 io_offs)
 {
-	if (ioOffset >= 0x20000000)
+	u32 upper_12bits = 0;
+
+	if (io_offs < 0x20000000)
 	{
-		// Out of IO space (upstream guard): indexing past the 512-entry offset
-		// table would read adjacent guest memory and return a garbage address.
-		return 0;
+		upper_12bits = rsx::get_current_renderer()->iomap_table.ea[io_offs >> 20];
+
+		if (upper_12bits >= rsx::constants::local_mem_base)
+		{
+			upper_12bits = 0;
+		}
 	}
 
-	const u32 upper12Bits = g_fxo->get<gcm_config>().offsetTable.eaAddress[ioOffset >> 20];
-
-	if (upper12Bits > 0xBFF)
+	if (!upper_12bits)
 	{
-		return 0;
+		cellGcmSys.error("Failed to convert io offset: 0x%x", io_offs);
 	}
 
-	return (upper12Bits << 20) | (ioOffset & 0xFFFFF);
+	return upper_12bits | (io_offs & 0xFFFFF);
 }
 
 void InitOffsetTable()
@@ -138,7 +141,7 @@ u32 cellGcmGetLabelAddress(u8 index)
 	return rsx::get_current_renderer()->label_addr + 0x10 * index;
 }
 
-vm::ptr<CellGcmReportData> cellGcmGetReportDataAddressLocation(u32 index, u32 location)
+vm::ptr<CellGcmReportData> cellGcmGetReportDataAddressLocation(ppu_thread& ppu, u32 index, u32 location)
 {
 	cellGcmSys.trace("cellGcmGetReportDataAddressLocation(index=%d, location=%d)", index, location);
 
@@ -146,7 +149,7 @@ vm::ptr<CellGcmReportData> cellGcmGetReportDataAddressLocation(u32 index, u32 lo
 	{
 		if (index >= 1024 * 1024)
 		{
-			cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong main index (%d)", index);
+			cellGcmSys.error("%s: Wrong main index (%d)", ppu.current_function, index);
 		}
 
 		return vm::cast(gcmIoOffsetToAddress(0x0e000000 + index * 0x10));
@@ -156,7 +159,7 @@ vm::ptr<CellGcmReportData> cellGcmGetReportDataAddressLocation(u32 index, u32 lo
 
 	if (index >= 2048)
 	{
-		cellGcmSys.error("cellGcmGetReportDataAddressLocation: Wrong local index (%d)", index);
+		cellGcmSys.error("%s: Wrong local index (%d)", ppu.current_function, index);
 	}
 
 	return vm::cast(rsx::get_current_renderer()->label_addr + OFFSET_OF(RsxReports, report) + index * 0x10);
@@ -233,20 +236,22 @@ u32 cellGcmGetReportDataAddress(u32 index)
 	return rsx::get_current_renderer()->label_addr + OFFSET_OF(RsxReports, report) + index * 0x10;
 }
 
-u32 cellGcmGetReportDataLocation(u32 index, u32 location)
+u32 cellGcmGetReportDataLocation(ppu_thread& ppu, u32 index, u32 location)
 {
 	cellGcmSys.warning("cellGcmGetReportDataLocation(index=%d, location=%d)", index, location);
 
-	vm::ptr<CellGcmReportData> report = cellGcmGetReportDataAddressLocation(index, location);
+	vm::ptr<CellGcmReportData> report = cellGcmGetReportDataAddressLocation(ppu, index, location);
 	return report->value;
 }
 
-u64 cellGcmGetTimeStampLocation(u32 index, u32 location)
+u64 cellGcmGetTimeStampLocation(ppu_thread& ppu, u32 index, u32 location)
 {
 	cellGcmSys.trace("cellGcmGetTimeStampLocation(index=%d, location=%d)", index, location);
 
-	// NOTE: No error checkings
-	return cellGcmGetReportDataAddressLocation(index, location)->timer;
+	vm::ptr<CellGcmReportData> report = cellGcmGetReportDataAddressLocation(ppu, index, location);
+
+	// Timestamp reports don't need host GPU access and are much faster to emulate
+	return vm::get_super_ptr<CellGcmReportData>(report.addr())->timer;
 }
 
 //----------------------------------------------------------------------------
@@ -456,7 +461,7 @@ error_code _cellGcmInitBody(ppu_thread& ppu, vm::pptr<CellGcmContextData> contex
 	gcm_cfg.zculls_addr = vm::alloc(sizeof(CellGcmZcullInfo) * 8, vm::main);
 	gcm_cfg.tiles_addr = vm::alloc(sizeof(CellGcmTileInfo) * 15, vm::main);
 
-	vm::_ref<CellGcmContextData>(gcm_cfg.gcm_info.context_addr) = gcm_cfg.current_context;
+	vm::write<CellGcmContextData>(gcm_cfg.gcm_info.context_addr, gcm_cfg.current_context);
 	context->set(gcm_cfg.gcm_info.context_addr);
 
 	// 0x40 is to offset CellGcmControl from RsxDmaControl
@@ -600,7 +605,7 @@ ret_type gcmSetPrepareFlip(ppu_thread& ppu, vm::ptr<CellGcmContextData> ctxt, u3
 
 	if (!old_api && ctxt.addr() == gcm_cfg.gcm_info.context_addr)
 	{
-		vm::_ref<CellGcmControl>(gcm_cfg.gcm_info.control_addr).put += cmd_size;
+		vm::_ptr<CellGcmControl>(gcm_cfg.gcm_info.control_addr)->put += cmd_size;
 	}
 
 	return static_cast<ret_type>(not_an_error(id));
@@ -1472,7 +1477,7 @@ s32 cellGcmCallback(ppu_thread& ppu, vm::ptr<CellGcmContextData> context, u32 co
 
 	auto& gcm_cfg = g_fxo->get<gcm_config>();
 
-	auto& ctrl = vm::_ref<CellGcmControl>(gcm_cfg.gcm_info.control_addr);
+	auto& ctrl = *vm::_ptr<CellGcmControl>(gcm_cfg.gcm_info.control_addr);
 
 	// Flush command buffer (ie allow RSX to read up to context->current)
 	ctrl.put.exchange(getOffsetFromAddress(context->current.addr()));
@@ -1518,7 +1523,7 @@ DECLARE(ppu_module_manager::cellGcmSys)("cellGcmSys", []()
 		REG_FUNC(cellGcmSys, cellGcmGetReportDataAddressLocation);
 		REG_FUNC(cellGcmSys, cellGcmGetReportDataLocation);
 		REG_FUNC(cellGcmSys, cellGcmGetTimeStamp).flag(MFF_FORCED_HLE); // HLE-ing this allows for optimizations around reports
-		REG_FUNC(cellGcmSys, cellGcmGetTimeStampLocation);
+	REG_FUNC(cellGcmSys, cellGcmGetTimeStampLocation).flag(MFF_FORCED_HLE); // Ditto
 
 		// Command Buffer Control
 		REG_FUNC(cellGcmSys, cellGcmGetControlRegister);

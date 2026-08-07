@@ -8,7 +8,7 @@ namespace rsx
 {
 	template <typename T>
 	concept SpanLike = requires(T t) {
-		{ t.data() } -> std::convertible_to<void*>;
+		{ t.data() } -> std::convertible_to<const void*>;
 		{ t.size_bytes() } -> std::convertible_to<usz>;
 	};
 
@@ -72,22 +72,21 @@ namespace rsx
 			return static_cast<T*>(m_ptr);
 		}
 
-		usz size() const
+		template <Integral T = usz>
+		T size() const
 		{
-			return m_size;
+			return static_cast<T>(m_size);
 		}
 
 		template <typename T>
 		std::span<T> as_span() const
 		{
 			auto bytes = data();
+			ensure(is_naturally_aligned<T>(), "IO buffer span cast requires naturally aligned pointers.");
 			return {utils::bless<T>(bytes), m_size / sizeof(T)};
 		}
 
-		// True when the backing pointer and size satisfy T's natural alignment.
-		// Callers that would otherwise cast to an over-aligned type (e.g. u128 /
-		// __uint128_t) on ARM use this to fall back to the byte-aligned x128 alias.
-		template <typename T>
+		template<typename T>
 		bool is_naturally_aligned() const
 		{
 			return ((reinterpret_cast<uintptr_t>(data()) & (alignof(T) - 1)) == 0) &&

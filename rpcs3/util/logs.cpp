@@ -89,8 +89,8 @@ namespace logs
 		z_stream m_zs{};
 		shared_mutex m_m{};
 
-		atomic_t<u64, 64> m_buf{0}; // MSB (39 bits): push begin, LSB (25 bis): push size
-		atomic_t<u64, 64> m_out{0}; // Amount of bytes written to file
+		atomic_t<u64, 128> m_buf{0}; // MSB (39 bits): push begin, LSB (25 bis): push size
+		atomic_t<u64, 128> m_out{0}; // Amount of bytes written to file
 
 		uchar m_zout[65536]{};
 
@@ -118,7 +118,7 @@ namespace logs
 
 		~file_listener() override = default;
 
-		void log(u64 stamp, const message& msg, const std::string& prefix, const std::string& text) override;
+		void log(u64 stamp, const message& msg, std::string_view prefix, std::string_view text) override;
 
 		void sync() override
 		{
@@ -138,7 +138,7 @@ namespace logs
 		~root_listener() override = default;
 
 		// Encode level, current thread name, channel name and write log message
-		void log(u64, const message&, const std::string&, const std::string&) override
+		void log(u64, const message&, std::string_view, std::string_view) override
 		{
 			// Do nothing
 		}
@@ -251,15 +251,15 @@ namespace logs
 	{
 		std::lock_guard lock(g_mutex);
 
-		auto found = get_logger()->channels.equal_range(ch_name);
+		const auto found = get_logger()->channels.equal_range(ch_name);
 
 		if (found.first != found.second)
 		{
 			return found.first->second->enabled.observe();
 		}
 
-		return level::always;
-	}
+			return level::always;
+		}
 
 	void set_channel_levels(const std::map<std::string, logs::level, std::less<>>& map)
 	{
@@ -706,6 +706,11 @@ void logs::file_writer::sync()
 		std::this_thread::yield();
 	}
 
+	if (thread_ctrl::get_current())
+	{
+		return;
+	}
+
 	// Ensure written to disk
 	if (m_fout)
 	{
@@ -774,7 +779,7 @@ logs::file_listener::file_listener(const std::string& path, u64 max_size)
 	file_writer::log("\xEF\xBB\xBF", 3);
 }
 
-void logs::file_listener::log(u64 stamp, const logs::message& msg, const std::string& prefix, const std::string& _text)
+void logs::file_listener::log(u64 stamp, const logs::message& msg, std::string_view prefix, std::string_view _text)
 {
 	/*constinit thread_local*/ std::string text;
 	text.reserve(50000);

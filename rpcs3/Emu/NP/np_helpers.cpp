@@ -5,7 +5,7 @@
 #include "rpcn_client.h"
 
 #ifdef _WIN32
-#include <WS2tcpip.h>
+#include <ws2tcpip.h>
 #endif
 
 LOG_CHANNEL(rpcn_log, "rpcn");
@@ -110,9 +110,15 @@ namespace np
 
 	bool is_valid_npid(const SceNpId& npid)
 	{
-		if (!std::all_of(npid.handle.data, npid.handle.data + 16, [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == 0; } )
-			|| npid.handle.data[16] != 0
-			|| !std::all_of(npid.handle.dummy, npid.handle.dummy + 3, [](char val) { return val == 0; }) )
+		if (!std::all_of(npid.handle.data, npid.handle.data + 16, [](char c)
+				{
+					return std::isalnum(static_cast<unsigned char>(c)) || c == '-' ||
+						   c == '_' || c == 0;
+				}) ||
+			npid.handle.data[16] != 0 || !std::all_of(npid.handle.dummy, npid.handle.dummy + 3, [](char val)
+											 {
+												 return val == 0;
+											 }))
 		{
 			return false;
 		}
@@ -144,4 +150,4 @@ namespace np
 
 		return false;
 	}
-}
+} // namespace np

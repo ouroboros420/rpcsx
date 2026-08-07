@@ -90,8 +90,6 @@ namespace rsx
 
 		void set_surface_format(context* ctx, u32 reg, u32 arg);
 
-		void set_aa_control(context* ctx, u32 reg, u32 arg);
-
 		void set_surface_options_dirty_bit(context* ctx, u32 reg, u32 arg);
 
 		void set_color_mask(context* ctx, u32 reg, u32 arg);
@@ -109,6 +107,8 @@ namespace rsx
 		void set_blend_factor(context* ctx, u32 reg, u32 arg);
 
 		void set_transform_constant_load(context* ctx, u32 reg, u32 arg);
+
+		void set_aa_control(context* ctx, u32 reg, u32 arg);
 
 #define RSX(ctx) ctx->rsxthr
 #define REGS(ctx) (&rsx::method_registers)

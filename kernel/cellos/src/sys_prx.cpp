@@ -11,8 +11,8 @@
 
 #include "Crypto/unedat.h"
 #include "Emu/Cell/ErrorCodes.h"
-#include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/PPUFunction.h"
+#include "Emu/Cell/PPUThread.h"
 #include "sys_fs.h"
 #include "sys_memory.h"
 #include "sys_process.h"
@@ -73,7 +73,7 @@ extern const std::map<std::string_view, int> g_prx_list{
     {"libcelpenc.sprx", 0},
     {"libddpdec.sprx", 0},
     {"libdivxdec.sprx", 0},
-    {"libdmux.sprx", 0},
+    {"libdmux.sprx", 1},
     {"libdmuxpamf.sprx", 1},
     {"libdtslbrdec.sprx", 0},
     {"libfiber.sprx", 0},
@@ -187,8 +187,9 @@ extern const std::map<std::string_view, int> g_prx_list{
 
 bool ppu_register_library_lock(std::string_view libname, bool lock_lib);
 
-extern error_code sysmoduleModuleStart(ppu_thread& ppu, u32 args, vm::ptr<void> argp);
-extern error_code sysmoduleModuleStop(ppu_thread& ppu);
+extern error_code sysmoduleModuleStart(ppu_thread &ppu, u32 args,
+                                       vm::ptr<void> argp);
+extern error_code sysmoduleModuleStop(ppu_thread &ppu);
 
 static error_code
 prx_load_module(const std::string &vpath, u64 flags,
@@ -239,11 +240,11 @@ prx_load_module(const std::string &vpath, u64 flags,
   auto hle_load = [&]() {
     const auto prx = idm::make_ptr<lv2_obj, lv2_prx>();
 
-    if (name == "libsysmodule.sprx")
-    {
-      // HLE cellSysmodule: dispatch the stub prx start/stop into the HLE handlers
-      prx->start = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(FIND_FUNC(sysmoduleModuleStart)));
-      prx->stop = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(FIND_FUNC(sysmoduleModuleStop)));
+    if (name == "libsysmodule.sprx") {
+      prx->start = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(
+          FIND_FUNC(sysmoduleModuleStart)));
+      prx->stop = vm::cast(g_fxo->get<ppu_function_manager>().func_addr(
+          FIND_FUNC(sysmoduleModuleStop)));
     }
 
     prx->name = std::move(name);
@@ -251,7 +252,7 @@ prx_load_module(const std::string &vpath, u64 flags,
 
     sys_prx.warning("Ignored module: \"%s\" (id=0x%x)", vpath, idm::last_id());
 
-    return not_an_error(idm::last_id());
+    return not_an_error(idm::last_id<lv2_prx>());
   };
 
   if (ignore) {
@@ -310,7 +311,7 @@ prx_load_module(const std::string &vpath, u64 flags,
 
   sys_prx.success("Loaded module: \"%s\" (id=0x%x)", vpath, idm::last_id());
 
-  return not_an_error(idm::last_id());
+  return not_an_error(idm::last_id<lv2_prx>());
 }
 
 fs::file make_file_view(fs::file &&file, u64 offset, u64 size);
@@ -320,8 +321,8 @@ std::function<void(void *)> lv2_prx::load(utils::serial &ar) {
       GET_SERIALIZATION_VERSION(lv2_prx_overlay);
 
   const std::string path = vfs::get(ar.pop<std::string>());
-  const s64 offset = ar;
-  const u32 state = ar;
+  const s64 offset{ar};
+  const u32 state{ar};
 
   usz seg_count = 0;
   ar.deserialize_vle(seg_count);
@@ -357,10 +358,9 @@ std::function<void(void *)> lv2_prx::load(utils::serial &ar) {
 
       ensure(prx);
     } else {
-      // The PRX file could not be reopened to restore an LLE module. Log the
-      // resolved path so any path/mount regression is diagnosable instead of a
-      // bare "Verification failed". (The usual cause - the firmware VFS mounts
-      // missing on a savestate reload - is fixed in Emulator::Restart.)
+      // Graft of 4757ca05e: the PRX file could not be reopened to restore an
+      // LLE module. Log the resolved path so a path/mount regression stays
+      // diagnosable instead of producing a bare "Verification failed".
       sys_prx.error(
           "lv2_prx::load: failed to reopen module file '%s' (offset=0x%x). "
           "Savestate load cannot restore this LLE module.",
@@ -372,7 +372,7 @@ std::function<void(void *)> lv2_prx::load(utils::serial &ar) {
       // Partially recover information
       for (usz i = 0; i < seg_count; i++) {
         auto &seg = prx->segs.emplace_back();
-        seg.addr = ar;
+        ar(seg.addr);
         seg.size = 1; // TODO
       }
     }
@@ -925,9 +925,6 @@ error_code _sys_prx_register_library(ppu_thread &ppu, vm::ptr<void> library) {
                  lib_addr < prx.exports_end;
                  index++, lib_addr += vm::read8(lib_addr) ? vm::read8(lib_addr)
                                                           : sizeof_lib) {
-              // memcmp, not memcpy (upstream fix 3b6afc1d9): the buggy memcpy
-              // OVERWROTE every initialized PRX's export descriptors instead
-              // of comparing, and never matched (memcpy returns dst).
               if (std::memcmp(vm::base(lib_addr), mem_copy.data(),
                               sizeof_lib) == 0) {
                 atomic_storage<char>::release(

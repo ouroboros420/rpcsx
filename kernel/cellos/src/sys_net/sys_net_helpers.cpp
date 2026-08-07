@@ -1,14 +1,15 @@
 #include "stdafx.h"
 
+#include "Emu/system_config.h"
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/IdManager.h"
-#include "Emu/system_config.h"
 #include "sys_net/lv2_socket.h"
 #include "sys_net/network_context.h"
 #include "sys_net/sys_net_helpers.h"
 
-#ifndef _WIN32
-#include <arpa/inet.h>
+#ifdef _WIN32
+#include "Emu/NP/np_handler.h"
+#include "Emu/NP/np_helpers.h"
 #endif
 
 LOG_CHANNEL(sys_net);
@@ -171,8 +172,18 @@ native_addr_to_sys_net_addr(const ::sockaddr_storage &native_addr) {
   // Windows doesn't support sending packets to 0.0.0.0 but it works on unixes,
   // send to 127.0.0.1 instead
   if (native_addr.sin_addr.s_addr == 0x00000000) {
-    sys_net.warning("[Native] Redirected 0.0.0.0 to 127.0.0.1");
-    native_addr.sin_addr.s_addr = std::bit_cast<u32, be_t<u32>>(0x7F000001);
+    auto &nph = g_fxo->get<named_thread<np::np_handler>>();
+    if (const u32 bind_addr = nph.get_bind_ip(); bind_addr != 0) {
+      // If bind IP is set 0.0.0.0 was bound to binding_ip so we need to connect
+      // to that ip
+      sys_net.warning("[Native] Redirected 0.0.0.0 to %s",
+                      np::ip_to_string(bind_addr));
+      native_addr.sin_addr.s_addr = bind_addr;
+    } else {
+      // Otherwise we connect to localhost which should be bound
+      sys_net.warning("[Native] Redirected 0.0.0.0 to 127.0.0.1");
+      native_addr.sin_addr.s_addr = std::bit_cast<u32, be_t<u32>>(0x7F000001);
+    }
   }
 #endif
 
@@ -189,6 +200,20 @@ bool is_ip_public_address(const ::sockaddr_in &addr) {
   }
 
   return true;
+}
+
+u32 network_clear_queue(ppu_thread &ppu) {
+  u32 cleared = 0;
+
+  idm::select<lv2_socket>(
+      [&](u32, lv2_socket &sock) { cleared += sock.clear_queue(&ppu); });
+
+  return cleared;
+}
+
+void clear_ppu_to_awake(ppu_thread &ppu) {
+  g_fxo->get<network_context>().del_ppu_to_awake(&ppu);
+  g_fxo->get<p2p_context>().del_ppu_to_awake(&ppu);
 }
 
 be_t<u32> resolve_binding_ip() {
@@ -208,20 +233,6 @@ be_t<u32> resolve_binding_ip() {
   }
 
   return conv.s_addr;
-}
-
-u32 network_clear_queue(ppu_thread &ppu) {
-  u32 cleared = 0;
-
-  idm::select<lv2_socket>(
-      [&](u32, lv2_socket &sock) { cleared += sock.clear_queue(&ppu); });
-
-  return cleared;
-}
-
-void clear_ppu_to_awake(ppu_thread &ppu) {
-  g_fxo->get<network_context>().del_ppu_to_awake(&ppu);
-  g_fxo->get<p2p_context>().del_ppu_to_awake(&ppu);
 }
 
 #ifdef _WIN32

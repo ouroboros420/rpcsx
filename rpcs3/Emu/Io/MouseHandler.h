@@ -1,6 +1,6 @@
 #pragma once
 
-#include <list>
+#include <deque>
 #include <vector>
 #include "util/StrFmt.h"
 #include "util/mutex.h"
@@ -96,6 +96,9 @@ struct MouseData
 	s8 y_axis = 0;
 	s8 wheel = 0;
 	s8 tilt = 0;
+
+	s32 pixel_x = 0;
+	s32 pixel_y = 0;
 };
 
 struct MouseTabletData
@@ -104,8 +107,8 @@ struct MouseTabletData
 	u8 data[MOUSE_MAX_CODES]{};
 };
 
-using MouseTabletDataList = std::list<MouseTabletData>;
-using MouseDataList = std::list<MouseData>;
+using MouseTabletDataList = std::deque<MouseTabletData>;
+using MouseDataList = std::deque<MouseData>;
 
 struct Mouse
 {
@@ -125,7 +128,7 @@ class MouseHandlerBase
 protected:
 	MouseInfo m_info{};
 	std::vector<Mouse> m_mice;
-	steady_clock::time_point last_update{};
+	steady_clock::time_point m_last_update{};
 
 	bool is_time_for_update(double elapsed_time_ms = 10.0); // 4-10 ms, let's use 10 for now
 

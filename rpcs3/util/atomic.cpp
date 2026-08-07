@@ -1,6 +1,6 @@
 #include "atomic.hpp"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #define USE_FUTEX
 #elif (!defined(_WIN32) || defined(__GNUC__))
 #define USE_STD
@@ -15,12 +15,12 @@ namespace utils
 {
 	u128 __vectorcall atomic_load16(const void* ptr)
 	{
-		return std::bit_cast<u128>(_mm_load_si128((__m128i*)ptr));
+		return std::bit_cast<u128>(_mm_load_si128(static_cast<const __m128i*>(ptr)));
 	}
 
 	void __vectorcall atomic_store16(void* ptr, u128 value)
 	{
-		_mm_store_si128((__m128i*)ptr, std::bit_cast<__m128i>(value));
+		_mm_store_si128(static_cast<__m128i*>(ptr), std::bit_cast<__m128i>(value));
 	}
 } // namespace utils
 #endif
@@ -53,6 +53,10 @@ static bool has_waitv()
 
 #ifdef __linux__
 #include <pthread.h>
+#endif
+
+#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#include <pthread_np.h>
 #endif
 
 #include "rx/asm.hpp"
@@ -189,9 +193,17 @@ namespace
 #ifdef _WIN32
 			tid = GetCurrentThreadId();
 #elif defined(ANDROID)
-			tid = pthread_self();
+			tid = pthread_gettid_np(pthread_self());
+#elif defined(__linux__)
+			tid = syscall(SYS_gettid);
+#elif defined(__APPLE__)
+			u64 tid_temp{};
+			pthread_threadid_np(nullptr, &tid_temp);
+			tid = tid_temp; // Use a temporary for extra safety
+#elif defined(__FreeBSD__)
+			tid = pthread_getthreadid_np();
 #else
-			tid = reinterpret_cast<u64>(pthread_self());
+			tid = pthread_self();
 #endif
 
 #ifdef USE_STD
@@ -479,13 +491,13 @@ static void cond_free(u32 cond_id, u32 tls_slot = -1)
 	// Dereference, destroy on last ref
 	const bool last = cond->ptr_ref.atomic_op([](cond_handle::fat_ptr& val)
 		{
-			ensure(val.ref_ctr);
+		ensure(val.ref_ctr);
 
-			val.ref_ctr--;
+		val.ref_ctr--;
 
-			if (val.ref_ctr == 0)
+		if (val.ref_ctr == 0)
 			{
-				val = cond_handle::fat_ptr{};
+			val = cond_handle::fat_ptr{};
 				return true;
 			}
 
@@ -543,13 +555,13 @@ static cond_handle* cond_id_lock(u32 cond_id, uptr iptr = 0)
 	{
 		const auto [old, ok] = cond->ptr_ref.fetch_op([&](cond_handle::fat_ptr& val)
 			{
-				if (val == cond_handle::fat_ptr{} || val.ref_ctr == s_ref_mask)
+			if (val == cond_handle::fat_ptr{} || val.ref_ctr == s_ref_mask)
 				{
 					// Don't reference already deallocated semaphore
 					return false;
 				}
 
-				if (iptr && val.ptr != iptr)
+			if (iptr && val.ptr != iptr)
 				{
 					// Pointer mismatch
 					return false;
@@ -564,7 +576,7 @@ static cond_handle* cond_id_lock(u32 cond_id, uptr iptr = 0)
 
 				if (!did_ref)
 				{
-					val.ref_ctr++;
+				val.ref_ctr++;
 				}
 
 				return true;
@@ -605,10 +617,10 @@ namespace
 		u64 maxc : 5;  // Collision counter
 		u64 maxd : 11; // Distance counter
 		u64 bits : 24; // Allocated bits
-		u64 prio : 8;  // Reserved
+		u64 prio: 8; // Reserved
 
 		u64 ref : 16;  // Ref counter
-		u64 iptr : 64; // First pointer to use slot (to count used slots)
+		u64 iptr: 64; // First pointer to use slot (to count used slots)
 	};
 
 	static_assert(sizeof(slot_allocator) == 16);

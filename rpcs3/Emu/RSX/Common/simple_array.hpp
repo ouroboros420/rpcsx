@@ -179,7 +179,7 @@ namespace rsx
 			if (_this_is_local != _that_is_local)
 			{
 				// Mismatched usage of the stack storage.
-				rsx::simple_array<Ty> tmp{ *this };
+				rsx::simple_array<Ty> tmp{*this};
 				*this = that;
 				that = tmp;
 				return;
@@ -377,12 +377,12 @@ namespace rsx
 			return _capacity;
 		}
 
-		Ty& operator[] (u32 index)
+		Ty& operator[](u32 index)
 		{
 			return _data[index];
 		}
 
-		const Ty& operator[] (u32 index) const
+		const Ty& operator[](u32 index) const
 		{
 			return _data[index];
 		}
@@ -596,7 +596,7 @@ namespace rsx
 		}
 
 		template <typename F, typename U = std::invoke_result_t<F, const Ty&>>
-			requires (std::is_invocable_v<F, const Ty&> && std::is_trivially_destructible_v<U>)
+			requires(std::is_invocable_v<F, const Ty&> && std::is_trivially_destructible_v<U>)
 		simple_array<U> map(F&& xform) const
 		{
 			simple_array<U> result;
@@ -610,7 +610,7 @@ namespace rsx
 		}
 
 		template <typename F, typename U = std::invoke_result_t<F, const Ty&>>
-			requires (std::is_invocable_v<F, const Ty&> && !std::is_trivially_destructible_v<U>)
+			requires(std::is_invocable_v<F, const Ty&> && !std::is_trivially_destructible_v<U>)
 		std::vector<U> map(F&& xform) const
 		{
 			std::vector<U> result;

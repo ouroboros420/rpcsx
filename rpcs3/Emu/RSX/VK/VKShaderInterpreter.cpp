@@ -1,60 +1,239 @@
 #include "stdafx.h"
 
 #include "VKShaderInterpreter.h"
-#include "VKCommonPipelineLayout.h"
 #include "VKVertexProgram.h"
 #include "VKFragmentProgram.h"
-#include "../Program/GLSLCommon.h"
-#include "../Program/ShaderInterpreter.h"
-#include "../rsx_methods.h"
 #include "VKHelpers.h"
 #include "VKRenderPass.h"
 
-#include <chrono>
+#include "../Overlays/Shaders/shader_loading_dialog.h"
+#include "../Program/GLSLCommon.h"
+#include "../Program/ShaderInterpreter.h"
+#include "../rsx_methods.h"
+
 #include <thread>
 
 namespace vk
 {
-	glsl::shader* shader_interpreter::build_vs(u64 compiler_options)
+	using enum program_common::interpreter::compiler_option;
+	using enum program_common::interpreter::cached_pipeline_flags;
+
+	class async_pipe_compiler_context
 	{
+		vk::pipeline_props m_properties{};
+		VkDevice m_device = VK_NULL_HANDLE;
+		VkPipelineCache m_pipeline_cache = VK_NULL_HANDLE;
+		VkShaderModule m_vs = VK_NULL_HANDLE;
+		VkShaderModule m_fs = VK_NULL_HANDLE;
+
+		VkPipelineShaderStageCreateInfo m_shader_stages[2];
+		VkPipelineDynamicStateCreateInfo m_dynamic_state_info{};
+		VkPipelineVertexInputStateCreateInfo m_vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+		VkPipelineViewportStateCreateInfo m_vp{};
+		VkPipelineMultisampleStateCreateInfo m_ms{};
+		VkPipelineColorBlendStateCreateInfo m_cs{};
+		VkPipelineTessellationStateCreateInfo m_ts{};
+
+		std::vector<VkDynamicState> m_dynamic_state_descriptors
+		{
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_SCISSOR,
+			VK_DYNAMIC_STATE_LINE_WIDTH,
+			VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+			VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+			VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+			VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+			VK_DYNAMIC_STATE_DEPTH_BIAS
+		};
+
+	public:
+
+		async_pipe_compiler_context(
+			const vk::pipeline_props& props,
+			VkDevice device,
+			VkPipelineCache pipeline_cache,
+			VkShaderModule vs,
+			VkShaderModule fs)
+			: m_properties(props)
+			, m_device(device)
+			, m_pipeline_cache(pipeline_cache)
+			, m_vs(vs)
+			, m_fs(fs)
+		{
+		}
+
+		VkGraphicsPipelineCreateInfo compile()
+		{
+			m_shader_stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+			m_shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			m_shader_stages[0].module = m_vs;
+			m_shader_stages[0].pName = "main";
+
+			m_shader_stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO  };
+			m_shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			m_shader_stages[1].module = m_fs;
+			m_shader_stages[1].pName = "main";
+
+			if (vk::get_current_renderer()->get_depth_bounds_support())
+			{
+				m_dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_DEPTH_BOUNDS);
+			}
+
+			m_dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+			m_dynamic_state_info.pDynamicStates = m_dynamic_state_descriptors.data();
+			m_dynamic_state_info.dynamicStateCount = ::size32(m_dynamic_state_descriptors);
+
+			m_vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+			m_vp.viewportCount = 1;
+			m_vp.scissorCount = 1;
+
+			m_ms = m_properties.state.ms;
+			ensure(m_ms.rasterizationSamples == VkSampleCountFlagBits((m_properties.renderpass_key >> 16) & 0xF)); // "Multisample state mismatch!"
+			if (m_ms.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT)
+			{
+				// Update the sample mask pointer
+				m_ms.pSampleMask = &m_properties.state.temp_storage.msaa_sample_mask;
+			}
+
+			// Rebase pointers from pipeline structure in case it is moved/copied
+			m_cs = m_properties.state.cs;
+			m_cs.pAttachments = m_properties.state.att_state;
+
+			m_ts = {};
+			m_ts.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+
+			VkGraphicsPipelineCreateInfo info = {};
+			info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			info.pVertexInputState = &m_vi;
+			info.pInputAssemblyState = &m_properties.state.ia;
+			info.pRasterizationState = &m_properties.state.rs;
+			info.pColorBlendState = &m_cs;
+			info.pMultisampleState = &m_ms;
+			info.pViewportState = &m_vp;
+			info.pDepthStencilState = &m_properties.state.ds;
+			info.pTessellationState = &m_ts;
+			info.stageCount = 2;
+			info.pStages = m_shader_stages;
+			info.pDynamicState = &m_dynamic_state_info;
+			info.layout = VK_NULL_HANDLE;
+			info.basePipelineIndex = -1;
+			info.basePipelineHandle = VK_NULL_HANDLE;
+			info.renderPass = vk::get_renderpass(m_device, m_properties.renderpass_key);
+			return info;
+		}
+	};
+
+	u32 shader_interpreter::init(std::shared_ptr<VKVertexProgram>& vk_prog, u64 compiler_options) const
+	{
+		std::memset(&vk_prog->binding_table, 0xff, sizeof(vk_prog->binding_table));
+
+		u32 location = 0;
+		vk_prog->binding_table.vertex_buffers_location = location;
+		location += 3;
+
+		vk_prog->binding_table.context_buffer_location = location++;
+
+		if (vk::emulate_conditional_rendering())
+		{
+			vk_prog->binding_table.cr_pred_buffer_location = location++;
+		}
+
+		if (compiler_options & COMPILER_OPT_ENABLE_INSTANCING)
+		{
+			vk_prog->binding_table.instanced_lut_buffer_location = location++;
+			vk_prog->binding_table.instanced_cbuf_location = location++;
+		}
+		else
+		{
+			vk_prog->binding_table.cbuf_location = location++;
+		}
+
+		// Return next index
+		return location;
+	}
+
+	u32 shader_interpreter::init(std::shared_ptr<VKFragmentProgram>& vk_prog, u64 /*compiler_opt*/) const
+	{
+		std::memset(&vk_prog->binding_table, 0xff, sizeof(vk_prog->binding_table));
+
+		vk_prog->binding_table.context_buffer_location = 0;
+		vk_prog->binding_table.tex_param_location = 1;
+		vk_prog->binding_table.polygon_stipple_params_location = 2;
+
+		// Return next index
+		return 3;
+	}
+
+	std::shared_ptr<VKVertexProgram> shader_interpreter::build_vs(u64 compiler_options)
+	{
+		compiler_options &= COMPILER_OPT_ALL_VS_MASK;
+		{
+			reader_lock lock(m_vs_shader_cache_lock);
+			if (auto found = m_vs_shader_cache.find(compiler_options);
+				found != m_vs_shader_cache.end())
+			{
+				return found->second;
+			}
+		}
+
 		::glsl::shader_properties properties{};
 		properties.domain = ::glsl::program_domain::glsl_vertex_program;
 		properties.require_lit_emulation = true;
+		properties.require_clip_plane_functions = true;
 
-		// TODO: Extend decompiler thread
-		// TODO: Rename decompiler thread, it no longer spawns a thread
 		RSXVertexProgram null_prog;
 		std::string shader_str;
 		ParamArray arr;
-		VKVertexProgram vk_prog;
 
-		null_prog.ctrl = (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_INSTANCING) ? RSX_SHADER_CONTROL_INSTANCED_CONSTANTS : 0;
-		VKVertexDecompilerThread comp(null_prog, shader_str, arr, vk_prog);
+		// Initialize binding layout
+		auto vk_prog = std::make_shared<VKVertexProgram>();
+		const u32 vertex_instruction_start = init(vk_prog, compiler_options);
+
+		null_prog.ctrl = (compiler_options & COMPILER_OPT_ENABLE_INSTANCING)
+			? RSX_SHADER_CONTROL_INSTANCED_CONSTANTS
+			: 0;
+		VKVertexDecompilerThread comp(null_prog, shader_str, arr, *vk_prog);
 
 		// Initialize compiler properties
 		comp.properties.has_indexed_constants = true;
 
-		ParamType uniforms = {PF_PARAM_UNIFORM, "vec4"};
+		ParamType uniforms = { PF_PARAM_UNIFORM, "vec4" };
 		uniforms.items.emplace_back("vc[468]", -1);
 
 		std::stringstream builder;
 		comp.insertHeader(builder);
-		comp.insertConstants(builder, {uniforms});
+		comp.insertConstants(builder, { uniforms });
 		comp.insertInputs(builder, {});
+
+		// Outputs
+		builder << "layout(location=16) out flat uvec4 draw_params_payload;\n\n";
+
+		builder <<
+		"#define xform_constants_offset get_draw_params().xform_constants_offset\n"
+		"#define scale_offset_mat get_vertex_context().scale_offset_mat\n"
+		"#define transform_branch_bits get_vertex_context().transform_branch_bits\n"
+		"#define point_size get_vertex_context().point_size\n"
+		"#define z_near get_vertex_context().z_near\n"
+		"#define z_far get_vertex_context().z_far\n\n";
 
 		// Insert vp stream input
 		builder << "\n"
-				   "layout(std140, set=0, binding="
-				<< m_vertex_instruction_start << ") readonly restrict buffer VertexInstructionBlock\n"
-												 "{\n"
-												 "	uint base_address;\n"
-												 "	uint entry;\n"
-												 "	uint output_mask;\n"
-												 "	uint control;\n"
-												 "	uvec4 vp_instructions[];\n"
-												 "};\n\n";
+		"layout(std140, set=0, binding=" << vertex_instruction_start << ") readonly restrict buffer VertexInstructionBlock\n"
+		"{\n"
+		"	uint base_address;\n"
+		"	uint entry;\n"
+		"	uint output_mask;\n"
+		"	uint control;\n"
+		"	uvec4 vp_instructions" << vk::ubo_array_dim(16) << ";\n"
+		"};\n\n";
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_INSTANCING)
+		if (compiler_options & COMPILER_OPT_ENABLE_VTX_TEXTURES)
+		{
+			// FIXME: Unimplemented
+			rsx_log.todo("Vertex textures are currently not implemented for the shader interpreter.");
+		}
+
+		if (compiler_options & COMPILER_OPT_ENABLE_INSTANCING)
 		{
 			builder << "#define _ENABLE_INSTANCED_CONSTANTS\n";
 		}
@@ -66,519 +245,314 @@ namespace vk
 
 		::glsl::insert_glsl_legacy_function(builder, properties);
 		::glsl::insert_vertex_input_fetch(builder, ::glsl::glsl_rules::glsl_rules_vulkan);
+		comp.insertFSExport(builder);
 
 		builder << program_common::interpreter::get_vertex_interpreter();
 		const std::string s = builder.str();
 
-		auto vs = std::make_unique<glsl::shader>();
+		auto vs = &vk_prog->shader;
 		vs->create(::glsl::program_domain::glsl_vertex_program, s);
 		vs->compile();
 
-		// Prepare input table
-		const auto& binding_table = vk::get_current_renderer()->get_pipeline_binding_table();
-		vk::glsl::program_input in;
+		// Declare local inputs
+		auto vs_inputs = comp.get_inputs();
 
-		in.location = binding_table.vertex_params_bind_slot;
-		in.domain = ::glsl::glsl_vertex_program;
-		in.name = "VertexContextBuffer";
-		in.type = vk::glsl::input_type_uniform_buffer;
-		m_vs_inputs.push_back(in);
+		vs_inputs.push_back(vk::glsl::program_input::make
+		(
+			::glsl::glsl_vertex_program,
+			"VertexInstructionBlock",
+			glsl::input_type_storage_buffer,
+			0,
+			vertex_instruction_start
+		));
 
-		in.location = binding_table.vertex_buffers_first_bind_slot;
-		in.name = "persistent_input_stream";
-		in.type = vk::glsl::input_type_texel_buffer;
-		m_vs_inputs.push_back(in);
+		vk_prog->SetInputs(vs_inputs);
 
-		in.location = binding_table.vertex_buffers_first_bind_slot + 1;
-		in.name = "volatile_input_stream";
-		in.type = vk::glsl::input_type_texel_buffer;
-		m_vs_inputs.push_back(in);
-
-		in.location = binding_table.vertex_buffers_first_bind_slot + 2;
-		in.name = "vertex_layout_stream";
-		in.type = vk::glsl::input_type_texel_buffer;
-		m_vs_inputs.push_back(in);
-
-		in.location = binding_table.vertex_constant_buffers_bind_slot;
-		in.name = "VertexConstantsBuffer";
-		in.type = vk::glsl::input_type_uniform_buffer;
-		m_vs_inputs.push_back(in);
-
-		// TODO: Bind textures if needed
-
-		auto ret = vs.get();
-		m_shader_cache[compiler_options].m_vs = std::move(vs);
-		return ret;
+		std::lock_guard lock(m_vs_shader_cache_lock);
+		m_vs_shader_cache[compiler_options] = vk_prog;
+		return vk_prog;
 	}
 
-	glsl::shader* shader_interpreter::build_fs(u64 compiler_options)
+	std::shared_ptr<VKFragmentProgram> shader_interpreter::build_fs(u64 compiler_options)
 	{
-		[[maybe_unused]] ::glsl::shader_properties properties{};
-		properties.domain = ::glsl::program_domain::glsl_fragment_program;
-		properties.require_depth_conversion = true;
-		properties.require_wpos = true;
+		compiler_options &= COMPILER_OPT_ALL_FS_MASK;
+		{
+			reader_lock lock(m_fs_shader_cache_lock);
+			if (auto found = m_fs_shader_cache.find(compiler_options);
+				found != m_fs_shader_cache.end())
+			{
+				return found->second;
+			}
+		}
+
+		::glsl::shader_properties properties
+		{
+			.domain = ::glsl::program_domain::glsl_fragment_program,
+			.require_lit_emulation = true,
+		};
 
 		u32 len;
 		ParamArray arr;
 		std::string shader_str;
 		RSXFragmentProgram frag;
-		VKFragmentProgram vk_prog;
-		VKFragmentDecompilerThread comp(shader_str, arr, frag, len, vk_prog);
 
-		const auto& binding_table = vk::get_current_renderer()->get_pipeline_binding_table();
+		frag.ctrl |= RSX_SHADER_CONTROL_INTERPRETER_MODEL;
+
+		auto vk_prog = std::make_shared<VKFragmentProgram>();
+		const u32 fragment_instruction_start = init(vk_prog, compiler_options);
+		const u32 fragment_textures_start = fragment_instruction_start + 1;
+
+		VKFragmentDecompilerThread comp(shader_str, arr, frag, len, *vk_prog);
+
 		std::stringstream builder;
-		builder << "#version 450\n"
-				   "#extension GL_ARB_separate_shader_objects : enable\n\n";
+		builder <<
+		"#version 450\n"
+		"#extension GL_EXT_scalar_block_layout : require\n"
+		// Gated: see vk::ubo_array_dim(). Adreno has no such extension and
+		// requiring it fails every pipeline.
+		<< (vk::get_current_renderer()->get_unsized_array_support() ? "#extension GL_EXT_uniform_buffer_unsized_array : require\n" : "")
+		<< "#extension GL_ARB_separate_shader_objects : enable\n\n";
 
 		::glsl::insert_subheader_block(builder);
 		comp.insertConstants(builder);
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_GE)
+		builder << "layout(location=16) in flat uvec4 draw_params_payload;\n\n";
+
+		builder <<
+		"#define fog_param0 fs_contexts[_fs_context_offset].fog_param0\n"
+		"#define fog_param1 fs_contexts[_fs_context_offset].fog_param1\n"
+		"#define fog_mode fs_contexts[_fs_context_offset].fog_mode\n"
+		"#define wpos_scale fs_contexts[_fs_context_offset].wpos_scale\n"
+		"#define wpos_bias fs_contexts[_fs_context_offset].wpos_bias\n\n";
+
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_GE)
 		{
 			builder << "#define ALPHA_TEST_GEQUAL\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_G)
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_G)
 		{
 			builder << "#define ALPHA_TEST_GREATER\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_LE)
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_LE)
 		{
 			builder << "#define ALPHA_TEST_LEQUAL\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_L)
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_L)
 		{
 			builder << "#define ALPHA_TEST_LESS\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_EQ)
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_EQ)
 		{
 			builder << "#define ALPHA_TEST_EQUAL\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_NE)
+		if (compiler_options & COMPILER_OPT_ENABLE_ALPHA_TEST_NE)
 		{
 			builder << "#define ALPHA_TEST_NEQUAL\n";
 		}
 
-		if (!(compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_F32_EXPORT))
+		if (!(compiler_options & COMPILER_OPT_ENABLE_F32_EXPORT))
 		{
 			builder << "#define WITH_HALF_OUTPUT_REGISTER\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_DEPTH_EXPORT)
+		if (compiler_options & COMPILER_OPT_ENABLE_DEPTH_EXPORT)
 		{
 			builder << "#define WITH_DEPTH_EXPORT\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_FLOW_CTRL)
+		if (compiler_options & COMPILER_OPT_ENABLE_FLOW_CTRL)
 		{
 			builder << "#define WITH_FLOW_CTRL\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_PACKING)
+		if (compiler_options & COMPILER_OPT_ENABLE_PACKING)
 		{
 			builder << "#define WITH_PACKING\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_KIL)
+		if (compiler_options & COMPILER_OPT_ENABLE_KIL)
 		{
 			builder << "#define WITH_KIL\n";
 		}
 
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_STIPPLING)
+		if (compiler_options & COMPILER_OPT_ENABLE_STIPPLING)
 		{
 			builder << "#define WITH_STIPPLING\n";
 		}
 
-		const char* type_names[] = {"sampler1D", "sampler2D", "sampler3D", "samplerCube"};
-		if (compiler_options & program_common::interpreter::COMPILER_OPT_ENABLE_TEXTURES)
+		const char* type_names[] = { "sampler1D", "sampler2D", "sampler3D", "samplerCube" };
+		if (compiler_options & COMPILER_OPT_ENABLE_TEXTURES)
 		{
 			builder << "#define WITH_TEXTURES\n\n";
 
-			for (int i = 0, bind_location = m_fragment_textures_start; i < 4; ++i)
+			for (int i = 0, bind_location = fragment_textures_start; i < 4; ++i)
 			{
-				builder << "layout(set=0, binding=" << bind_location++ << ") " << "uniform " << type_names[i] << " " << type_names[i] << "_array[16];\n";
+				builder << "layout(set=1, binding=" << bind_location++ << ") " << "uniform " << type_names[i] << " " << type_names[i] << "_array[16];\n";
 			}
 
 			builder << "\n"
-					   "#define IS_TEXTURE_RESIDENT(index) true\n"
-					   "#define SAMPLER1D(index) sampler1D_array[index]\n"
-					   "#define SAMPLER2D(index) sampler2D_array[index]\n"
-					   "#define SAMPLER3D(index) sampler3D_array[index]\n"
-					   "#define SAMPLERCUBE(index) samplerCube_array[index]\n\n";
+				"#undef  TEX_PARAM\n"
+				"#define TEX_PARAM(index) texture_parameters[index + texture_base_index]\n"
+				"#define IS_TEXTURE_RESIDENT(index) true\n"
+				"#define SAMPLER1D(index) sampler1D_array[index]\n"
+				"#define SAMPLER2D(index) sampler2D_array[index]\n"
+				"#define SAMPLER3D(index) sampler3D_array[index]\n"
+				"#define SAMPLERCUBE(index) samplerCube_array[index]\n"
+				"#define texture_base_index _fs_texture_base_index\n\n";
 		}
 
-		builder << "layout(std430, binding=" << m_fragment_instruction_start << ") readonly restrict buffer FragmentInstructionBlock\n"
-																				"{\n"
-																				"	uint shader_control;\n"
-																				"	uint texture_control;\n"
-																				"	uint reserved1;\n"
-																				"	uint reserved2;\n"
-																				"	uvec4 fp_instructions[];\n"
-																				"};\n\n";
+		builder <<
+			"layout(std430, set=1, binding=" << fragment_instruction_start << ") readonly restrict buffer FragmentInstructionBlock\n"
+			"{\n"
+			"	uint shader_control;\n"
+			"	uint texture_control;\n"
+			"	uint reserved1;\n"
+			"	uint reserved2;\n"
+			"	uvec4 fp_instructions" << vk::ubo_array_dim(16) << ";\n"
+			"};\n\n";
 
+		builder <<
+			"	uint rop_control = fs_contexts[_fs_context_offset].rop_control;\n"
+			"	float alpha_ref = fs_contexts[_fs_context_offset].alpha_ref;\n\n";
+
+		::glsl::insert_glsl_legacy_function(builder, properties);
 		builder << program_common::interpreter::get_fragment_interpreter();
 		const std::string s = builder.str();
 
-		auto fs = std::make_unique<glsl::shader>();
+		auto fs = &vk_prog->shader;
 		fs->create(::glsl::program_domain::glsl_fragment_program, s);
 		fs->compile();
 
-		// Prepare input table
-		vk::glsl::program_input in;
-		in.location = binding_table.fragment_constant_buffers_bind_slot;
-		in.domain = ::glsl::glsl_fragment_program;
-		in.name = "FragmentConstantsBuffer";
-		in.type = vk::glsl::input_type_uniform_buffer;
-		m_fs_inputs.push_back(in);
+		// Declare local inputs
+		auto inputs = comp.get_inputs();
 
-		in.location = binding_table.fragment_state_bind_slot;
-		in.name = "FragmentStateBuffer";
-		m_fs_inputs.push_back(in);
+		vk::glsl::program_input in = vk::glsl::program_input::make
+		(
+			::glsl::glsl_fragment_program,
+			"FragmentInstructionBlock",
+			glsl::input_type_storage_buffer,
+			1,
+			fragment_instruction_start
+		);
+		inputs.push_back(in);
 
-		in.location = binding_table.fragment_texture_params_bind_slot;
-		in.name = "TextureParametersBuffer";
-		m_fs_inputs.push_back(in);
-
-		for (int i = 0, location = m_fragment_textures_start; i < 4; ++i, ++location)
+		if (compiler_options & COMPILER_OPT_ENABLE_TEXTURES)
 		{
-			in.location = location;
-			in.name = std::string(type_names[i]) + "_array[16]";
-			m_fs_inputs.push_back(in);
-		}
-
-		auto ret = fs.get();
-		m_shader_cache[compiler_options].m_fs = std::move(fs);
-		return ret;
-	}
-
-	std::pair<VkDescriptorSetLayout, VkPipelineLayout> shader_interpreter::create_layout(VkDevice dev)
-	{
-		const auto& binding_table = vk::get_current_renderer()->get_pipeline_binding_table();
-		auto bindings = get_common_binding_table();
-		u32 idx = ::size32(bindings);
-
-		bindings.resize(binding_table.total_descriptor_bindings);
-
-		// Texture 1D array
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		bindings[idx].descriptorCount = 16;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		m_fragment_textures_start = bindings[idx].binding;
-		idx++;
-
-		// Texture 2D array
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		bindings[idx].descriptorCount = 16;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 1;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		idx++;
-
-		// Texture 3D array
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		bindings[idx].descriptorCount = 16;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 2;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		idx++;
-
-		// Texture CUBE array
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		bindings[idx].descriptorCount = 16;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 3;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		idx++;
-
-		// Vertex texture array (2D only)
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		bindings[idx].descriptorCount = 4;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 4;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		idx++;
-
-		// Vertex program ucode block
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		bindings[idx].descriptorCount = 1;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 5;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		m_vertex_instruction_start = bindings[idx].binding;
-		idx++;
-
-		// Fragment program ucode block
-		bindings[idx].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		bindings[idx].descriptorCount = 1;
-		bindings[idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		bindings[idx].binding = binding_table.textures_first_bind_slot + 6;
-		bindings[idx].pImmutableSamplers = nullptr;
-
-		m_fragment_instruction_start = bindings[idx].binding;
-		idx++;
-		bindings.resize(idx);
-
-		// Compile descriptor pool sizes
-		const u32 num_ubo = bindings.reduce(0, FN(x + (y.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? y.descriptorCount : 0)));
-		const u32 num_texel_buffers = bindings.reduce(0, FN(x + (y.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ? y.descriptorCount : 0)));
-		const u32 num_combined_image_sampler = bindings.reduce(0, FN(x + (y.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ? y.descriptorCount : 0)));
-		const u32 num_ssbo = bindings.reduce(0, FN(x + (y.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? y.descriptorCount : 0)));
-
-		ensure(num_ubo > 0 && num_texel_buffers > 0 && num_combined_image_sampler > 0 && num_ssbo > 0);
-
-		m_descriptor_pool_sizes =
+			for (int i = 0, location = fragment_textures_start; i < 4; ++i, ++location)
 			{
-				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, num_ubo},
-				{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, num_texel_buffers},
-				{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, num_combined_image_sampler},
-				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, num_ssbo}};
-
-		std::array<VkPushConstantRange, 1> push_constants;
-		push_constants[0].offset = 0;
-		push_constants[0].size = 16;
-		push_constants[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-		if (vk::emulate_conditional_rendering())
-		{
-			// Conditional render toggle
-			push_constants[0].size = 20;
+				in.location = location;
+				in.name = std::string(type_names[i]) + "_array[16]";
+				in.type = glsl::input_type_texture;
+				inputs.push_back(in);
+			}
 		}
 
-		const auto set_layout = vk::descriptors::create_layout(bindings);
+		vk_prog->SetInputs(inputs);
 
-		VkPipelineLayoutCreateInfo layout_info = {};
-		layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		layout_info.setLayoutCount = 1;
-		layout_info.pSetLayouts = &set_layout;
-		layout_info.pushConstantRangeCount = 1;
-		layout_info.pPushConstantRanges = push_constants.data();
-
-		VkPipelineLayout result;
-		CHECK_RESULT(VK_GET_SYMBOL(vkCreatePipelineLayout)(dev, &layout_info, nullptr, &result));
-		return {set_layout, result};
-	}
-
-	void shader_interpreter::create_descriptor_pools(const vk::render_device& dev)
-	{
-		const auto max_draw_calls = dev.get_descriptor_max_draw_calls();
-		m_descriptor_pool.create(dev, m_descriptor_pool_sizes, max_draw_calls);
+		std::lock_guard lock(m_fs_shader_cache_lock);
+		m_fs_shader_cache[compiler_options] = vk_prog;
+		return vk_prog;
 	}
 
 	void shader_interpreter::init(const vk::render_device& dev)
 	{
 		m_device = dev;
-		std::tie(m_shared_descriptor_layout, m_shared_pipeline_layout) = create_layout(dev);
-		create_descriptor_pools(dev);
+
+		VkPipelineCacheCreateInfo drv_cache_info{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+		VK_GET_SYMBOL(vkCreatePipelineCache)(m_device, &drv_cache_info, nullptr, &m_driver_pipeline_cache);
 	}
 
 	void shader_interpreter::destroy()
 	{
 		m_current_interpreter.reset();
 		m_program_cache.clear();
-		m_descriptor_pool.destroy();
+		m_vs_shader_cache.clear();
+		m_fs_shader_cache.clear();
 
-		for (auto& fs : m_shader_cache)
+		if (m_driver_pipeline_cache)
 		{
-			fs.second.m_vs->destroy();
-			fs.second.m_fs->destroy();
-		}
-
-		m_shader_cache.clear();
-
-		if (m_shared_pipeline_layout)
-		{
-			VK_GET_SYMBOL(vkDestroyPipelineLayout)(m_device, m_shared_pipeline_layout, nullptr);
-			m_shared_pipeline_layout = VK_NULL_HANDLE;
-		}
-
-		if (m_shared_descriptor_layout)
-		{
-			VK_GET_SYMBOL(vkDestroyDescriptorSetLayout)(m_device, m_shared_descriptor_layout, nullptr);
-			m_shared_descriptor_layout = VK_NULL_HANDLE;
+			VK_GET_SYMBOL(vkDestroyPipelineCache)(m_device, m_driver_pipeline_cache, nullptr);
+			m_driver_pipeline_cache = VK_NULL_HANDLE;
 		}
 	}
 
-	std::shared_ptr<glsl::program> shader_interpreter::link(const vk::pipeline_props& properties, u64 compiler_opt, bool async, std::function<void()> async_done)
+	std::shared_ptr<glsl::program> shader_interpreter::link(const vk::pipeline_props& properties, u64 compiler_opt, bool async, async_build_fn_callback async_callback)
 	{
-		glsl::shader *fs, *vs;
-		if (auto found = m_shader_cache.find(compiler_opt); found != m_shader_cache.end())
-		{
-			fs = found->second.m_fs.get();
-			vs = found->second.m_vs.get();
-		}
-		else
-		{
-			fs = build_fs(compiler_opt);
-			vs = build_vs(compiler_opt);
-		}
+		auto vs = build_vs(compiler_opt);
+		auto fs = build_fs(compiler_opt);
 
-		if (async)
+		async_pipe_compiler_context context{ properties, m_device, m_driver_pipeline_cache, vs->shader.get_handle(), fs->shader.get_handle() };
+		auto create_graphics_info_fn = [=]() mutable
 		{
-			// Async path: rebuild the pipeline from props on a worker thread (module-based deferred overload).
-			// The fs/vs modules are already built/cached above; only the VkPipeline assembly is deferred.
-			VkShaderModule modules[2] = { vs->get_handle(), fs->get_handle() };
+			return context.compile();
+		};
+
+		auto callback_fn = [=, this](std::unique_ptr<glsl::program>& prog)
+		{
+			if (!async)
+			{
+				return;
+			}
 
 			pipeline_key key{};
 			key.compiler_opt = compiler_opt;
 			key.properties = properties;
 
-			auto done = std::move(async_done);
-			auto callback = [this, key, done](std::unique_ptr<glsl::program>& prog)
+			std::shared_ptr<glsl::program> result = std::move(prog);
+			std::lock_guard lock(this->m_program_cache_lock);
+
+			pipeline_cache_entry_t cached_program
 			{
-				// Runs on the pipe-compiler worker thread.
-				std::shared_ptr<glsl::program> result = std::move(prog);
-
-				std::lock_guard lock(m_program_cache_lock);
-				pipeline_cache_entry_t cache_entry;
-				cache_entry.program = result;
-				cache_entry.flags = 0;
-				m_program_cache[key] = std::move(cache_entry);
-
-				// Incremental compatible-variant seeding. As each base interpreter pipeline lands,
-				// map any full variant that is only *compatible* with this base (not an exact match)
-				// to a CACHED_PIPE_UNOPTIMIZED stand-in, so get() binds it immediately and async-
-				// upgrades it on first use. This replaces preload()'s former synchronous drain+seed,
-				// which parked the RSX thread (the smooth-shader hang). Naturally a no-op for exact
-				// recompile callbacks: no full variant's compatible-opt equals a full variant's exact opt.
-				const auto seed_variants = program_common::interpreter::get_interpreter_variants();
-				for (const auto& seed_variant : seed_variants.pipelines)
-				{
-					pipeline_key full_key;
-					full_key.properties = key.properties;
-					full_key.compiler_opt = seed_variant.vs_opts.shader_opt | seed_variant.fs_opts.shader_opt;
-
-					if (m_program_cache.count(full_key))
-					{
-						continue;
-					}
-
-					const u64 compat_opt = seed_variant.vs_opts.compatible_shader_opts | seed_variant.fs_opts.compatible_shader_opts;
-					if (compat_opt == key.compiler_opt)
-					{
-						pipeline_cache_entry_t stand_in;
-						stand_in.program = result;
-						stand_in.flags = program_common::interpreter::CACHED_PIPE_UNOPTIMIZED;
-						m_program_cache[full_key] = std::move(stand_in);
-					}
-				}
-
-				if (done)
-				{
-					done();
-				}
+				.flags = 0,
+				.program = result
 			};
+			this->m_program_cache[key] = cached_program;
 
-			auto compiler = vk::get_pipe_compiler();
-			compiler->compile(properties, modules, m_shared_pipeline_layout, vk::pipe_compiler::COMPILE_DEFERRED, std::move(callback), m_vs_inputs, m_fs_inputs);
-			return nullptr;
-		}
-
-		VkPipelineShaderStageCreateInfo shader_stages[2] = {};
-		shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-		shader_stages[0].module = vs->get_handle();
-		shader_stages[0].pName = "main";
-
-		shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-		shader_stages[1].module = fs->get_handle();
-		shader_stages[1].pName = "main";
-
-		std::vector<VkDynamicState> dynamic_state_descriptors =
+			if (async_callback)
 			{
-				VK_DYNAMIC_STATE_VIEWPORT,
-				VK_DYNAMIC_STATE_SCISSOR,
-				VK_DYNAMIC_STATE_LINE_WIDTH,
-				VK_DYNAMIC_STATE_BLEND_CONSTANTS,
-				VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
-				VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-				VK_DYNAMIC_STATE_STENCIL_REFERENCE,
-				VK_DYNAMIC_STATE_DEPTH_BIAS};
+				async_callback(result);
+			}
+		};
 
-		if (vk::get_current_renderer()->get_depth_bounds_support())
-		{
-			dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_DEPTH_BOUNDS);
-		}
-
-		VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
-		dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-		dynamic_state_info.pDynamicStates = dynamic_state_descriptors.data();
-		dynamic_state_info.dynamicStateCount = ::size32(dynamic_state_descriptors);
-
-		VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-
-		VkPipelineViewportStateCreateInfo vp = {};
-		vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-		vp.viewportCount = 1;
-		vp.scissorCount = 1;
-
-		VkPipelineMultisampleStateCreateInfo ms = properties.state.ms;
-		ensure(ms.rasterizationSamples == VkSampleCountFlagBits((properties.renderpass_key >> 16) & 0xF)); // "Multisample state mismatch!"
-		if (ms.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT)
-		{
-			// Update the sample mask pointer
-			ms.pSampleMask = &properties.state.temp_storage.msaa_sample_mask;
-		}
-
-		// Rebase pointers from pipeline structure in case it is moved/copied
-		VkPipelineColorBlendStateCreateInfo cs = properties.state.cs;
-		cs.pAttachments = properties.state.att_state;
-
-		VkPipelineTessellationStateCreateInfo ts = {};
-		ts.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-
-		VkGraphicsPipelineCreateInfo info = {};
-		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-		info.pVertexInputState = &vi;
-		info.pInputAssemblyState = &properties.state.ia;
-		info.pRasterizationState = &properties.state.rs;
-		info.pColorBlendState = &cs;
-		info.pMultisampleState = &ms;
-		info.pViewportState = &vp;
-		info.pDepthStencilState = &properties.state.ds;
-		info.pTessellationState = &ts;
-		info.stageCount = 2;
-		info.pStages = shader_stages;
-		info.pDynamicState = &dynamic_state_info;
-		info.layout = m_shared_pipeline_layout;
-		info.basePipelineIndex = -1;
-		info.basePipelineHandle = VK_NULL_HANDLE;
-		info.renderPass = vk::get_renderpass(m_device, properties.renderpass_key);
+		vk::pipe_compiler::op_flags flags = vk::pipe_compiler::SEPARATE_SHADER_OBJECTS;
+		flags |= (async ? vk::pipe_compiler::COMPILE_DEFERRED : vk::pipe_compiler::COMPILE_INLINE);
 
 		auto compiler = vk::get_pipe_compiler();
-		auto program = compiler->compile(info, m_shared_pipeline_layout, vk::pipe_compiler::COMPILE_INLINE, {}, m_vs_inputs, m_fs_inputs);
-		return std::shared_ptr<glsl::program>(std::move(program));
+		auto program = compiler->compile(
+			create_graphics_info_fn,
+			flags,
+			callback_fn,
+			vs->uniforms,
+			fs->uniforms);
+
+		return program;
 	}
 
-	void shader_interpreter::update_fragment_textures(const std::array<VkDescriptorImageInfo, 68>& sampled_images, vk::descriptor_set& set)
+	void shader_interpreter::update_fragment_textures(const std::array<VkDescriptorImageInfoEx, 68>& sampled_images)
 	{
-		const VkDescriptorImageInfo* texture_ptr = sampled_images.data();
-		for (u32 i = 0, binding = m_fragment_textures_start; i < 4; ++i, ++binding, texture_ptr += 16)
+		// FIXME: Cannot use m_fragment_textures.start now since each interpreter has its own binding layout
+		auto [set, binding] = m_current_interpreter->get_uniform_location(::glsl::glsl_fragment_program, glsl::input_type_texture, "sampler1D_array[16]");
+		if (binding == umax)
 		{
-			set.push(texture_ptr, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, binding);
+			return;
 		}
-	}
 
-	VkDescriptorSet shader_interpreter::allocate_descriptor_set()
-	{
-		return m_descriptor_pool.allocate(m_shared_descriptor_layout);
+		const VkDescriptorImageInfoEx* texture_ptr = sampled_images.data();
+		for (u32 i = 0; i < 4; ++i, ++binding, texture_ptr += 16)
+		{
+			m_current_interpreter->bind_uniform_array({ texture_ptr, 16 }, set, binding);
+		}
 	}
 
 	glsl::program* shader_interpreter::get(
 		const vk::pipeline_props& properties,
-		const program_hash_util::fragment_program_utils::fragment_program_metadata& metadata,
+		const program_hash_util::fragment_program_utils::fragment_program_metadata& fp_metadata,
+		const program_hash_util::vertex_program_utils::vertex_program_metadata& vp_metadata,
 		u32 vp_ctrl,
 		u32 fp_ctrl)
 	{
@@ -595,42 +569,35 @@ namespace vk
 			case rsx::comparison_function::never:
 				return nullptr;
 			case rsx::comparison_function::greater_or_equal:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_GE;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_GE;
 				break;
 			case rsx::comparison_function::greater:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_G;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_G;
 				break;
 			case rsx::comparison_function::less_or_equal:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_LE;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_LE;
 				break;
 			case rsx::comparison_function::less:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_L;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_L;
 				break;
 			case rsx::comparison_function::equal:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_EQ;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_EQ;
 				break;
 			case rsx::comparison_function::not_equal:
-				key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_ALPHA_TEST_NE;
+				key.compiler_opt |= COMPILER_OPT_ENABLE_ALPHA_TEST_NE;
 				break;
 			}
 		}
 
-		if (fp_ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_DEPTH_EXPORT;
-		if (fp_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_F32_EXPORT;
-		if (fp_ctrl & RSX_SHADER_CONTROL_USES_KIL)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_KIL;
-		if (metadata.referenced_textures_mask)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_TEXTURES;
-		if (metadata.has_branch_instructions)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_FLOW_CTRL;
-		if (metadata.has_pack_instructions)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_PACKING;
-		if (rsx::method_registers.polygon_stipple_enabled())
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_STIPPLING;
-		if (vp_ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS)
-			key.compiler_opt |= program_common::interpreter::COMPILER_OPT_ENABLE_INSTANCING;
+		if (fp_ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT) key.compiler_opt |= COMPILER_OPT_ENABLE_DEPTH_EXPORT;
+		if (fp_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) key.compiler_opt |= COMPILER_OPT_ENABLE_F32_EXPORT;
+		if (fp_ctrl & RSX_SHADER_CONTROL_USES_KIL) key.compiler_opt |= COMPILER_OPT_ENABLE_KIL;
+		if (fp_metadata.referenced_textures_mask) key.compiler_opt |= COMPILER_OPT_ENABLE_TEXTURES;
+		if (fp_metadata.has_branch_instructions) key.compiler_opt |= COMPILER_OPT_ENABLE_FLOW_CTRL;
+		if (fp_metadata.has_pack_instructions) key.compiler_opt |= COMPILER_OPT_ENABLE_PACKING;
+		if (rsx::method_registers.polygon_stipple_enabled()) key.compiler_opt |= COMPILER_OPT_ENABLE_STIPPLING;
+		if (vp_ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS) key.compiler_opt |= COMPILER_OPT_ENABLE_INSTANCING;
+		if (vp_metadata.referenced_textures_mask) key.compiler_opt |= COMPILER_OPT_ENABLE_VTX_TEXTURES;
 
 		if (m_current_key == key) [[likely]]
 		{
@@ -638,25 +605,21 @@ namespace vk
 		}
 		else
 		{
+			m_current_pipeline_info_ex = *get_pipeline_info_ex(key.compiler_opt);
 			m_current_key = key;
 		}
 
-		// Key changed (rare relative to the fast-path above), so an exclusive lock here is cheap.
-		// We may both read the cache and flip the RECOMPILING flag, so take the writer lock directly.
 		{
-			std::lock_guard lock(m_program_cache_lock);
+			reader_lock lock(m_program_cache_lock);
 
 			auto found = m_program_cache.find(key);
 			if (found != m_program_cache.end()) [[likely]]
 			{
 				m_current_interpreter = found->second.program;
 
-				// If this is a stand-in (unoptimized) variant and we haven't already kicked off the
-				// exact build, fire an async link. The compatible program stays bound (no stall) until
-				// the worker swaps the exact one into the cache.
-				if ((found->second.flags & (program_common::interpreter::CACHED_PIPE_UNOPTIMIZED | program_common::interpreter::CACHED_PIPE_RECOMPILING)) == program_common::interpreter::CACHED_PIPE_UNOPTIMIZED)
+				if ((found->second.flags & (CACHED_PIPE_UNOPTIMIZED | CACHED_PIPE_RECOMPILING)) == CACHED_PIPE_UNOPTIMIZED)
 				{
-					found->second.flags |= program_common::interpreter::CACHED_PIPE_RECOMPILING;
+					found->second.flags |= CACHED_PIPE_RECOMPILING;
 					link(properties, key.compiler_opt, true, {});
 				}
 
@@ -664,18 +627,26 @@ namespace vk
 			}
 		}
 
-		// Hard miss: build inline (this stalls, but the preload + compatible-variant fallback should
-		// make this rare in the interpreter shader modes).
+		const auto start = std::chrono::steady_clock::now();
+
 		m_current_interpreter = link(properties, key.compiler_opt);
 
+		const auto end = std::chrono::steady_clock::now();
+
+		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+		if (duration > std::chrono::milliseconds(1000))
 		{
-			std::lock_guard lock(m_program_cache_lock);
-			pipeline_cache_entry_t cache_entry;
-			cache_entry.program = m_current_interpreter;
-			cache_entry.flags = 0;
-			m_program_cache[key] = std::move(cache_entry);
+			rsx_log.error("Cache miss");
 		}
 
+		pipeline_cache_entry_t cache_entry
+		{
+			.flags = 0,
+			.program = m_current_interpreter
+		};
+
+		std::lock_guard lock(m_program_cache_lock);
+		m_program_cache[key] = cache_entry;
 		return m_current_interpreter.get();
 	}
 
@@ -686,18 +657,71 @@ namespace vk
 
 	u32 shader_interpreter::get_vertex_instruction_location() const
 	{
-		return m_vertex_instruction_start;
+		return m_current_pipeline_info_ex.vertex_instruction_location;
 	}
 
 	u32 shader_interpreter::get_fragment_instruction_location() const
 	{
-		return m_fragment_instruction_start;
+		return m_current_pipeline_info_ex.fragment_instruction_location;
 	}
 
-	void shader_interpreter::preload()
+	std::pair<std::shared_ptr<VKVertexProgram>, std::shared_ptr<VKFragmentProgram>> shader_interpreter::get_shaders() const
 	{
-		// Precompile the base interpreter pipeline variants up-front (load-time, off the RSX hot path).
-		// Runs headless - no shader_loading_dialog is driven here.
+		const auto vs_opt = m_current_key.compiler_opt & COMPILER_OPT_ALL_VS_MASK;
+		const auto fs_opt = m_current_key.compiler_opt & COMPILER_OPT_ALL_FS_MASK;
+
+		std::shared_ptr<VKVertexProgram> vs;
+		std::shared_ptr<VKFragmentProgram> fs;
+
+		{
+			reader_lock lock(m_vs_shader_cache_lock);
+			if (auto found = m_vs_shader_cache.find(vs_opt);
+				found != m_vs_shader_cache.end())
+			{
+				vs = found->second;
+			}
+		}
+
+		{
+			reader_lock lock(m_fs_shader_cache_lock);
+			if (auto found = m_fs_shader_cache.find(fs_opt);
+				found != m_fs_shader_cache.end())
+			{
+				fs = found->second;
+			}
+		}
+
+		return { vs, fs };
+	}
+
+	const shader_interpreter::pipeline_info_ex_t* shader_interpreter::get_pipeline_info_ex(u64 compiler_opt)
+	{
+		if (auto found = m_pipeline_info_cache.find(compiler_opt); found != m_pipeline_info_cache.end())
+		{
+			return &found->second;
+		}
+
+		auto vs_stub = std::make_shared<VKVertexProgram>();
+		auto fs_stub = std::make_shared<VKFragmentProgram>();
+		const auto vi_location = init(vs_stub, compiler_opt);
+		const auto fi_location = init(fs_stub, compiler_opt);
+
+		pipeline_info_ex_t result
+		{
+			.vertex_instruction_location = vi_location,
+			.fragment_instruction_location = fi_location,
+			.fragment_textures_location = fi_location + 1
+		};
+
+		auto it = m_pipeline_info_cache.insert_or_assign(compiler_opt, result);
+		return &it.first->second;
+	}
+
+	void shader_interpreter::preload(rsx::shader_loading_dialog* dlg)
+	{
+		dlg->create("Precompiling interpreter variants.\nPlease wait...", "Shader Compilation");
+
+		// Create some basic pipelines that we'll use to seed the base pipeline queue
 		std::vector<vk::pipeline_props> pipe_properties;
 		auto pdev = vk::get_current_renderer();
 
@@ -728,19 +752,73 @@ namespace vk
 		base_props.state.set_depth_mask(true);
 		pipe_properties.push_back(base_props);
 
-		// Fire-and-forget: queue the base interpreter pipelines for async compilation and return
-		// immediately. We deliberately do NOT drain the queue here - blocking the RSX thread until
-		// the bases finish is exactly what parked flip/present and hung "smooth shaders" before.
-		// As each base lands on a pipe-compiler worker, its link() callback seeds the compatible
-		// full-variant stand-ins. A draw that arrives before its base is ready falls back to a
-		// single inline compile in get() (self-limiting, never a hang).
 		const auto variants = program_common::interpreter::get_interpreter_variants();
+		const u32 limit1 = ::size32(variants.base_pipelines) * ::size32(pipe_properties);
+		const u32 limit2 = ::size32(variants.pipelines) * ::size32(pipe_properties);
+		dlg->set_limit(0, limit1);
+		dlg->set_limit(1, limit2);
+
+		atomic_t<u32> ctr = 0;
 		for (const auto& props : pipe_properties)
 		{
 			for (auto& variant : variants.base_pipelines)
 			{
-				link(props, variant.first | variant.second, true, {});
+				pipeline_key key{};
+				key.properties = props;
+				key.compiler_opt = variant.first | variant.second;
+
+				link(props, variant.first | variant.second, true, [&](std::shared_ptr<glsl::program>&) { ctr++; });
 			}
 		}
+
+		// Drain the queue.
+		// FIXME: Since the queue is executing from the context of the pipe compiler, we cannot properly stop this process.
+		do
+		{
+			std::this_thread::sleep_for(16ms);
+
+			const auto completed = ctr.load();
+			dlg->update_msg(0, fmt::format("Building base variant %u of %u...", completed, limit1));
+			dlg->set_value(0, completed);
+		}
+		while (ctr.load() < limit1);
+
+		ctr = 0;
+		std::lock_guard lock(m_program_cache_lock);
+
+		for (const auto& props : pipe_properties)
+		{
+			pipeline_key base_key;
+			base_key.properties = props;
+
+			for (auto& variant : variants.pipelines)
+			{
+				// Check if we have an exact match
+				base_key.compiler_opt = variant.vs_opts.shader_opt | variant.fs_opts.shader_opt;
+				if (auto found = m_program_cache.find(base_key);
+					found != m_program_cache.end())
+				{
+					// We have a perfect match, no propagation required
+					continue;
+				}
+
+				// Find a compatible pipeline
+				auto compat_key = base_key;
+				compat_key.compiler_opt = variant.vs_opts.compatible_shader_opts | variant.fs_opts.compatible_shader_opts;
+				auto found = m_program_cache.find(compat_key);
+
+				ensure(found != m_program_cache.end(), "Invalid interpreter configuration.");
+
+				pipeline_cache_entry_t cache_entry
+				{
+					.flags = CACHED_PIPE_UNOPTIMIZED,
+					.program = found->second.program
+				};
+				m_program_cache[base_key] = cache_entry;
+			}
+		}
+
+		dlg->set_value(1, limit2);
+		dlg->refresh();
 	}
-}; // namespace vk
+};

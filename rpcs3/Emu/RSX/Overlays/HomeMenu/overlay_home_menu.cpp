@@ -116,9 +116,9 @@ namespace rsx
 					if (g_cfg.misc.pause_during_home_menu)
 					{
 						Emu.BlockingCallFromMainThread([]()
-						{
-							Emu.Resume();
-						});
+							{
+								Emu.Resume();
+							});
 					}
 
 					if (navigation == page_navigation::exit_for_screenshot)
@@ -176,9 +176,9 @@ namespace rsx
 			if (g_cfg.misc.pause_during_home_menu)
 			{
 				Emu.BlockingCallFromMainThread([]()
-				{
-					Emu.Pause(false, false);
-				});
+					{
+						Emu.Pause(false, false);
+					});
 			}
 
 			while (!Emu.IsStopped() && !*notify)

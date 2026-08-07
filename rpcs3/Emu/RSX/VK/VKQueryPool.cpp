@@ -7,6 +7,9 @@
 #include "rx/asm.hpp"
 #include "VKGSRender.h"
 
+#include <chrono>
+#include <thread>
+
 namespace vk
 {
 	inline bool query_pool_manager::poke_query(query_slot_info& query, u32 index, VkQueryResultFlags flags)
@@ -57,6 +60,21 @@ namespace vk
 		owner = &dev;
 		query_type = type;
 		query_slot_status.resize(num_entries, {});
+
+		const auto vendor = vk::get_driver_vendor();
+		tile_based_renderer = is_tile_based_renderer(vendor);
+
+		if (tile_based_renderer)
+		{
+			// VK_QUERY_RESULT_PARTIAL_BIT exists so the poll loop can finish early
+			// the moment any sample is known to have passed. That only happens on
+			// an immediate-mode renderer, where fragments are rasterized as they
+			// arrive. A TBDR has nothing to report until the tiling pass ends, so
+			// the flag cannot help and only asks the driver for extra work.
+			result_flags &= ~VK_QUERY_RESULT_PARTIAL_BIT;
+
+			rsx_log.notice("Occlusion queries: tile-based renderer detected (vendor=%d), sleeping between result polls", static_cast<int>(vendor));
+		}
 
 		for (unsigned i = 0; i < num_entries; ++i)
 		{
@@ -168,20 +186,55 @@ namespace vk
 
 		if (!query_info.ready)
 		{
-			// Block efficiently for the GPU result instead of busy-spinning a big CPU core.
-			// The command buffer carrying this query has already been submitted (the caller
-			// flushes it via occlusion_data::sync before reading), so VK_QUERY_RESULT_WAIT_BIT
-			// cannot deadlock and returns as soon as the result is available. On mobile TBDR GPUs
-			// (Adreno/Turnip) occlusion readback latency is high; the old rx::pause() spin pegged
-			// a big core for the entire wait and starved the SPU/PPU threads sharing it (the cores
-			// are already oversubscribed under Android affinity). Blocking sleeps and frees the core.
-			poke_query(query_info, index, result_flags | VK_QUERY_RESULT_WAIT_BIT);
+			poke_query(query_info, index, result_flags);
 
-			// Defensive fallback: if the driver still reports the result as not-ready, poll.
-			while (!query_info.ready)
+			if (!tile_based_renderer)
 			{
-				rx::pause();
-				poke_query(query_info, index, result_flags);
+				// Immediate-mode renderers: unchanged. Results arrive progressively
+				// as fragments rasterize, so a spin usually ends quickly.
+				while (!query_info.ready)
+				{
+					rx::pause();
+					poke_query(query_info, index, result_flags);
+				}
+			}
+			else
+			{
+				// Tile-based renderer. Spin briefly in case the result is already
+				// landing, then stop consuming CPU - the rest of the wait is the
+				// remainder of the tiling pass and dwarfs any spin.
+				for (int i = 0; i < 32 && !query_info.ready; i++)
+				{
+					rx::pause();
+					poke_query(query_info, index, result_flags);
+				}
+
+				// Do NOT use VK_QUERY_RESULT_WAIT_BIT here. It looks like the right
+				// tool, but Turnip implements it by polling clock_gettime in a loop
+				// rather than sleeping, so it burns exactly the CPU it is supposed
+				// to save. Measured on Adreno/Turnip: handing the wait to the driver
+				// left total cycles unchanged and simply moved the samples from our
+				// loop into vkGetQueryPoolResults -> clock_gettime (25% of all
+				// samples). Keep the wait here, where its period is ours to choose.
+				for (u32 attempt = 0; !query_info.ready; attempt++)
+				{
+					if (poke_query(query_info, index, result_flags))
+					{
+						break;
+					}
+
+					// WFE parks the core for a fraction of the tiling pass at
+					// almost no cost. Fall back to a real sleep only if the result
+					// is taking absurdly long, to bound the polling rate on a stall.
+					if (attempt < 4096)
+					{
+						rx::wait_for_event();
+					}
+					else
+					{
+						std::this_thread::sleep_for(std::chrono::microseconds(250));
+					}
+				}
 			}
 		}
 
@@ -195,6 +248,8 @@ namespace vk
 		VK_GET_SYMBOL(vkCmdCopyQueryPoolResults)(cmd, *query_slot_status[index].pool, index, count, dst, dst_offset, 4, VK_QUERY_RESULT_WAIT_BIT);
 	}
 
+	// Batched eager-ZCULL readback (grafted from 7ed3365bcbb8). Declared in VKQueryPool.h and
+	// driven by VKGSRender::prefetch_occlusion_query_results.
 	void query_pool_manager::copy_query_results(vk::command_buffer& cmd, const std::vector<u32>& indices, VkBuffer dst)
 	{
 		// TBDR (Adreno/Turnip, Apple M) returns ALL-ZERO results from vkCmdCopyQueryPoolResults if a

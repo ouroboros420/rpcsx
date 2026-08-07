@@ -91,7 +91,7 @@ enum
 	CELL_MUSIC_PB_CMD_FASTFORWARD = 5,
 	CELL_MUSIC_PB_CMD_FASTREVERSE = 6,
 
-	CELL_MUSIC_PB_CMD_NEXT_TRACK = 7, // RPCS3 helper for auto-play of the next track in the current playlist
+	CELL_MUSIC_PB_CMD_NEXT_TRACK  = 7, // RPCS3 helper for auto-play of the next track in the current playlist
 };
 
 enum

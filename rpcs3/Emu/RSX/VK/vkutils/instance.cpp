@@ -145,7 +145,7 @@ namespace vk
 		app.applicationVersion = 0;
 		app.pEngineName = app_name;
 		app.engineVersion = 0;
-		app.apiVersion = VK_API_VERSION_1_0;
+		app.apiVersion = VK_API_VERSION_1_2;
 
 		// Set up instance information
 
@@ -173,16 +173,12 @@ namespace vk
 				extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
 			}
 
-			if (support.is_supported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
-			}
-
 #ifdef __APPLE__
+			extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+			extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 			if (support.is_supported(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME))
 			{
 				extensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
-				layers.push_back(kMVKMoltenVKDriverLayerName);
 
 				mvk_settings.push_back(VkLayerSettingEXT{kMVKMoltenVKDriverLayerName, "MVK_CONFIG_RESUME_LOST_DEVICE", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &setting_true});
 				mvk_settings.push_back(VkLayerSettingEXT{kMVKMoltenVKDriverLayerName, "MVK_CONFIG_FAST_MATH_ENABLED", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &setting_fast_math});
@@ -195,11 +191,6 @@ namespace vk
 				next_info = &mvk_layer_settings_create_info;
 			}
 #endif
-
-			if (support.is_supported(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
-			}
 
 			if (support.is_supported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
 			{
@@ -214,7 +205,7 @@ namespace vk
 #ifdef _WIN32
 			extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(__APPLE__)
-			extensions.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
+			extensions.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
 #else
 			bool found_surface_ext = false;
 #ifdef HAVE_X11
@@ -224,14 +215,14 @@ namespace vk
 				found_surface_ext = true;
 			}
 #endif
-#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+#ifdef HAVE_WAYLAND
 			if (support.is_supported(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME))
 			{
 				extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
 				found_surface_ext = true;
 			}
 #endif //(WAYLAND)
-#ifdef VK_USE_PLATFORM_ANDROID_KHR
+#ifdef ANDROID
 			if (support.is_supported(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME))
 			{
 				extensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
@@ -247,15 +238,32 @@ namespace vk
 			if (g_cfg.video.debug_output)
 				layers.push_back("VK_LAYER_KHRONOS_validation");
 		}
+#ifdef __APPLE__ 
+		// MoltenVK's ICD will not be detected without these extensions enabled.
+		else
+		{
+			extensions_loaded = true;
+			extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+			extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+		}
+#endif
 
 		VkInstanceCreateInfo instance_info = {};
 		instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 		instance_info.pApplicationInfo = &app;
 		instance_info.enabledLayerCount = static_cast<u32>(layers.size());
 		instance_info.ppEnabledLayerNames = layers.data();
+#ifdef __APPLE__
+		instance_info.enabledExtensionCount = static_cast<u32>(extensions.size());
+		instance_info.ppEnabledExtensionNames = extensions.data();
+#else
 		instance_info.enabledExtensionCount = fast ? 0 : static_cast<u32>(extensions.size());
 		instance_info.ppEnabledExtensionNames = fast ? nullptr : extensions.data();
+#endif
 		instance_info.pNext = next_info;
+#ifdef __APPLE__
+		instance_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
 
 		VkResult result = VK_GET_SYMBOL(vkCreateInstance)(&instance_info, nullptr, &m_instance);
 
@@ -272,7 +280,7 @@ namespace vk
 			instance_info.enabledLayerCount = 0;
 			instance_info.ppEnabledLayerNames = nullptr;
 			result = VK_GET_SYMBOL(vkCreateInstance)(&instance_info, nullptr, &m_instance);
-		}
+			}
 
 		if (result != VK_SUCCESS)
 		{

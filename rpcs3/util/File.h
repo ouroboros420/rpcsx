@@ -159,7 +159,7 @@ namespace fs
 	// Virtual device
 	struct device_base
 	{
-		const std::string fs_prefix;
+		std::string fs_prefix;
 
 		device_base();
 		virtual ~device_base();
@@ -196,7 +196,7 @@ namespace fs
 	} pod_tag;
 
 	// Get virtual device for specified path (nullptr for real path)
-	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path);
+	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path = nullptr);
 
 	// Set virtual device with specified name (nullptr for deletion)
 	shared_ptr<device_base> set_virtual_device(const std::string& name, shared_ptr<device_base> device);
@@ -209,6 +209,9 @@ namespace fs
 	{
 		return std::string{get_parent_dir_view(path, parent_level)};
 	}
+
+	// Return "path" plus an ending delimiter (if missing) if "path" is an existing directory. Otherwise, an empty string
+	std::string get_path_if_dir(const std::string& path);
 
 	// Get file information
 	bool get_stat(const std::string& path, stat_t& info);
@@ -274,6 +277,8 @@ namespace fs
 
 		// Open file with specified mode
 		explicit file(const std::string& path, rx::EnumBitSet<open_mode> mode = ::fs::read);
+
+		file(std::unique_ptr<file_base>&& ptr) : m_file(std::move(ptr)) {}
 
 		static file from_native_handle(native_handle handle);
 
@@ -538,6 +543,9 @@ namespace fs
 			return m_file->write_gather(buffers, buf_count);
 		}
 	};
+
+	// Enable sparse-file semantics when required by the host platform.
+	bool set_sparse(const file& file);
 
 	class dir final
 	{

@@ -17,12 +17,13 @@ LOG_CHANNEL(sys_event);
 
 lv2_event_queue::lv2_event_queue(u32 protocol, s32 type, s32 size, u64 name,
                                  u64 ipc_key) noexcept
-    : id(idm::last_id()), protocol{static_cast<u8>(protocol)},
+    : id(idm::last_id<lv2_event_queue>()), protocol{static_cast<u8>(protocol)},
       type(static_cast<u8>(type)), size(static_cast<u8>(size)), name(name),
       key(ipc_key) {}
 
 lv2_event_queue::lv2_event_queue(utils::serial &ar) noexcept
-    : id(idm::last_id()), protocol(ar), type(ar), size(ar), name(ar), key(ar) {
+    : id(idm::last_id<lv2_event_queue>()), protocol(ar), type(ar), size(ar),
+      name(ar), key(ar) {
   ar(events);
 }
 
@@ -104,29 +105,23 @@ extern void resume_spu_thread_group_from_waiting(
     spu_thread &spu,
     std::array<shared_ptr<named_thread<spu_thread>>, 8> &notify_spus);
 
-// Collects the SPU threads to wake and fires the notifications from its
-// destructor, i.e. after send()/destroy() have released the queue (and group)
-// mutexes. Notifying under the locks lets a woken SPU on a slow core re-contend
-// on the still-held mutex and go back to sleep, a lost/delayed-wakeup window.
-struct notify_spus_t {
-  std::array<shared_ptr<named_thread<spu_thread>>, 8> spus;
-
-  ~notify_spus_t() noexcept {
-    for (auto &spu : spus) {
-      if (spu && spu->state & cpu_flag::wait) {
-        spu->state.notify_one();
-      }
-    }
-  }
-};
-
 CellError lv2_event_queue::send(lv2_event event, bool *notified_thread,
                                 lv2_event_port *port) {
   if (notified_thread) {
     *notified_thread = false;
   }
 
-  notify_spus_t notify_spus{};
+  struct notify_spus_t {
+    std::array<shared_ptr<named_thread<spu_thread>>, 8> spus;
+
+    ~notify_spus_t() noexcept {
+      for (auto &spu : spus) {
+        if (spu && spu->state & cpu_flag::wait) {
+          spu->state.notify_one();
+        }
+      }
+    }
+  } notify_spus{};
 
   std::lock_guard lock(mutex);
 
@@ -150,8 +145,7 @@ CellError lv2_event_queue::send(lv2_event event, bool *notified_thread,
 
     if (ppu.state & cpu_flag::again) {
       if (auto cpu = get_current_cpu_thread()) {
-        cpu->state += cpu_flag::again;
-        cpu->state += cpu_flag::exit;
+        cpu->state += cpu_flag::again + cpu_flag::exit;
       }
 
       sys_event.warning("Ignored event!");
@@ -241,7 +235,7 @@ error_code sys_event_queue_create(cpu_thread &cpu, vm::ptr<u32> equeue_id,
   }
 
   cpu.check_state();
-  *equeue_id = idm::last_id();
+  *equeue_id = idm::last_id<lv2_event_queue>();
   return CELL_OK;
 }
 
@@ -255,7 +249,17 @@ error_code sys_event_queue_destroy(ppu_thread &ppu, u32 equeue_id, s32 mode) {
     return CELL_EINVAL;
   }
 
-  notify_spus_t notify_spus{};
+  struct notify_spus_t {
+    std::array<shared_ptr<named_thread<spu_thread>>, 8> spus;
+
+    ~notify_spus_t() noexcept {
+      for (auto &spu : spus) {
+        if (spu && spu->state & cpu_flag::wait) {
+          spu->state.notify_one();
+        }
+      }
+    }
+  } notify_spus{};
 
   std::vector<lv2_event> events;
 
@@ -275,10 +279,6 @@ error_code sys_event_queue_destroy(ppu_thread &ppu, u32 equeue_id, s32 mode) {
           return CELL_EBUSY;
         }
 
-        // Bail on an again-flagged waiter BEFORE destroying state: idm::withdraw
-        // keeps the object on a truthy CellError, so running on_id_destroy first
-        // (decrementing exists, dropping the IPC key) would half-destroy the
-        // queue when the destroy is replayed on a savestate reload.
         for (auto cpu = head; cpu; cpu = cpu->get_next_cpu()) {
           if (cpu->state & cpu_flag::again) {
             ppu.state += cpu_flag::again;

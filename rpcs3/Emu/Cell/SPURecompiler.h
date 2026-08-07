@@ -3,7 +3,7 @@
 #include "util/File.h"
 #include "util/lockless.h"
 #include "util/address_range.h"
-	#include "util/bit_set.hpp"
+#include "util/bit_set.hpp"
 #include "SPUThread.h"
 #include "SPUAnalyser.h"
 #include <vector>
@@ -91,9 +91,9 @@ public:
 	atomic_t<u8> cached = false;
 	atomic_t<u8> logged = false;
 
-	// ARM64 interpret-first async path: set once when this block has been handed to the
-	// background compile worker, so concurrent/repeat dispatch() misses of the same block
-	// enqueue it exactly once while it is being interpreted.
+	// ARM64 interpret-first async path (theirs 270dfed4): set once when this block has been
+	// handed to the background compile worker, so concurrent/repeat dispatch() misses of the
+	// same block enqueue it exactly once while it is being interpreted.
 	atomic_t<u8> queued = false;
 
 	spu_item(spu_program&& data)
@@ -115,9 +115,9 @@ class spu_runtime
 	// Debug module output location
 	std::string m_cache_path;
 
-	// Persistent SPU LLVM object-cache directory (ARM64). Version+config+cpu-keyed (built in
-	// the spu_runtime ctor) so a stale object can never load after a codegen change; the key
-	// is the entire safety mechanism since the ObjectCache validates the module name only.
+	// Persistent SPU LLVM object-cache directory (ARM64, theirs 8430a655). Version+config+cpu-keyed
+	// (built in the spu_runtime ctor) so a stale object can never load after a codegen change; the
+	// key is the entire safety mechanism since the ObjectCache validates the module name only.
 	// Empty when unavailable/disabled (treated as "no cache" -> in-memory JIT only).
 	std::string m_obj_cache_path;
 
@@ -701,9 +701,13 @@ public:
 			return true;
 		}
 
-		bool is_gpr_not_NaN_hint(u32 i) const noexcept
+		bool is_gpr_not_NaN_hint([[maybe_unused]] u32 i) const noexcept
 		{
+#ifdef ARCH_X64
 			return gpr_not_nans.test(i);
+#else
+			return false;
+#endif
 		}
 
 		origin_t get_reg(u32 reg_val) noexcept
@@ -854,9 +858,6 @@ protected:
 
 	struct pattern_info
 	{
-		// Address range (legacy putllc0/putllc16/rchcnt_loop patterns)
-		utils::address_range32 range;
-
 		// Info via integral
 		u64 info{};
 
@@ -866,7 +867,6 @@ protected:
 
 	std::map<u32, pattern_info> m_patterns;
 
-	void add_pattern(bool fill_all, inst_attr attr, u32 start, u32 end = -1);
 	void add_pattern(inst_attr attr, u32 start, u64 info, std::shared_ptr<void> info_ptr = nullptr);
 
 private:

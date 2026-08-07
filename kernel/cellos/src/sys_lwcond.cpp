@@ -431,8 +431,6 @@ error_code _sys_lwcond_queue_wait(ppu_thread &ppu, u32 lwcond_id,
             if (static_cast<ppu_thread *>(cpu)->state & cpu_flag::again) {
               ensure(cond.unqueue(cond.sq, &ppu));
               ppu.state += cpu_flag::again;
-              // Undo the increments above (upstream 064c00633); leaking them
-              // makes _sys_lwcond/_sys_lwmutex_destroy wait forever.
               cond.lwmutex_waiters--;
               mutex->lwcond_waiters--;
               return;
@@ -450,7 +448,8 @@ error_code _sys_lwcond_queue_wait(ppu_thread &ppu, u32 lwcond_id,
       });
 
   if (!cond || !mutex) {
-    return CELL_ESRCH;
+    return {CELL_ESRCH, fmt::format("lwmutex_id: 0x%x, lwcond_id: 0x%x",
+                                    lwmutex_id, lwcond_id)};
   }
 
   if (ppu.state & cpu_flag::again) {

@@ -37,12 +37,9 @@ namespace rsx
 			return fmt::format("%ssounds/%s.wav", fs::get_config_dir(), get_sound_filename());
 		}
 
-		void play_sound(sound_effect sound, std::optional<f32> /*volume*/)
+		void play_sound(sound_effect sound, std::optional<f32> volume)
 		{
-			// NOTE (rpcsx fork): the fork's play_sound callback in Emu/System.h takes only a
-			// filepath (no volume argument), so volume is intentionally dropped here. Keeping
-			// this adaptation local avoids an out-of-scope change to the callbacks struct.
-			Emu.GetCallbacks().play_sound(get_sound_filepath(sound));
+			Emu.GetCallbacks().play_sound(get_sound_filepath(sound), volume);
 		}
 
 		thread_local DECLARE(user_interface::g_thread_bit) = 0;
@@ -278,7 +275,7 @@ namespace rsx
 						continue;
 					}
 
-					if (!(pad->m_port_status & CELL_PAD_STATUS_CONNECTED))
+					if (!pad->is_connected() || pad->is_copilot())
 					{
 						continue;
 					}
@@ -315,6 +312,7 @@ namespace rsx
 							handle_button_press(pad_button::R3, !!(digital1 & CELL_PAD_CTRL_R3), pad_index);
 							handle_button_press(pad_button::select, !!(digital1 & CELL_PAD_CTRL_SELECT), pad_index);
 							handle_button_press(pad_button::start, !!(digital1 & CELL_PAD_CTRL_START), pad_index);
+							handle_button_press(pad_button::ps,         !!(digital1 & CELL_PAD_CTRL_PS),       pad_index);
 						}
 
 						// if (pad->ldd_data.len > CELL_PAD_BTN_OFFSET_DIGITAL2)
@@ -329,7 +327,6 @@ namespace rsx
 							handle_button_press(pad_button::R1, !!(digital2 & CELL_PAD_CTRL_R1), pad_index);
 							handle_button_press(pad_button::L2, !!(digital2 & CELL_PAD_CTRL_L2), pad_index);
 							handle_button_press(pad_button::R2, !!(digital2 & CELL_PAD_CTRL_R2), pad_index);
-							handle_button_press(pad_button::ps, !!(digital2 & CELL_PAD_CTRL_PS), pad_index);
 						}
 
 						const auto handle_ldd_stick_input = [&](s32 offset, pad_button id_small, pad_button id_large)
@@ -367,7 +364,7 @@ namespace rsx
 						continue;
 					}
 
-					for (const Button& button : pad->m_buttons)
+					for (const ButtonExternal& button : pad->m_buttons_external)
 					{
 						pad_button button_id = pad_button::pad_button_max_enum;
 						if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL1)
@@ -397,6 +394,9 @@ namespace rsx
 								break;
 							case CELL_PAD_CTRL_START:
 								button_id = pad_button::start;
+								break;
+							case CELL_PAD_CTRL_PS:
+								button_id = pad_button::ps;
 								break;
 							default:
 								break;
@@ -430,9 +430,6 @@ namespace rsx
 							case CELL_PAD_CTRL_R2:
 								button_id = pad_button::R2;
 								break;
-							case CELL_PAD_CTRL_PS:
-								button_id = pad_button::ps;
-								break;
 							default:
 								break;
 							}
@@ -444,7 +441,7 @@ namespace rsx
 							break;
 					}
 
-					for (const AnalogStick& stick : pad->m_sticks)
+					for (const AnalogStickExternal& stick : pad->m_sticks_external)
 					{
 						pad_button button_id = pad_button::pad_button_max_enum;
 						pad_button release_id = pad_button::pad_button_max_enum;

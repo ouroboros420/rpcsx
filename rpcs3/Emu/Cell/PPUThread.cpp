@@ -29,6 +29,7 @@
 #include "cellos/sys_process.h"
 #include "cellos/sys_spu.h"
 #include <cstddef>
+#include <rx/align.hpp>
 #include <rx/format.hpp>
 
 #ifdef LLVM_AVAILABLE
@@ -65,10 +66,10 @@
 #include "rx/asm.hpp"
 #include "rx/align.hpp"
 #include "util/vm.hpp"
-#include "util/fnv_hash.hpp"
 #include "util/v128.hpp"
 #include "util/simd.hpp"
 #include "util/sysinfo.hpp"
+#include "util/fnv_hash.hpp"
 
 #include "util/sema.h"
 
@@ -166,7 +167,7 @@ bool serialize<ppu_thread::cr_bits>(utils::serial& ar, typename ppu_thread::cr_b
 	}
 	else
 	{
-		o.unpack(ar);
+		o.unpack(ar.pop<u32>());
 	}
 
 	return true;
@@ -271,14 +272,15 @@ private:
 	}
 };
 
-// Single source of truth for the LLVM PPU compile memory budget. concurent_memory_limit
-// uses it to throttle concurrent module compilation: a module whose estimate exceeds the
-// budget compiles solo (others wait via the solo-allocation escape), so peak memory stays
-// ~one big module instead of N. utils::get_total_memory() returns accurate PHYSICAL RAM
-// (sysconf(_SC_PHYS_PAGES) = kernel totalram; it does NOT count zRAM/swap), but a single
-// Android process cannot allocate near all of it before the per-process cgroup / Low Memory
-// Killer limit fires, so total/3 is far too loose. We prefer the app-pushed ActivityManager
-// per-process-safe budget and otherwise cap conservatively at 1.5 GiB. EVERY PPU-compile
+// Single source of truth for the LLVM PPU compile memory budget (graft of ouroboros420
+// f0aa39c58 + cb95aea86). concurent_memory_limit uses it to throttle concurrent module
+// compilation: a module whose estimate exceeds the budget compiles solo (others wait via
+// the solo-allocation escape), so peak memory stays ~one big module instead of N.
+// utils::get_total_memory() returns accurate PHYSICAL RAM (sysconf(_SC_PHYS_PAGES) =
+// kernel totalram; it does NOT count zRAM/swap), but a single Android process cannot
+// allocate near all of it before the per-process cgroup / Low Memory Killer limit fires,
+// so total/3 is far too loose. We prefer the app-pushed ActivityManager per-process-safe
+// budget and otherwise cap conservatively at 1.5 GiB. EVERY PPU-compile
 // concurent_memory_limit MUST use this: a loose budget on any path (the old
 // get_total_memory()/2 in the public ppu_initialize overload) admits multiple ~1.6 GiB
 // modules concurrently and OOMs/segfaults first-time compiles (e.g. Skate 2, BLUS30253).
@@ -329,17 +331,17 @@ const auto ppu_gateway = build_function_asm<void (*)(ppu_thread*)>("ppu_gateway"
 		c.push(x86::rdi);
 		c.push(x86::rbp);
 		c.push(x86::rbx);
-		c.sub(x86::rsp, 0xa8);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x90), x86::xmm15);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x80), x86::xmm14);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x70), x86::xmm13);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x60), x86::xmm12);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x50), x86::xmm11);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x40), x86::xmm10);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x30), x86::xmm9);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x20), x86::xmm8);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x10), x86::xmm7);
-		c.movaps(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+		c.sub(x86::rsp, 0xc8);
+		c.movaps(x86::oword_ptr(x86::rsp, 0xb0), x86::xmm15);
+		c.movaps(x86::oword_ptr(x86::rsp, 0xa0), x86::xmm14);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x90), x86::xmm13);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x80), x86::xmm12);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x70), x86::xmm11);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x60), x86::xmm10);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x50), x86::xmm9);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x40), x86::xmm8);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x30), x86::xmm7);
+		c.movaps(x86::oword_ptr(x86::rsp, 0x20), x86::xmm6);
 #else
 		c.push(x86::rbp);
 		c.push(x86::r15);
@@ -354,19 +356,21 @@ const auto ppu_gateway = build_function_asm<void (*)(ppu_thread*)>("ppu_gateway"
 		c.mov(x86::qword_ptr(args[0], OFFSET_OF(ppu_thread, hv_ctx.regs)), x86::rsp);
 
 		// Initialize args
-		c.mov(x86::r13, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_exec_addr)));
+		c.movabs(x86::r13, reinterpret_cast<u64>(&vm::g_exec_addr));
+		c.mov(x86::r13, x86::qword_ptr(x86::r13));
 		c.mov(x86::rbp, args[0]);
 		c.mov(x86::edx, x86::dword_ptr(x86::rbp, OFFSET_OF(ppu_thread, cia))); // Load PC
 
-		c.mov(x86::rax, x86::qword_ptr(x86::r13, x86::edx, 1, 0)); // Load call target
-		c.mov(x86::rdx, x86::rax);
-		c.shl(x86::rax, 16);
-		c.shr(x86::rax, 16);
-		c.shr(x86::rdx, 48);
+		c.mov(x86::rax, x86::qword_ptr(x86::r13, x86::rdx, 1, 0)); // Load call target
+		c.movabs(x86::r12, vm::g_exec_addr_seg_offset);
+		c.add(x86::r12, x86::r13);
+		c.shr(x86::edx, 1);
+		c.mov(x86::edx, x86::word_ptr(x86::r12, x86::edx)); // Load relocation base
 		c.shl(x86::edx, 13);
-		c.mov(x86::r12d, x86::edx); // Load relocation base
+		c.mov(x86::r12d, x86::edx); // Set relocation base
 
-		c.mov(x86::rbx, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_base_addr)));
+		c.movabs(x86::rbx, reinterpret_cast<u64>(&vm::g_base_addr));
+		c.mov(x86::rbx, x86::qword_ptr(x86::rbx));
 		c.mov(x86::r14, x86::qword_ptr(x86::rbp, OFFSET_OF(ppu_thread, gpr[0]))); // Load some registers
 		c.mov(x86::rsi, x86::qword_ptr(x86::rbp, OFFSET_OF(ppu_thread, gpr[1])));
 		c.mov(x86::rdi, x86::qword_ptr(x86::rbp, OFFSET_OF(ppu_thread, gpr[2])));
@@ -384,17 +388,17 @@ const auto ppu_gateway = build_function_asm<void (*)(ppu_thread*)>("ppu_gateway"
 		}
 
 #ifdef _WIN32
-		c.movaps(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
-		c.movaps(x86::xmm7, x86::oword_ptr(x86::rsp, 0x10));
-		c.movaps(x86::xmm8, x86::oword_ptr(x86::rsp, 0x20));
-		c.movaps(x86::xmm9, x86::oword_ptr(x86::rsp, 0x30));
-		c.movaps(x86::xmm10, x86::oword_ptr(x86::rsp, 0x40));
-		c.movaps(x86::xmm11, x86::oword_ptr(x86::rsp, 0x50));
-		c.movaps(x86::xmm12, x86::oword_ptr(x86::rsp, 0x60));
-		c.movaps(x86::xmm13, x86::oword_ptr(x86::rsp, 0x70));
-		c.movaps(x86::xmm14, x86::oword_ptr(x86::rsp, 0x80));
-		c.movaps(x86::xmm15, x86::oword_ptr(x86::rsp, 0x90));
-		c.add(x86::rsp, 0xa8);
+		c.movaps(x86::xmm6, x86::oword_ptr(x86::rsp, 0x20));
+		c.movaps(x86::xmm7, x86::oword_ptr(x86::rsp, 0x30));
+		c.movaps(x86::xmm8, x86::oword_ptr(x86::rsp, 0x40));
+		c.movaps(x86::xmm9, x86::oword_ptr(x86::rsp, 0x50));
+		c.movaps(x86::xmm10, x86::oword_ptr(x86::rsp, 0x60));
+		c.movaps(x86::xmm11, x86::oword_ptr(x86::rsp, 0x70));
+		c.movaps(x86::xmm12, x86::oword_ptr(x86::rsp, 0x80));
+		c.movaps(x86::xmm13, x86::oword_ptr(x86::rsp, 0x90));
+		c.movaps(x86::xmm14, x86::oword_ptr(x86::rsp, 0xa0));
+		c.movaps(x86::xmm15, x86::oword_ptr(x86::rsp, 0xb0));
+		c.add(x86::rsp, 0xc8);
 		c.pop(x86::rbx);
 		c.pop(x86::rbp);
 		c.pop(x86::rdi);
@@ -480,13 +484,10 @@ const auto ppu_gateway = build_function_asm<void (*)(ppu_thread*)>("ppu_gateway"
 		c.ldr(call_target, arm::Mem(a64::x19, pc));
 		// Compute REG_Hp
 		const arm::GpX reg_hp = a64::x21;
-		c.mov(reg_hp, call_target);
-		c.lsr(reg_hp, reg_hp, 48);
+		c.mov(reg_hp, Imm(vm::g_exec_addr_seg_offset));
+		c.add(reg_hp, reg_hp, pc, arm::Shift(arm::ShiftOp::kLSR, 2));
+		c.ldrh(reg_hp.w(), arm::Mem(a64::x19, reg_hp));
 		c.lsl(reg_hp.w(), reg_hp.w(), 13);
-
-		// Zero top 16 bits of call target
-		c.lsl(call_target, call_target, Imm(16));
-		c.lsr(call_target, call_target, Imm(16));
 
 		// Load registers
 		c.mov(a64::x22, Imm(reinterpret_cast<u64>(&vm::g_base_addr)));
@@ -607,9 +608,14 @@ static inline u8* ppu_ptr(u32 addr)
 	return vm::g_exec_addr + u64{addr} * 2;
 }
 
+static inline u8* ppu_seg_ptr(u32 addr)
+{
+	return vm::g_exec_addr + vm::g_exec_addr_seg_offset + (addr >> 1);
+}
+
 static inline ppu_intrp_func_t ppu_read(u32 addr)
 {
-	return read_from_ptr<ppu_intrp_func_t>(ppu_ptr(addr));
+	return read_from_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr));
 }
 
 // Get interpreter cache value
@@ -634,7 +640,7 @@ static void ppu_fallback(ppu_thread& ppu, ppu_opcode_t op, be_t<u32>* this_op, p
 {
 	const auto _pc = vm::get_addr(this_op);
 	const auto _fn = ppu_cache(_pc);
-	write_to_ptr<ppu_intrp_func_t>(ppu_ptr(_pc), _fn);
+	write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(_pc), _fn);
 	return _fn(ppu, op, this_op, next_fn);
 }
 
@@ -652,7 +658,7 @@ void ppu_recompiler_fallback(ppu_thread& ppu)
 
 	while (true)
 	{
-		if (uptr func = uptr(ppu_read(ppu.cia)); (func << 16 >> 16) != reinterpret_cast<uptr>(ppu_recompiler_fallback_ghc))
+		if (uptr func = uptr(ppu_read(ppu.cia)); func != reinterpret_cast<uptr>(ppu_recompiler_fallback_ghc))
 		{
 			// We found a recompiler function at cia, return
 			break;
@@ -719,7 +725,7 @@ u32 ppu_read_mmio_aware_u32(u8* vm_base, u32 eal)
 	}
 
 	// Value is assumed to be swapped
-	return read_from_ptr<u32>(vm_base + eal);
+	return read_from_ptr_unsafe<u32>(vm_base, eal);
 }
 
 void ppu_write_mmio_aware_u32(u8* vm_base, u32 eal, u32 value)
@@ -747,7 +753,7 @@ void ppu_write_mmio_aware_u32(u8* vm_base, u32 eal, u32 value)
 	}
 
 	// Value is assumed swapped
-	write_to_ptr<u32>(vm_base + eal, value);
+	write_to_ptr_unsafe<u32>(vm_base + eal, value);
 }
 
 extern bool ppu_test_address_may_be_mmio(std::span<const be_t<u32>> insts)
@@ -907,6 +913,9 @@ extern void ppu_register_range(u32 addr, u32 size)
 	utils::memory_commit(ppu_ptr(addr), u64{size} * 2, utils::protection::rw);
 	ensure(vm::page_protect(addr, size, 0, vm::page_executable));
 
+	// Segment data
+	utils::memory_commit(ppu_seg_ptr(addr), size >> 1, utils::protection::rw);
+
 	if (g_cfg.core.ppu_debug)
 	{
 		utils::memory_commit(vm::g_stat_addr + addr, size);
@@ -919,12 +928,13 @@ extern void ppu_register_range(u32 addr, u32 size)
 		if (g_cfg.core.ppu_decoder == ppu_decoder_type::llvm_legacy)
 		{
 			// Assume addr is the start of first segment of PRX
-			const uptr entry_value = reinterpret_cast<uptr>(ppu_recompiler_fallback_ghc) | (seg_base << (32 + 3));
-			write_to_ptr<uptr>(ppu_ptr(addr), entry_value);
+			write_to_ptr_unsafe<uptr>(ppu_ptr(addr), std::bit_cast<uptr>(ppu_recompiler_fallback_ghc));
+			write_to_ptr_unsafe<u16>(ppu_seg_ptr(addr), static_cast<u16>(seg_base >> 13));
 		}
 		else
 		{
-			write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), ppu_fallback);
+			write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), ppu_fallback);
+			write_to_ptr_unsafe<u16>(ppu_seg_ptr(addr), 0);
 		}
 
 		addr += 4;
@@ -939,7 +949,7 @@ extern void ppu_register_function_at(u32 addr, u32 size, ppu_intrp_func_t ptr = 
 	// Initialize specific function
 	if (ptr)
 	{
-		write_to_ptr<uptr>(ppu_ptr(addr), (reinterpret_cast<uptr>(ptr) & 0xffff'ffff'ffffu) | (uptr(ppu_read(addr)) & ~0xffff'ffff'ffffu));
+		write_to_ptr_unsafe<uptr>(ppu_ptr(addr), std::bit_cast<uptr>(ptr));
 		return;
 	}
 
@@ -963,12 +973,15 @@ extern void ppu_register_function_at(u32 addr, u32 size, ppu_intrp_func_t ptr = 
 		return;
 	}
 
+	size = rx::alignUp<u32>(size + addr % 4, 4);
+	addr &= -4;
+
 	// Initialize interpreter cache
 	while (size)
 	{
 		if (auto old = ppu_read(addr); old != ppu_break && old != ppu_far_jump)
 		{
-			write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), ppu_cache(addr));
+			write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), ppu_cache(addr));
 		}
 
 		addr += 4;
@@ -1065,13 +1078,40 @@ struct ppu_far_jumps_t
 	ppu_far_jumps_t(int) noexcept {}
 
 	std::map<u32, all_info_t> vals;
+	std::pair<u32, u32> vals_range{0, 0};
 	::jit_runtime rt;
 
 	mutable shared_mutex mutex;
 
+	void add_value(u32 addr, all_info_t info)
+	{
+		vals.insert_or_assign(addr, std::move(info));
+
+		if (vals.size() == 1)
+		{
+			vals_range.first = addr;
+			vals_range.second = addr;
+		}
+		else
+		{
+			vals_range.first = std::min<u32>(vals_range.first, addr);
+			vals_range.second = std::max<u32>(vals_range.second, addr);
+		}
+	}
+
 	// Get target address, 'ppu' is used in ppu_far_jump in order to modify registers
 	u32 get_target(u32 pc, ppu_thread* ppu = nullptr)
 	{
+		if (vals_range.first > pc)
+		{
+			return 0;
+		}
+
+		if (vals_range.second < pc)
+		{
+			return 0;
+		}
+
 		reader_lock lock(mutex);
 
 		if (auto it = vals.find(pc); it != vals.end())
@@ -1080,13 +1120,23 @@ struct ppu_far_jumps_t
 			return all_info.get_target(pc, ppu);
 		}
 
-		return {};
+		return 0;
 	}
 
 	// Get function patches in range (entry -> target)
 	std::vector<std::pair<u32, u32>> get_targets(u32 pc, u32 size)
 	{
 		std::vector<std::pair<u32, u32>> targets;
+
+		if (vals_range.first >= pc + size)
+		{
+			return targets;
+		}
+
+		if (vals_range.second < pc)
+		{
+			return targets;
+		}
 
 		reader_lock lock(mutex);
 
@@ -1172,9 +1222,6 @@ u32 ppu_get_far_jump(u32 pc)
 
 static void ppu_far_jump(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_intrp_func*)
 {
-	// Use the actual executing op address, not ppu.cia (which is only updated at
-	// block boundaries) - otherwise a far-jump patched into the middle of a block
-	// resolves the wrong target and the patch does not take effect.
 	const u32 cia = g_fxo->get<ppu_far_jumps_t>().get_target(vm::get_addr(this_op), &ppu);
 
 	if (!vm::check_addr(cia, vm::page_executable))
@@ -1244,7 +1291,7 @@ bool ppu_form_branch_to_code(u32 entry, u32 target, bool link, bool with_toc, st
 	auto& jumps = g_fxo->get<ppu_far_jumps_t>();
 
 	std::lock_guard lock(jumps.mutex);
-	jumps.vals.insert_or_assign(entry, ppu_far_jumps_t::all_info_t{target, link, with_toc, std::move(module_name)});
+	jumps.add_value(entry, ppu_far_jumps_t::all_info_t{target, link, with_toc, std::move(module_name)});
 	ppu_register_function_at(entry, 4, g_cfg.core.ppu_decoder != ppu_decoder_type::llvm_legacy ? &ppu_far_jump : ensure(g_fxo->get<ppu_far_jumps_t>().gen_jump<false>(entry)));
 
 	return true;
@@ -1369,7 +1416,7 @@ extern bool ppu_breakpoint(u32 addr, bool is_adding)
 			return false;
 		}
 
-		write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), breakpoint);
+		write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), breakpoint);
 		return true;
 	}
 
@@ -1378,7 +1425,7 @@ extern bool ppu_breakpoint(u32 addr, bool is_adding)
 		return false;
 	}
 
-	write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), func_original);
+	write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), func_original);
 	return true;
 }
 
@@ -1386,7 +1433,7 @@ extern bool ppu_patch(u32 addr, u32 value)
 {
 	if (addr % 4)
 	{
-		ppu_log.fatal("Patch failed at 0x%x: unanligned memory address.", addr);
+		ppu_log.fatal("Patch failed at 0x%x: unaligned memory address.", addr);
 		return false;
 	}
 
@@ -1413,7 +1460,7 @@ extern bool ppu_patch(u32 addr, u32 value)
 	{
 		if (auto old = ppu_read(addr); old != ppu_break && old != ppu_fallback)
 		{
-			write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), ppu_cache(addr));
+			write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), ppu_cache(addr));
 		}
 	}
 
@@ -1464,9 +1511,7 @@ void ppu_thread::dump_regs(std::string& ret, std::any& custom_data) const
 		u32 preferred_cr_field_index = 7;
 	};
 
-	dump_registers_data_t* func_data = nullptr;
-
-	func_data = std::any_cast<dump_registers_data_t>(&custom_data);
+	dump_registers_data_t* func_data = std::any_cast<dump_registers_data_t>(&custom_data);
 
 	if (!func_data)
 	{
@@ -2278,18 +2323,12 @@ void ppu_thread::cpu_task()
 		}
 		case ppu_cmd::lle_call:
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(true);
-#endif
 			const vm::ptr<u32> opd(arg < 32 ? vm::cast(gpr[arg]) : vm::cast(arg));
 			cmd_pop(), fast_call(opd[0], opd[1]);
 			break;
 		}
 		case ppu_cmd::entry_call:
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(true);
-#endif
 			cmd_pop(), fast_call(entry_func.addr, entry_func.rtoc, true);
 			break;
 		}
@@ -2300,9 +2339,6 @@ void ppu_thread::cpu_task()
 		}
 		case ppu_cmd::opd_call:
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(true);
-#endif
 			const ppu_func_opd_t opd = cmd_get(1).as<ppu_func_opd_t>();
 			cmd_pop(1), fast_call(opd.addr, opd.rtoc);
 			break;
@@ -2321,9 +2357,6 @@ void ppu_thread::cpu_task()
 		}
 		case ppu_cmd::initialize:
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(false);
-#endif
 			cmd_pop();
 
 			ppu_initialize();
@@ -2335,9 +2368,6 @@ void ppu_thread::cpu_task()
 
 			spu_cache::initialize();
 
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(true);
-#endif
 #ifdef ARCH_ARM64
 			// Flush all cache lines after potentially writing executable code
 			asm("ISB");
@@ -2412,7 +2442,7 @@ void ppu_thread::cpu_sleep()
 	raddr = 0;
 
 	// Setup wait flag and memory flags to relock itself
-	state += g_use_rtm ? cpu_flag::wait : cpu_flag::wait + cpu_flag::memory;
+	state += cpu_flag::wait + cpu_flag::memory;
 
 	if (auto ptr = vm::g_tls_locked)
 	{
@@ -2485,6 +2515,11 @@ void ppu_thread::cpu_wait(rx::EnumBitSet<cpu_flag> old)
 // static_assert(offsetof(ppu_thread, gpr[0]) == 24);
 void ppu_thread::exec_task()
 {
+#ifdef __APPLE__
+	// Ensure correct state before executing JIT code
+	pthread_jit_write_protect_np(true);
+#endif
+
 	if (g_cfg.core.ppu_decoder == ppu_decoder_type::llvm_legacy)
 	{
 		// HVContext push to allow recursion. This happens with guest callback invocations.
@@ -2549,7 +2584,7 @@ ppu_thread::~ppu_thread()
 }
 
 ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u32 _prio, int detached)
-	: cpu_thread(idm::last_id()), stack_size(param.stack_size), stack_addr(param.stack_addr), joiner(detached != 0 ? ppu_join_status::detached : ppu_join_status::joinable), entry_func(param.entry), start_time(get_guest_system_time()), is_interrupt_thread(detached < 0), ppu_tname(make_single<std::string>(name))
+	: cpu_thread(idm::last_id<ppu_thread>()), stack_size(param.stack_size), stack_addr(param.stack_addr), joiner(detached != 0 ? ppu_join_status::detached : ppu_join_status::joinable), entry_func(param.entry), start_time(get_guest_system_time()), is_interrupt_thread(detached < 0), ppu_tname(make_single<std::string>(name))
 {
 	prio.raw().prio = _prio;
 
@@ -2571,18 +2606,13 @@ ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u3
 	// Trigger the scheduler
 	state += cpu_flag::suspend;
 
-	if (!g_use_rtm)
-	{
+	// Acquire memory passive lock
 		state += cpu_flag::memory;
-	}
 
 	call_history.data.resize(g_cfg.core.ppu_call_history ? call_history_max_size : 1);
 	syscall_history.data.resize(g_cfg.core.ppu_call_history ? syscall_history_max_size : 1);
 	syscall_history.count_debug_arguments = static_cast<u32>(g_cfg.core.ppu_call_history ? std::size(syscall_history.data[0].args) : 0);
 
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(true);
-#endif
 #ifdef ARCH_ARM64
 	// Flush all cache lines after potentially writing executable code
 	asm("ISB");
@@ -2617,16 +2647,15 @@ void ppu_thread::serialize_common(utils::serial& ar)
 {
 	[[maybe_unused]] const s32 version = GET_OR_USE_SERIALIZATION_VERSION(ar.is_writing(), ppu);
 
-	// PPU scalar registers were never serialized on this fork (the upstream line was
-	// commented during the re-vendor because rpcsx renamed the PPUContext fields:
-	// cr->cr_bits, xer->xer_so/ov/ca/cnt, sat bool->v128, fpscr.bits union). Without
-	// this, savestate reload zeroed every GPR/cia, so the game dereferenced a NULL
-	// pointer (reported as base+0 = 0x300000000) and segfaulted. Re-enabled adapted
-	// to the current field types, serialized UNCONDITIONALLY (matching upstream): a
-	// `version >=` gate here is IMPOSSIBLE because GET_OR_USE_SERIALIZATION_VERSION
-	// returns 0 on the write path, so a gate writes nothing yet reads registers ->
-	// stream desync (serial_breathe_and_tag). Pre-fix register-less savestates are
-	// cleanly rejected via the bumped ppu serialization version. vr is below.
+	// PPU scalar registers were never serialized here (the upstream line was commented out
+	// during the rpcsx re-vendor because the PPUContext fields were renamed: cr -> cr_bits,
+	// xer -> xer_so/ov/ca/cnt, sat -> v128, fpscr.bits union). Without this, savestate reload
+	// zeroed every GPR/cia, so the game dereferenced a NULL pointer (reported as base+0 =
+	// 0x300000000) and segfaulted. Re-enabled adapted to the current field types, serialized
+	// UNCONDITIONALLY (matching upstream): a `version >=` gate here is IMPOSSIBLE because
+	// GET_OR_USE_SERIALIZATION_VERSION returns 0 on the write path, so a gate would write
+	// nothing yet read registers -> stream desync (serial_breathe_and_tag).
+	// vr is serialized below. (graft of ouroboros420 94e5b39be + d42134836)
 	ar(gpr, fpr, cr, fpscr.bits, lr, ctr, vrsave, cia, xer_so, xer_ov, xer_ca, xer_cnt, sat, nj, prio.raw().all);
 
 	if (cia % 4 || (cia >> 28) >= 0xCu)
@@ -2654,9 +2683,9 @@ struct save_lv2_tag
 };
 
 ppu_thread::ppu_thread(utils::serial& ar)
-	: cpu_thread(idm::last_id()) // last_id() is showed to constructor on serialization
+	: cpu_thread(idm::last_id<ppu_thread>()) // last_id<>() is shown to constructor on serialization
 	  ,
-	  stack_size(ar), stack_addr(ar), joiner(ar.pop<ppu_join_status>()), entry_func(std::bit_cast<ppu_func_opd_t, u64>(ar)), is_interrupt_thread(ar)
+	  stack_size(ar), stack_addr(ar), joiner(ar.pop<ppu_join_status>()), entry_func(std::bit_cast<ppu_func_opd_t>(ar.pop<u64>())), is_interrupt_thread(ar)
 {
 	[[maybe_unused]] const s32 version = GET_SERIALIZATION_VERSION(ppu);
 
@@ -2815,11 +2844,7 @@ ppu_thread::ppu_thread(utils::serial& ar)
 
 	// Trigger the scheduler
 	state += cpu_flag::suspend;
-
-	if (!g_use_rtm)
-	{
 		state += cpu_flag::memory;
-	}
 
 	ppu_tname = make_single<std::string>(ar.pop<std::string>());
 
@@ -3267,7 +3292,6 @@ static T ppu_load_acquire_reservation(ppu_thread& ppu, u32 addr)
 	{
 		// Reload "cached" reservation of previous succeeded conditional store
 		// This seems like a hardware feature according to cellSpursAddUrgentCommand function
-		ppu.rtime -= 128;
 	}
 	else
 	{
@@ -3305,216 +3329,6 @@ extern u64 ppu_ldarx(ppu_thread& ppu, u32 addr)
 	return ppu_load_acquire_reservation<u64>(ppu, addr);
 }
 
-const auto ppu_stcx_accurate_tx = build_function_asm<u64 (*)(u32 raddr, u64 rtime, const void* _old, u64 _new)>("ppu_stcx_accurate_tx", [](native_asm& c, auto& args)
-	{
-		using namespace asmjit;
-
-#if defined(ARCH_X64)
-		Label fall = c.newLabel();
-		Label fail = c.newLabel();
-		Label _ret = c.newLabel();
-		Label load = c.newLabel();
-
-		// if (utils::has_avx() && !s_tsx_avx)
-	    //{
-	    //	c.vzeroupper();
-	    // }
-
-		// Create stack frame if necessary (Windows ABI has only 6 volatile vector registers)
-		c.push(x86::rbp);
-		c.push(x86::r14);
-		c.sub(x86::rsp, 40);
-#ifdef _WIN32
-		if (!s_tsx_avx)
-		{
-			c.movups(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
-			c.movups(x86::oword_ptr(x86::rsp, 16), x86::xmm7);
-		}
-#endif
-
-		// Prepare registers
-		build_swap_rdx_with(c, args, x86::r10);
-		c.mov(x86::rbp, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_sudo_addr)));
-		c.lea(x86::rbp, x86::qword_ptr(x86::rbp, args[0]));
-		c.and_(x86::rbp, -128);
-		c.prefetchw(x86::byte_ptr(x86::rbp, 0));
-		c.prefetchw(x86::byte_ptr(x86::rbp, 64));
-		c.movzx(args[0].r32(), args[0].r16());
-		c.shr(args[0].r32(), 1);
-		c.lea(x86::r11, x86::qword_ptr(reinterpret_cast<u64>(+vm::g_reservations), args[0]));
-		c.and_(x86::r11, -128 / 2);
-		c.and_(args[0].r32(), 63);
-
-		// Prepare data
-		if (s_tsx_avx)
-		{
-			c.vmovups(x86::ymm0, x86::ymmword_ptr(args[2], 0));
-			c.vmovups(x86::ymm1, x86::ymmword_ptr(args[2], 32));
-			c.vmovups(x86::ymm2, x86::ymmword_ptr(args[2], 64));
-			c.vmovups(x86::ymm3, x86::ymmword_ptr(args[2], 96));
-		}
-		else
-		{
-			c.movaps(x86::xmm0, x86::oword_ptr(args[2], 0));
-			c.movaps(x86::xmm1, x86::oword_ptr(args[2], 16));
-			c.movaps(x86::xmm2, x86::oword_ptr(args[2], 32));
-			c.movaps(x86::xmm3, x86::oword_ptr(args[2], 48));
-			c.movaps(x86::xmm4, x86::oword_ptr(args[2], 64));
-			c.movaps(x86::xmm5, x86::oword_ptr(args[2], 80));
-			c.movaps(x86::xmm6, x86::oword_ptr(args[2], 96));
-			c.movaps(x86::xmm7, x86::oword_ptr(args[2], 112));
-		}
-
-		// Alloc r14 to stamp0
-		const auto stamp0 = x86::r14;
-		build_get_tsc(c, stamp0);
-
-		Label fail2 = c.newLabel();
-
-		Label tx1 = build_transaction_enter(c, fall, [&]()
-			{
-				build_get_tsc(c);
-				c.sub(x86::rax, stamp0);
-				c.cmp(x86::rax, x86::qword_ptr(reinterpret_cast<u64>(&g_rtm_tx_limit2)));
-				c.jae(fall);
-			});
-
-		// Check pause flag
-		c.bt(x86::dword_ptr(args[2], OFFSET_OF(ppu_thread, state) - OFFSET_OF(ppu_thread, rdata)), static_cast<u32>(cpu_flag::pause));
-		c.jc(fall);
-		c.xbegin(tx1);
-
-		if (s_tsx_avx)
-		{
-			c.vxorps(x86::ymm0, x86::ymm0, x86::ymmword_ptr(x86::rbp, 0));
-			c.vxorps(x86::ymm1, x86::ymm1, x86::ymmword_ptr(x86::rbp, 32));
-			c.vxorps(x86::ymm2, x86::ymm2, x86::ymmword_ptr(x86::rbp, 64));
-			c.vxorps(x86::ymm3, x86::ymm3, x86::ymmword_ptr(x86::rbp, 96));
-			c.vorps(x86::ymm0, x86::ymm0, x86::ymm1);
-			c.vorps(x86::ymm1, x86::ymm2, x86::ymm3);
-			c.vorps(x86::ymm0, x86::ymm1, x86::ymm0);
-			c.vptest(x86::ymm0, x86::ymm0);
-		}
-		else
-		{
-			c.xorps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
-			c.xorps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
-			c.xorps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
-			c.xorps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
-			c.xorps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
-			c.xorps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
-			c.xorps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
-			c.xorps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
-			c.orps(x86::xmm0, x86::xmm1);
-			c.orps(x86::xmm2, x86::xmm3);
-			c.orps(x86::xmm4, x86::xmm5);
-			c.orps(x86::xmm6, x86::xmm7);
-			c.orps(x86::xmm0, x86::xmm2);
-			c.orps(x86::xmm4, x86::xmm6);
-			c.orps(x86::xmm0, x86::xmm4);
-			c.ptest(x86::xmm0, x86::xmm0);
-		}
-
-		c.jnz(fail);
-
-		// Store 8 bytes
-		c.mov(x86::qword_ptr(x86::rbp, args[0], 1, 0), args[3]);
-
-		c.xend();
-		c.lock().add(x86::qword_ptr(x86::r11), 64);
-		build_get_tsc(c);
-		c.sub(x86::rax, stamp0);
-		c.jmp(_ret);
-
-		// XABORT is expensive so try to finish with xend instead
-		c.bind(fail);
-
-		// Load old data to store back in rdata
-		if (s_tsx_avx)
-		{
-			c.vmovaps(x86::ymm0, x86::ymmword_ptr(x86::rbp, 0));
-			c.vmovaps(x86::ymm1, x86::ymmword_ptr(x86::rbp, 32));
-			c.vmovaps(x86::ymm2, x86::ymmword_ptr(x86::rbp, 64));
-			c.vmovaps(x86::ymm3, x86::ymmword_ptr(x86::rbp, 96));
-		}
-		else
-		{
-			c.movaps(x86::xmm0, x86::oword_ptr(x86::rbp, 0));
-			c.movaps(x86::xmm1, x86::oword_ptr(x86::rbp, 16));
-			c.movaps(x86::xmm2, x86::oword_ptr(x86::rbp, 32));
-			c.movaps(x86::xmm3, x86::oword_ptr(x86::rbp, 48));
-			c.movaps(x86::xmm4, x86::oword_ptr(x86::rbp, 64));
-			c.movaps(x86::xmm5, x86::oword_ptr(x86::rbp, 80));
-			c.movaps(x86::xmm6, x86::oword_ptr(x86::rbp, 96));
-			c.movaps(x86::xmm7, x86::oword_ptr(x86::rbp, 112));
-		}
-
-		c.xend();
-		c.jmp(fail2);
-
-		c.bind(fall);
-		c.mov(x86::rax, -1);
-		c.jmp(_ret);
-
-		c.bind(fail2);
-		c.lock().sub(x86::qword_ptr(x86::r11), 64);
-		c.bind(load);
-
-		// Store previous data back to rdata
-		if (s_tsx_avx)
-		{
-			c.vmovaps(x86::ymmword_ptr(args[2], 0), x86::ymm0);
-			c.vmovaps(x86::ymmword_ptr(args[2], 32), x86::ymm1);
-			c.vmovaps(x86::ymmword_ptr(args[2], 64), x86::ymm2);
-			c.vmovaps(x86::ymmword_ptr(args[2], 96), x86::ymm3);
-		}
-		else
-		{
-			c.movaps(x86::oword_ptr(args[2], 0), x86::xmm0);
-			c.movaps(x86::oword_ptr(args[2], 16), x86::xmm1);
-			c.movaps(x86::oword_ptr(args[2], 32), x86::xmm2);
-			c.movaps(x86::oword_ptr(args[2], 48), x86::xmm3);
-			c.movaps(x86::oword_ptr(args[2], 64), x86::xmm4);
-			c.movaps(x86::oword_ptr(args[2], 80), x86::xmm5);
-			c.movaps(x86::oword_ptr(args[2], 96), x86::xmm6);
-			c.movaps(x86::oword_ptr(args[2], 112), x86::xmm7);
-		}
-
-		c.mov(x86::rax, -1);
-		c.mov(x86::qword_ptr(args[2], OFFSET_OF(ppu_thread, last_ftime) - OFFSET_OF(ppu_thread, rdata)), x86::rax);
-		c.xor_(x86::eax, x86::eax);
-		// c.jmp(_ret);
-
-		c.bind(_ret);
-
-#ifdef _WIN32
-		if (!s_tsx_avx)
-		{
-			c.vmovups(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
-			c.vmovups(x86::xmm7, x86::oword_ptr(x86::rsp, 16));
-		}
-#endif
-
-		if (s_tsx_avx)
-		{
-			c.vzeroupper();
-		}
-
-		c.add(x86::rsp, 40);
-		c.pop(x86::r14);
-		c.pop(x86::rbp);
-
-		maybe_flush_lbr(c);
-		c.ret();
-#else
-		UNUSED(args);
-
-		// Unimplemented should fail.
-		c.brk(Imm(0x42));
-		c.ret(a64::x30);
-#endif
-	});
-
 template <typename T>
 static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 {
@@ -3525,7 +3339,10 @@ static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 		fmt::throw_exception("PPU %s: Unaligned address: 0x%08x", sizeof(T) == 4 ? "STWCX" : "STDCX", addr);
 	}
 
-	auto& data = vm::_ref<atomic_be_t<u64>>(addr & -8);
+	// Notify breakpoint handler
+	vm::write<void>(addr, T{0}, &ppu);
+
+	auto& data = const_cast<atomic_be_t<u64>&>(vm::_ref<atomic_be_t<u64>>(addr & -8));
 	auto& res = vm::reservation_acquire(addr);
 	const u64 rtime = ppu.rtime;
 
@@ -3590,77 +3407,6 @@ static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 				{
 					// Already locked or updated: give up
 					return false;
-				}
-
-				if (g_use_rtm) [[likely]]
-				{
-					switch (u64 count = ppu_stcx_accurate_tx(addr & -8, rtime, ppu.rdata, std::bit_cast<u64>(new_data)))
-					{
-					case umax:
-					{
-						auto& all_data = *vm::get_super_ptr<spu_rdata_t>(addr & -128);
-						auto& sdata = *vm::get_super_ptr<atomic_be_t<u64>>(addr & -8);
-
-						const bool ok = cpu_thread::suspend_all<+3>(&ppu, {all_data, all_data + 64, &res}, [&]
-							{
-								if ((res & -128) == rtime && cmp_rdata(ppu.rdata, all_data))
-								{
-									sdata.release(new_data);
-									res += 64;
-									return true;
-								}
-
-								mov_rdata_nt(ppu.rdata, all_data);
-								res -= 64;
-								return false;
-							});
-
-						if (ok)
-						{
-							break;
-						}
-
-						ppu.last_ftime = -1;
-						[[fallthrough]];
-					}
-					case 0:
-					{
-						if (ppu.last_faddr == addr)
-						{
-							ppu.last_fail++;
-						}
-
-						if (ppu.last_ftime != umax)
-						{
-							ppu.last_faddr = 0;
-							return false;
-						}
-
-						rx::prefetch_read(ppu.rdata);
-						rx::prefetch_read(ppu.rdata + 64);
-						ppu.last_faddr = addr;
-						ppu.last_ftime = res.load() & -128;
-						ppu.last_ftsc = rx::get_tsc();
-						return false;
-					}
-					default:
-					{
-						if (count > 20000 && g_cfg.core.perf_report) [[unlikely]]
-						{
-							perf_log.warning("STCX: took too long: %.3fus (%u c)", count / (utils::get_tsc_freq() / 1000'000.), count);
-						}
-
-						break;
-					}
-					}
-
-					if (ppu.last_faddr == addr)
-					{
-						ppu.last_succ++;
-					}
-
-					ppu.last_faddr = 0;
-					return true;
 				}
 
 				// Align address: we do not need the lower 7 bits anymore
@@ -3827,7 +3573,6 @@ static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 
 		ppu.last_faddr = 0;
 		ppu.res_cached = ppu.raddr;
-		ppu.rtime += 128;
 		ppu.raddr = 0;
 		return true;
 	}
@@ -3868,7 +3613,7 @@ struct jit_core_allocator
 {
 	// Honour the Android low-RAM compile-thread cap (0 = no cap) so the
 	// concurrent-codegen semaphore - the real peak-memory bound during boot -
-	// never exceeds what the device can hold.
+	// never exceeds what the device can hold. (ouroboros420 f7851ac47)
 	static s16 capped(s16 tc)
 	{
 		const u32 cap = rpcs3::utils::get_compile_thread_cap();
@@ -3910,7 +3655,7 @@ namespace
 		bucket_t& get_bucket(std::string_view sv)
 		{
 			const std::string& cache_path = fs::get_cache_dir();
-
+	
 			if (sv.starts_with(cache_path))
 			{
 				sv = sv.substr(cache_path.size());
@@ -3920,7 +3665,7 @@ namespace
 
 			usz final_index = 0;
 
-			for (usz i = 0; i < sizeof(hash); i++)
+			for  (usz i = 0; i < sizeof(hash); i++)
 			{
 				final_index ^= (hash >> (i * 8)) % 256;
 			}
@@ -4130,7 +3875,7 @@ extern void ppu_finalize(const ppu_module<lv2_obj>& info, bool force_mem_release
 #endif
 }
 
-extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_module<lv2_obj>*>* loaded_modules)
+extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_module<lv2_obj>*>* loaded_modules, bool is_fast_compilation)
 {
 	if (g_cfg.core.ppu_decoder != ppu_decoder_type::llvm_legacy)
 	{
@@ -4277,9 +4022,6 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 
 					if (mself.read(hdr) && hdr.get_count(mself.size()))
 					{
-						// Hoisted out of the per-record loop: the duplicate-offset set must persist
-						// across records, otherwise it was reset every iteration and the duplicate
-						// skip below could never trigger (matches upstream).
 						std::set<u64> offs;
 
 						for (u32 j = 0; j < hdr.count; j++)
@@ -4357,6 +4099,8 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 	u32 software_thread_limit = std::min<u32>(g_cfg.core.llvm_threads ? g_cfg.core.llvm_threads : u32{umax}, ::size32(file_queue));
 	if (const u32 cap = rpcs3::utils::get_compile_thread_cap(); cap > 0)
 	{
+		// Android low-RAM guard (ouroboros420 f7851ac47): applied to the EFFECTIVE thread
+		// count so a per-game cfg_mode::custom config cannot silently undo the cap.
 		software_thread_limit = std::min<u32>(software_thread_limit, cap);
 	}
 	const u32 cpu_thread_limit = utils::get_thread_count() > 8u ? std::max<u32>(utils::get_thread_count(), 2) - 1 : utils::get_thread_count(); // One LLVM thread less
@@ -4393,7 +4137,7 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 						if (auto klic_ptr = mod->get_ptr<const u8>(static_cast<u32>(constant_value), 16))
 						{
 							// Try to read from that address
-							if (const u128 klic_value = read_from_ptr<u128>(klic_ptr))
+							if (const u128 klic_value = read_from_ptr_unsafe<u128>(klic_ptr))
 							{
 								if (!std::count_if(decrypt_klics.begin(), decrypt_klics.end(), FN(std::memcmp(&x, &klic_value, 16) == 0)))
 								{
@@ -4409,9 +4153,8 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 
 	named_thread_group workers("SPRX Worker ", std::min<u32>(software_thread_limit, cpu_thread_limit), [&]
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(false);
-#endif
+			jit_write_guard jit_guard;
+
 			// Set low priority
 			thread_ctrl::scoped_priority low_prio(-1);
 			u32 inc_fdone = 1;
@@ -4536,6 +4279,12 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 						obj.clear(), src.close(); // Clear decrypted file and elf object memory
 						file_allocation = {};     // release used file memory
 
+						if (is_fast_compilation)
+						{
+							// Skip overlays in fast mode
+							break;
+						}
+
 						// Participate in thread execution limitation (takes a long time)
 						if (std::lock_guard lock(g_fxo->get<jit_core_allocator>().sem); !ovlm->analyse(0, ovlm->entry, ovlm->seg0_code_end, ovlm->applied_patches, std::vector<u32>{}, []()
 								{
@@ -4573,9 +4322,6 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 				return;
 			}
 
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(false);
-#endif
 			// Set low priority
 			thread_ctrl::scoped_priority low_prio(-1);
 
@@ -4824,7 +4570,7 @@ extern void ppu_initialize()
 
 	progress_dialog.reset();
 
-	ppu_precompile(dir_queue, &module_list);
+	ppu_precompile(dir_queue, &module_list, false);
 
 	if (Emu.IsStopped())
 	{
@@ -4900,7 +4646,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			if (g_cfg.core.ppu_debug && func.size && func.toc != umax && !ppu_get_far_jump(func.addr))
 			{
 				ppu_toc[func.addr] = func.toc;
-				write_to_ptr<ppu_intrp_func_t>(ppu_ptr(func.addr), &ppu_check_toc);
+				write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(func.addr), &ppu_check_toc);
 			}
 		}
 
@@ -4976,6 +4722,8 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		progress_dialog.emplace(get_localized_string(localized_string_id::PROGRESS_DIALOG_LOADING_PPU_MODULES));
 	}
 
+	jit_write_guard jit_guard;
+
 	// Permanently loaded compiled PPU modules (name -> data)
 	jit_module& jit_mod = g_fxo->get<jit_module_manager>().get(cache_path + "_" + std::to_string(std::bit_cast<usz>(info.segs[0].ptr)));
 
@@ -4996,9 +4744,6 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 	// Info to load to main JIT instance (true - compiled)
 	std::vector<std::pair<std::string, bool>> link_workload;
-
-	// Sync variable to acquire workloads
-	atomic_t<u32> work_cv = 0;
 
 	bool compiled_new = false;
 
@@ -5106,7 +4851,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 		[[maybe_unused]] auto write_le = [](u8*& code, auto value)
 		{
-			write_to_ptr<le_t<std::remove_cvref_t<decltype(value)>>>(code, value);
+			write_to_ptr_unsafe<le_t<std::remove_cvref_t<decltype(value)>>>(code, value);
 			code += sizeof(value);
 		};
 
@@ -5162,9 +4907,6 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		// Try to make the code fit in 16 bytes, may fail and fallback
 		if (*full_sample && abs_diff(*full_sample, reinterpret_cast<u64>(jit_runtime::peek(true) + 3 * 4)) < (128u << 20))
 		{
-#ifdef __APPLE__
-			pthread_jit_write_protect_np(false);
-#endif
 			u8* code = jit_runtime::alloc(12, 4, true);
 			code_ptr = reinterpret_cast<u64>(code);
 
@@ -5222,17 +4964,18 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				code_size_until_jump = buf_end - buf_start;
 
 				c.add(x86::edx, seg0);
-				c.mov(x86::rax, x86::qword_ptr(reinterpret_cast<u64>(&vm::g_exec_addr)));
+				c.movabs(x86::rax, reinterpret_cast<u64>(&vm::g_exec_addr));
+				c.mov(x86::rax, x86::qword_ptr(x86::rax));
 				c.mov(x86::dword_ptr(x86::rbp, OFFSET_OF(ppu_thread, cia)), x86::edx);
 
-				c.mov(x86::rax, x86::qword_ptr(x86::rax, x86::rdx, 1, 0)); // Load call target
-				c.mov(x86::rdx, x86::rax);
-				c.shl(x86::rax, 16);
-				c.shr(x86::rax, 16);
-				c.shr(x86::rdx, 48);
+				c.mov(x86::rcx, x86::qword_ptr(x86::rax, x86::rdx, 1, 0)); // Load call target
+				c.movabs(x86::r12, vm::g_exec_addr_seg_offset);
+				c.add(x86::rax, x86::r12);
+				c.shr(x86::edx, 1);
+				c.mov(x86::edx, x86::word_ptr(x86::rax, x86::edx)); // Load relocation base
 				c.shl(x86::edx, 13);
-				c.mov(x86::r12d, x86::edx); // Load relocation base
-				c.jmp(x86::rax);
+				c.mov(x86::r12d, x86::edx); // Set relocation base
+				c.jmp(x86::rcx);
 #else
 				// Load REG_Base - use absolute jump target to bypass rel jmp range limits
 			    // X19 contains vm::g_exec_addr
@@ -5268,19 +5011,21 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 				// Compute REG_Hp
 				const arm::GpX reg_hp = a64::x21;
-				c.mov(reg_hp, call_target);
-				c.lsr(reg_hp, reg_hp, 48);
+				c.mov(reg_hp, Imm(vm::g_exec_addr_seg_offset));
+				c.add(reg_hp, reg_hp, pc, arm::Shift(arm::ShiftOp::kLSR, 2));
+				c.ldrh(reg_hp.w(), arm::Mem(exec_addr, reg_hp));
 				c.lsl(reg_hp.w(), reg_hp.w(), 13);
-
-				// Zero top 16 bits of call target
-				c.lsl(call_target, call_target, 16);
-				c.lsr(call_target, call_target, 16);
 
 				// Execute LLE call
 				c.br(call_target);
 #endif
 			},
 			runtime.get(), true);
+
+#ifdef __APPLE__
+		// Restore write-protection state (modified by build_function_asm)
+		pthread_jit_write_protect_np(false);
+#endif
 
 		// Full sample may exist already, but is very far away
 		// So in this case, a new sample is written
@@ -5518,7 +5263,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				platform_bit,
 				accurate_dfma,
 				fixup_vnan,
-				fixup_nj_denormals,
+				_reserved_for_backwards_compatibility,
 				accurate_cache_line_stores,
 				reservations_128_byte,
 				greedy_mode,
@@ -5527,13 +5272,14 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				accurate_vnan,
 				accurate_nj_mode,
 				contains_symbol_resolver,
-				arm64_fma_newly_on,
+				daz_and_ftz,
 
-				bitset_last = arm64_fma_newly_on,
+				bitset_last = daz_and_ftz,
 			};
 
 			be_t<rx::EnumBitSet<ppu_settings>> settings{};
 
+			settings += ppu_settings::_reserved_for_backwards_compatibility;
 #if !defined(_WIN32) && !defined(__APPLE__)
 			settings += ppu_settings::platform_bit;
 #endif
@@ -5541,8 +5287,6 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				settings += ppu_settings::accurate_dfma;
 			if (g_cfg.core.ppu_fix_vnan)
 				settings += ppu_settings::fixup_vnan;
-			if (g_cfg.core.ppu_llvm_nj_fixup)
-				settings += ppu_settings::fixup_nj_denormals;
 			if (has_dcbz == 2)
 				settings += ppu_settings::accurate_cache_line_stores;
 			if (g_cfg.core.ppu_128_reservations_loop_max_length)
@@ -5556,45 +5300,14 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			if (g_cfg.core.ppu_set_vnan)
 				settings += ppu_settings::accurate_vnan, settings -= ppu_settings::fixup_vnan, fmt::throw_exception("VNAN Not implemented");
 			if (g_cfg.core.ppu_use_nj_bit)
-				settings += ppu_settings::accurate_nj_mode, settings -= ppu_settings::fixup_nj_denormals, fmt::throw_exception("NJ Not implemented");
+				settings += ppu_settings::accurate_nj_mode, fmt::throw_exception("NJ Not implemented");
 			if (fpos >= info.get_funcs().size() || module_counter % c_moudles_per_jit == c_moudles_per_jit - 1)
 				settings += ppu_settings::contains_symbol_resolver; // Avoid invalidating all modules for this purpose
-
-			const std::string c_cpu_name = jit_compiler::cpu(g_cfg.core.llvm_cpu);
-
-#ifdef ARCH_ARM64
-			// FMA/AVX went default-on for ALL ARM64 (eaebd3426). Before that,
-			// cpu_translator gated m_use_fma on `cpu == "cyclone" ||
-			// cpu.contains("cortex")` over the SAME string used as the key
-			// suffix below (getTargetCPU() == jit_compiler::cpu(), verified
-			// byte-identical derivation), so FMA was implicitly encoded in the
-			// key. The change decoupled that: on non-Cortex/non-Cyclone cores
-			// (e.g. Qualcomm Oryon) m_use_fma flipped false->true = different
-			// codegen = their cached objects are STALE, while Cortex codegen is
-			// byte-identical and MUST keep hitting its existing cache (a blanket
-			// version bump here cost testers a multi-session full-EBOOT
-			// recompile for nothing - and exposed the resolver-OOM crash).
-			// So: granular invalidation - fold the FMA decision into the
-			// settings hash exactly where it changed. The predicate must stay
-			// EXACTLY the old gate; anything looser fails to invalidate a
-			// truly-changed core (stale-codegen bug), anything tighter
-			// recompiles valid caches.
-			if (!(c_cpu_name == "cyclone" || c_cpu_name.find("cortex") != std::string::npos))
-				settings += ppu_settings::arm64_fma_newly_on;
-#endif
+			if (g_cfg.core.set_daz_and_ftz)
+				settings += ppu_settings::daz_and_ftz;
 
 			// Write version, hash, CPU, settings
-			// v9: recompile everything under the LLVM 19.1.7 JIT backend (v8 objs were
-			// produced by LLVM 20.1.3). Earlier: v8 bump deployed the ARM64 codegen fixes
-			// (branch-folding disable etc.) must not be reused, or the fixes never take
-			// effect on installs with an existing compiled cache.
-			// The FMA/AVX-for-all-ARM64 change is keyed via arm64_fma_newly_on
-			// above (granular; briefly shipped as a blanket v10 bump in draft
-			// builds). The excluded_funcs port self-invalidates via the module
-			// hash (patched funcs are dropped from the hashed address list), so
-			// it needs no version change. NEVER lower the version below v9
-			// (would resurrect stale objects).
-			fmt::append(obj_name, "v9-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), c_cpu_name);
+			fmt::append(obj_name, "v8-kusa-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
 		}
 
 		if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
@@ -5649,12 +5362,16 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 	// Create worker threads for compilation
 	if (!workload.empty())
 	{
+		// Sync variable to acquire workloads
+		atomic_t<u64> work_cv = 0;
+		atomic_t<u64> work_done = 0;
+
 		// Update progress dialog
 		g_progr_ptotal += ::size32(workload);
 
 		*progress_dialog = get_localized_string(localized_string_id::PROGRESS_DIALOG_COMPILING_PPU_MODULES);
 
-		const u32 thread_count = std::min(::size32(workload), rpcs3::utils::get_max_threads());
+		const u32 thread_count = std::max<u32>(std::min<u32>(::size32(workload), rpcs3::utils::get_max_threads()), 1) - 1;
 
 		struct thread_index_allocator
 		{
@@ -5664,7 +5381,8 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		struct thread_op
 		{
 			concurent_memory_limit& memory_limit;
-			atomic_t<u32>& work_cv;
+			const std::add_pointer_t<atomic_t<u64>> work_cv;
+			const std::add_pointer_t<atomic_t<u64>> work_done;
 			std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload;
 			const ppu_module<lv2_obj>& main_module;
 			const std::string& cache_path;
@@ -5672,16 +5390,16 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 			std::unique_lock<decltype(jit_core_allocator::sem)> core_lock;
 
-			thread_op(concurent_memory_limit& memory_limit, atomic_t<u32>& work_cv, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload, const cpu_thread* cpu, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
+			thread_op(concurent_memory_limit& memory_limit, atomic_t<u64>* _work_cv, atomic_t<u64>* _work_done, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload, const cpu_thread* cpu, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
 
-				: memory_limit(memory_limit), work_cv(work_cv), workload(workload), main_module(main_module), cache_path(cache_path), cpu(cpu)
+				: memory_limit(memory_limit), work_cv(_work_cv), work_done(_work_done), workload(workload), main_module(main_module), cache_path(cache_path), cpu(cpu)
 			{
 				// Save mutex
 				core_lock = std::unique_lock{sem, std::defer_lock};
 			}
 
 			thread_op(const thread_op& other) noexcept
-				: memory_limit(other.memory_limit), work_cv(other.work_cv), workload(other.workload), main_module(other.main_module), cache_path(other.cache_path), cpu(other.cpu)
+				: memory_limit(other.memory_limit), work_cv(other.work_cv), work_done(other.work_done), workload(other.workload), main_module(other.main_module), cache_path(other.cache_path), cpu(other.cpu)
 			{
 				if (auto mtx = other.core_lock.mutex())
 				{
@@ -5697,10 +5415,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				// Set low priority
 				thread_ctrl::scoped_priority low_prio(-1);
 
-#ifdef __APPLE__
-				pthread_jit_write_protect_np(false);
-#endif
-				for (u32 i = work_cv++; i < workload.size(); i = work_cv++, g_progr_pdone++)
+				jit_write_guard jit_guard;
+
+				for (usz i = (*work_cv)++; i < workload.size(); i = (*work_cv)++, (*work_done)++, g_progr_pdone++)
 				{
 					if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
 					{
@@ -5716,16 +5433,16 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 						total_fn_size += fn.size;
 					}
 
-					// CAUTION: this estimate is degenerate and load-bearing: ~16 KiB
-					// per guest-code byte makes every ~100 KiB part request ~1.6 GiB,
-					// exceeding the Android budget, so the solo-allocation escape
-					// admits exactly ONE part at a time. That accidental full
-					// serialization is the only thing bounding peak compile RSS on
-					// 7-8 GiB phones (the resolver parts' real LLVM cost is dominated
-					// by their ~program-wide declaration count, which this formula
-					// does not model at all). Do NOT make the multiplier "honest"
-					// without adding a real concurrency bound - honest small requests
-					// would admit several multi-GiB codegens in parallel and OOM.
+					// CAUTION (ouroboros420 e449e48ff): this estimate is degenerate and
+					// load-bearing: ~16 KiB per guest-code byte makes every ~100 KiB part
+					// request ~1.6 GiB, exceeding the Android budget, so the solo-allocation
+					// escape admits exactly ONE part at a time. That accidental full
+					// serialization is the only thing bounding peak compile RSS on 7-8 GiB
+					// phones (the resolver parts' real LLVM cost is dominated by their
+					// ~program-wide declaration count, which this formula does not model at
+					// all). Do NOT make the multiplier "honest" without adding a real
+					// concurrency bound - honest small requests would admit several
+					// multi-GiB codegens in parallel and OOM.
 					ppu_log.warning("LLVM: reporting used memory %u (free/total: %u/%u) by %s%s", total_fn_size * 1024 * 16, memory_limit.free_memory(), memory_limit.total_memory(), cache_path, obj_name);
 					auto used_memory = memory_limit.acquire(total_fn_size * 1024 * 16);
 
@@ -5734,10 +5451,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 					bool compiled_ok = false;
 					{
 						// Use another JIT instance
-						jit_compiler jit2({}, g_cfg.core.llvm_cpu, 0x1);
+						jit_compiler jit2({}, g_cfg.core.llvm_cpu.to_string(), 0x1);
 						compiled_ok = ppu_initialize2(jit2, part, cache_path, obj_name);
 					}
 
+					// ouroboros420 0f7c8aacb: the unconditional success log was a lie -
+					// cancelled/failed translations wrote no object yet still logged
+					// "Compiled module" (158 such lines in one tester log).
 					if (compiled_ok)
 					{
 						ppu_log.success("LLVM: Compiled module %s", obj_name);
@@ -5745,8 +5465,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 					else if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
 					{
 						// Shutdown cancelled the translation - no object was written,
-						// the module recompiles on the next launch. (Previously this
-						// path logged a fake "Compiled module" success.)
+						// the module recompiles on the next launch.
 						ppu_log.notice("LLVM: Compile of module %s cancelled", obj_name);
 					}
 					else
@@ -5764,24 +5483,57 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		// Prevent watchdog thread from terminating
 		g_watchdog_hold_ctr++;
 
-		named_thread_group threads(fmt::format("PPUW.%u.", ++g_fxo->get<thread_index_allocator>().index), thread_count, thread_op(memory_limit, work_cv, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem), [&](u32 /*thread_index*/, thread_op& op)
-			{
-				// Allocate "core"
-				op.core_lock.lock();
+		const std::string worker_group_name = fmt::format("PPUW.%u.", ++g_fxo->get<thread_index_allocator>().index);
 
-				// Second check before creating another thread
-				return work_cv < workload.size() && (cpu ? !cpu->state.all_of(cpu_flag::exit) : !Emu.IsStopped());
-			});
+		const auto try_lock_thread = [&](u32 thread_index, thread_op& op)
+		{
+			const bool to_lock = (thread_index + *op.work_done) < workload.size() && (cpu ? !cpu->state.all_of(cpu_flag::exit) : !Emu.IsStopped());
+
+			if (!to_lock)
+			{
+				return false;
+			}
+
+			// Allocate "core"
+			op.core_lock.lock();
+
+			// Second check before creating another thread
+			const bool to_unlock = !((thread_index + *op.work_done) < workload.size() && (cpu ? !cpu->state.all_of(cpu_flag::exit) : !Emu.IsStopped()));
+
+			if (to_unlock)
+			{
+				op.core_lock.unlock();
+				return false;
+			}
+
+			return true;
+		};
+
+		named_thread_group threads(worker_group_name, thread_count
+			, thread_op(memory_limit, &work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem)
+			, try_lock_thread);
+
+		const auto old_name = thread_ctrl::get_name();
+		thread_ctrl::set_name(worker_group_name + std::to_string(thread_count + 1));
+
+		thread_op cur_op(memory_limit, &work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem);
+
+		if (try_lock_thread(thread_count, cur_op))
+		{
+			// Recycle current thread: reduce overall thrread count
+			cur_op();
+		}
 
 		threads.join();
 
+		thread_ctrl::set_name(old_name);
 		g_watchdog_hold_ctr--;
 	}
 
 	// Initialize compiler instance
 	while (jits.size() < rx::aligned_div<u64>(module_counter, c_moudles_per_jit) && is_being_used_in_emulation)
 	{
-		jits.emplace_back(std::make_shared<jit_compiler>(s_link_table, g_cfg.core.llvm_cpu, 0, symbols_cement));
+		jits.emplace_back(std::make_shared<jit_compiler>(s_link_table, g_cfg.core.llvm_cpu.to_string(), 0, symbols_cement));
 
 		for (const auto& [addr, func] : *shared_map)
 		{
@@ -5825,7 +5577,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			// Log BEFORE add(): success was only logged afterwards, so a silent
 			// native death inside RuntimeDyld left the victim object unnamed
 			// (observed: Dante's Inferno died between "Loaded module #0" and any
-			// further output - ambiguous between loading #1 and post-link work).
+			// further output). (ouroboros420 5bb2b4c16)
 			ppu_log.notice("LLVM: Linking module #%u %s", mod_index, obj_name);
 
 			if (!failed_to_load && !jits[mod_index / c_moudles_per_jit]->add(cache_path + obj_name))
@@ -5885,30 +5637,59 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		}
 	}
 
-#ifdef __APPLE__
-	// Symbol resolver is in JIT mem, so we must enable execution
-	pthread_jit_write_protect_np(true);
-#endif
 	{
 		usz index = umax;
 
-		ppu_log.notice("Executing %u symbol resolvers", jit_mod.symbol_resolvers.size());
-
-		for (auto& sim : jit_mod.symbol_resolvers)
+#ifdef __APPLE__
+		named_thread sym_worker("PPU Symbol Resolver", [&]()
 		{
-			index++;
+			// jit_compiler::get() may write to executable memory (relocations)
+			pthread_jit_write_protect_np(false);
+#else
+		{
+#endif
+			if (is_first)
+			{
+				ppu_log.notice("Resolving %u symbol resolver functions", jit_mod.symbol_resolvers.size());
 
-			sim = ensure(!is_first ? sim : reinterpret_cast<void (*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
-			sim(vm::g_exec_addr, info.segs[0].addr);
+				for (auto& sim : jit_mod.symbol_resolvers)
+				{
+					index++;
 
-			ppu_log.notice("Executed symbol resolver #%u", index);
-		}
-	}
+					ensure(!sim);
+					sim = ensure(reinterpret_cast<void (*)(u8*, u64)>(jits[index]->get("__resolve_symbols")));
+
+					ppu_log.notice("Resolved symbol resolver function #%u", index);
+				}
+			}
+
+			ppu_log.notice("Executing %u symbol resolvers", jit_mod.symbol_resolvers.size());
 
 #ifdef __APPLE__
-	// Symbol resolver is in JIT mem, so we must enable execution
-	pthread_jit_write_protect_np(false);
+			// Virtual memory mapped by MAP_JIT cannot be executed until pthread_jit_write_protect_np(true)
+			pthread_jit_write_protect_np(true);
 #endif
+
+			index = umax;
+
+			for (auto& sim : jit_mod.symbol_resolvers)
+			{
+				index++;
+
+				ensure(sim);
+				sim(vm::g_exec_addr, info.segs[0].addr);
+
+				ppu_log.notice("Executed symbol resolver #%u", index);
+			}
+
+#ifndef __APPLE__
+		}
+#else
+		});
+
+		sym_worker();
+#endif
+	}
 
 	// Find a BLR-only function in order to copy it to all BLRs (some games need it)
 	for (const auto& func : info.get_funcs())
@@ -5931,9 +5712,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 		for (u32 addr = info.segs[0].addr; addr < info.segs[0].addr + info.segs[0].size; addr += 4, inst_ptr++)
 		{
-			if (*inst_ptr == ppu_instructions::BLR() && (reinterpret_cast<uptr>(ppu_read(addr)) << 16 >> 16) == reinterpret_cast<uptr>(ppu_recompiler_fallback_ghc))
+			if (*inst_ptr == ppu_instructions::BLR() && reinterpret_cast<uptr>(ppu_read(addr)) == reinterpret_cast<uptr>(ppu_recompiler_fallback_ghc))
 			{
-				write_to_ptr<ppu_intrp_func_t>(ppu_ptr(addr), BLR_func);
+				write_to_ptr_unsafe<ppu_intrp_func_t>(ppu_ptr(addr), BLR_func);
 			}
 		}
 	}
@@ -5955,7 +5736,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 	// MUST match the main precompile path's budget: was get_total_memory()/2 here, which
 	// is UNCLAMPED - on Android it admits ~2 concurrent ~1.6 GiB modules and OOMs/segfaults
 	// first-time compiles (Skate 2). The clamped budget makes an over-budget module compile
-	// solo (others wait), bounding peak compile memory to ~one module.
+	// solo (others wait), bounding peak compile memory to ~one module. (ouroboros420 f0aa39c58)
 	concurent_memory_limit memory_limit(ppu_get_llvm_compile_budget());
 	return ppu_initialize(info, check_only, file_size, memory_limit);
 }
@@ -5969,7 +5750,16 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 	std::unique_ptr<Module> _module = std::make_unique<Module>(obj_name, jit.get_context());
 
 	// Initialize target
+	// Upstream dropped this guard once it required LLVM 21+. Keep it: the
+	// Android build compiles the 3rdparty/llvm submodule (now llvmorg-22.1.8,
+	// so the first branch is taken), but the desktop path can still download a
+	// prebuilt USE_LLVM_VERSION - 20.1.3 at the time of writing - where
+	// Module::setTargetTriple takes a StringRef.
+#if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
+	_module->setTargetTriple(Triple(jit_compiler::triple1()));
+#else
 	_module->setTargetTriple(jit_compiler::triple1());
+#endif
 	_module->setDataLayout(jit.get_engine().getTargetMachine()->createDataLayout());
 
 	// Initialize translator
@@ -5978,7 +5768,7 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 	// Define some types
 	const auto _func = FunctionType::get(translator.get_type<void>(), {
 																		  translator.get_type<u8*>(),                  // Exec base
-																		  translator.GetContextType()->getPointerTo(), // PPU context
+																		  translator.get_type<u8*>(),                  // PPU context
 																		  translator.get_type<u64>(),                  // Segment address (for PRX)
 																		  translator.get_type<u8*>(),                  // Memory base
 																		  translator.get_type<u64>(),                  // r0
@@ -6125,11 +5915,11 @@ static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 	}
 
 	// Load or compile module. Use the recoverable path (codegen runs on a
-	// disposable helper thread): LLVM OOM/fatal during a giant module (e.g.
+	// disposable helper thread): an LLVM OOM/fatal during a giant module (e.g.
 	// the ~478k-declaration symbol-resolver part of huge executables) then
 	// kills only that helper instead of abort()ing the whole process - the
 	// module is skipped, its object stays absent and is retried on the next
-	// boot, when no live game RSS competes for memory.
+	// boot, when no live game RSS competes for memory. (ouroboros420 0f7c8aacb)
 	if (std::string error; !jit.try_add(std::move(_module), cache_path, error))
 	{
 		ppu_log.error("LLVM: Codegen failed for module %s: %s", obj_name, error);

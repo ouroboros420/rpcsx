@@ -67,6 +67,7 @@ void fmt_class_string<CellMusic2Error>::format(std::string& out, u64 arg)
 
 struct music_state
 {
+public:
 	shared_mutex mutex;
 
 	vm::ptr<void(u32 event, vm::ptr<void> param, vm::ptr<void> userData)> func{};
@@ -87,51 +88,51 @@ struct music_state
 					return;
 				}
 
-				// Known to be used by NFS: Hot Pursuit
-				sysutil_register_cb([this, state = status](ppu_thread& ppu) -> s32
-					{
-						cellMusic.notice("Sending status notification %d", state);
-						func(ppu, CELL_MUSIC_EVENT_STATUS_NOTIFICATION, vm::addr_t(state), userData);
-						return CELL_OK;
-					});
-			});
-		handler->set_playback_status_callback([this](music_handler_base::player_status status)
+			// Known to be used by NFS: Hot Pursuit
+			sysutil_register_cb([this, state = status](ppu_thread& ppu) -> s32
 			{
+				cellMusic.notice("Sending status notification %d", state);
+				func(ppu, CELL_MUSIC_EVENT_STATUS_NOTIFICATION, vm::addr_t(state), userData);
+				return CELL_OK;
+			});
+		});
+		handler->set_playback_status_callback([this](music_handler_base::player_status status)
+		{
 				switch (status)
 				{
 				case music_handler_base::player_status::end_of_media:
-					// Let's just play the next song for now if we are in list mode.
-					// Due to potential main thread recursion this may cause a deadlock with the internal mutex of the handler.
-					// Let's just call it from another thread instead.
-					m_wake_up_thread = 1;
-					m_wake_up_thread.notify_one();
+				// Let's just play the next song for now if we are in list mode.
+				// Due to potential main thread recursion this may cause a deadlock with the internal mutex of the handler.
+				// Let's just call it from another thread instead.
+				m_wake_up_thread = 1;
+				m_wake_up_thread.notify_one();
 					break;
 				default:
 					return;
 				}
-			});
+					});
 
 		m_thread = std::make_unique<named_thread<std::function<void()>>>("cellMusic State", [this]()
+		{
+			while (thread_ctrl::state() != thread_state::aborting)
 			{
-				while (thread_ctrl::state() != thread_state::aborting)
+				while (thread_ctrl::state() != thread_state::aborting && !m_wake_up_thread)
 				{
-					while (thread_ctrl::state() != thread_state::aborting && !m_wake_up_thread)
-					{
-						thread_ctrl::wait_on(m_wake_up_thread, 0);
-					}
-					m_wake_up_thread = 0;
-
-					if (thread_ctrl::state() == thread_state::aborting)
-					{
-						return;
-					}
-
-					// Play the next song
-					if (const error_code error = set_playback_command(CELL_MUSIC_PB_CMD_NEXT_TRACK))
-					{
-						cellMusic.error("Failed to play next track. error=0x%x", +error);
-					}
+					thread_ctrl::wait_on(m_wake_up_thread, 0);
 				}
+				m_wake_up_thread = 0;
+
+				if (thread_ctrl::state() == thread_state::aborting)
+				{
+					return;
+				}
+
+				// Play the next song
+				if (const error_code error = set_playback_command(CELL_MUSIC_PB_CMD_NEXT_TRACK))
+				{
+					cellMusic.error("Failed to play next track. error=0x%x", +error);
+				}
+			}
 			});
 	}
 

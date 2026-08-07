@@ -81,29 +81,6 @@ namespace vm
 			return vm::cast(vm::cast(m_addr) + offset32(mptr) + u32{sizeof(ET)} * index);
 		}
 
-		// Get vm reference to a struct member
-		template <typename MT, typename T2>
-			requires PtrComparable<T, T2> && (!std::is_void_v<T>)
-		_ref_base<MT, u32> ref(MT T2::* const mptr) const
-		{
-			return vm::cast(vm::cast(m_addr) + offset32(mptr));
-		}
-
-		// Get vm reference to a struct member with array subscription
-		template <typename MT, typename T2, typename ET = std::remove_extent_t<MT>>
-			requires PtrComparable<T, T2> && (!std::is_void_v<T>)
-		_ref_base<ET, u32> ref(MT T2::* const mptr, u32 index) const
-		{
-			return vm::cast(vm::cast(m_addr) + offset32(mptr) + u32{sizeof(ET)} * index);
-		}
-
-		// Get vm reference
-		_ref_base<T, u32> ref() const
-			requires(!std::is_void_v<T>)
-		{
-			return vm::cast(m_addr);
-		}
-
 		template <bool Strict = false>
 		T* get_ptr() const
 		{

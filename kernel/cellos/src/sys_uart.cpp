@@ -1419,9 +1419,8 @@ private:
       }
     }();
 
-    if (sce_idx == umax) {
+    if (sce_idx == umax)
       return PS3AV_STATUS_INVALID_VIDEO_PARAM;
-    }
 
     const video_sce_param &sce_param = sce_param_arr[sce_idx];
     if (video_head_cfg.video_head > PS3AV_HEAD_B_ANALOG ||

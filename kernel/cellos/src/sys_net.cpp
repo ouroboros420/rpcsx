@@ -281,7 +281,7 @@ lv2_socket::lv2_socket(utils::serial &ar, lv2_socket_type _type)
 
   ar(so_rcvtimeo, so_sendtimeo);
 
-  lv2_id = idm::last_id();
+  lv2_id = idm::last_id<lv2_socket>();
 
   ar(last_bound_addr);
 }
@@ -582,30 +582,28 @@ error_code sys_net_bnet_connect(ppu_thread &ppu, s32 s,
     return not_an_error(result);
   }
 
-  if (!sock.ret) {
-    while (auto state = ppu.state.fetch_sub(cpu_flag::signal)) {
-      if (is_stopped(state)) {
-        return {};
-      }
-
-      if (state & cpu_flag::signal) {
-        break;
-      }
-
-      ppu.state.wait(state);
+  while (auto state = ppu.state.fetch_sub(cpu_flag::signal)) {
+    if (is_stopped(state)) {
+      return {};
     }
 
-    if (ppu.gpr[3] == static_cast<u64>(-SYS_NET_EINTR)) {
-      return -SYS_NET_EINTR;
+    if (state & cpu_flag::signal) {
+      break;
     }
 
-    if (result) {
-      if (result < 0) {
-        return sys_net_error{result};
-      }
+    ppu.state.wait(state);
+  }
 
-      return not_an_error(result);
+  if (ppu.gpr[3] == static_cast<u64>(-SYS_NET_EINTR)) {
+    return -SYS_NET_EINTR;
+  }
+
+  if (result) {
+    if (result < 0) {
+      return sys_net_error{result};
     }
+
+    return not_an_error(result);
   }
 
   return CELL_OK;
@@ -1289,9 +1287,6 @@ error_code sys_net_bnet_poll(ppu_thread &ppu, vm::ptr<sys_net_pollfd> fds,
       }
 
       if (auto sock = idm::check_unlocked<lv2_socket>(fds_buf[i].fd)) {
-        // poll() sets revents; counting happens once in the second loop below
-        // (equivalent to upstream's void-poll refactor 3b6afc1d9, avoiding the
-        // double-count where a ready fd was tallied here AND via revents).
         sock->poll(fds_buf[i], _fds[i]);
 #ifdef _WIN32
         connecting[i] = sock->is_connecting();

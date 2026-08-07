@@ -5,7 +5,7 @@ namespace rsx
 {
 	namespace overlays
 	{
-		home_menu_entry::home_menu_entry(home_menu::fa_icon icon, const std::string& text, u16 width, text_align alignment)
+		home_menu_entry::home_menu_entry(home_menu::fa_icon icon, std::string_view text, u16 width, text_align alignment)
 		{
 			auto text_stack = std::make_unique<vertical_layout>();
 			auto padding    = std::make_unique<spacer>();
@@ -107,6 +107,8 @@ namespace rsx
 			return horizontal_layout::get_compiled();
 		}
 
+		// Android fork (theirs 3f49cbd): callback-driven checkbox for our runtime feature
+		// flags. Not cfg-bound, so it cannot reuse the home_menu_setting template.
 		home_menu_clanker_checkbox::home_menu_clanker_checkbox(std::function<bool()> getter, std::string text)
 			: m_getter(std::move(getter))
 			, m_label_text(std::move(text))
@@ -178,5 +180,5 @@ namespace rsx
 			m_checkbox->set_checked(m_last_value);
 			return horizontal_layout::get_compiled();
 		}
-	}
-}
+	} // namespace overlays
+} // namespace rsx

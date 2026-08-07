@@ -32,7 +32,7 @@ public:
 		std::lock_guard lock(mutex);
 		if (std::shared_ptr<void> new_val = std::invoke(func); new_val)
 		{
-			storage.push_back(new_val);
+			storage.push_back(std::move(new_val));
 		}
 		delete_unused();
 	}
@@ -82,9 +82,8 @@ public:
 	transactional_storage& operator=(const transactional_storage&) = delete;
 
 	transactional_storage(transactional_storage&& other)
+		: pool(std::move(other.pool))
 	{
-		pool = std::move(other.pool);
-
 		std::unique_lock lock_other{other.current_mutex};
 		const std::shared_ptr<T> other_current = other.current;
 		other.current = nullptr;

@@ -3,7 +3,7 @@
 #include <curl/curl.h>
 #include <pugixml.hpp>
 
-#include <rpcsx/fw/ps3/sceNpClans.h>
+#include "rpcsx/fw/ps3/sceNpClans.h"
 #include <Emu/NP/np_handler.h>
 #include <Emu/IdManager.h>
 

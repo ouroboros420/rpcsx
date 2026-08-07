@@ -6,6 +6,7 @@
 enum SceNpClansError : u32
 {
 	SCE_NP_CLANS_SUCCESS = CELL_OK,
+
 	SCE_NP_CLANS_ERROR_ALREADY_INITIALIZED = 0x80022701,
 	SCE_NP_CLANS_ERROR_NOT_INITIALIZED = 0x80022702,
 	SCE_NP_CLANS_ERROR_NOT_SUPPORTED = 0x80022703,
@@ -139,7 +140,7 @@ enum
 };
 
 // Request handle for clan API
-using SceNpClansRequestHandle = vm::ptr<struct SceNpClansRequest>;
+using SceNpClansRequestHandle = u32;
 
 // Paging request structure
 struct SceNpClansPagingRequest
@@ -160,8 +161,8 @@ struct SceNpClansClanBasicInfo
 {
 	be_t<u32> clanId;
 	be_t<u32> numMembers;
-	s8 name[SCE_NP_CLANS_CLAN_NAME_MAX_LENGTH + 1];
-	s8 tag[SCE_NP_CLANS_CLAN_TAG_MAX_LENGTH + 1];
+	char name[SCE_NP_CLANS_CLAN_NAME_MAX_LENGTH + 1];
+	char tag[SCE_NP_CLANS_CLAN_TAG_MAX_LENGTH + 1];
 	u8 reserved[2];
 };
 
@@ -198,7 +199,7 @@ struct SceNpClansSearchableProfile
 	be_t<s32> intAttr2SearchOp;
 	be_t<s32> intAttr3SearchOp;
 	be_t<s32> binAttr1SearchOp;
-	s8 tag[SCE_NP_CLANS_CLAN_TAG_MAX_LENGTH + 1];
+	char tag[SCE_NP_CLANS_CLAN_TAG_MAX_LENGTH + 1];
 	u8 reserved[3];
 };
 
@@ -206,7 +207,7 @@ struct SceNpClansSearchableProfile
 struct SceNpClansSearchableName
 {
 	be_t<s32> nameSearchOp;
-	s8 name[SCE_NP_CLANS_CLAN_NAME_MAX_LENGTH + 1];
+	char name[SCE_NP_CLANS_CLAN_NAME_MAX_LENGTH + 1];
 	u8 reserved[3];
 };
 
@@ -214,7 +215,7 @@ struct SceNpClansSearchableName
 struct SceNpClansUpdatableClanInfo
 {
 	be_t<u32> fields;
-	s8 description[SCE_NP_CLANS_CLAN_DESCRIPTION_MAX_LENGTH + 1];
+	char description[SCE_NP_CLANS_CLAN_DESCRIPTION_MAX_LENGTH + 1];
 	SceNpClansSearchableAttr attr;
 	u8 binData1;
 	be_t<u32> binData1Size;
@@ -234,8 +235,8 @@ struct SceNpClansUpdatableMemberInfo
 	be_t<u32> fields;
 	u8 binData1;
 	be_t<u32> binData1Size;
-	u8 binAttr1[SCE_NP_CLANS_CLAN_BINARY_ATTRIBUTE1_MAX_SIZE + 1];
-	s8 description[SCE_NP_CLANS_MEMBER_DESCRIPTION_MAX_LENGTH + 1];
+	u8 binAttr1[SCE_NP_CLANS_MEMBER_BINARY_ATTRIBUTE1_MAX_SIZE];
+	char description[SCE_NP_CLANS_MEMBER_DESCRIPTION_MAX_LENGTH + 1];
 	b8 allowMsg;
 	u8 reserved[3];
 };
@@ -272,7 +273,7 @@ struct SceNpClansMessageEntry
 	SceNpClansMessage message;
 	SceNpClansMessageData data;
 	SceNpId npid;
-	u8 reserved[4];
+	SceNpClanId postedBy;
 };
 
 // Blacklist entry structure
@@ -281,7 +282,3 @@ struct SceNpClansBlacklistEntry
 	SceNpId entry;
 	SceNpId registeredBy;
 };
-
-// sce_np_clans_manager moved to Emu/NP/clans_client.h (upstream re-vendor: the
-// manager now owns the RPCN-backed clans_client). Old client-less definition
-// removed here to avoid redefinition.

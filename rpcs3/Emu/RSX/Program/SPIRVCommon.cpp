@@ -12,9 +12,9 @@
 #pragma clang diagnostic ignored "-Winconsistent-missing-override"
 #endif
 #endif
-#include "SPIRV/GlslangToSpv.h"
-#include "glslang/Include/ResourceLimits.h"
-#include "glslang/Public/ShaderLang.h"
+#include <SPIRV/GlslangToSpv.h>
+#include <glslang/Include/ResourceLimits.h>
+#include <glslang/Public/ShaderLang.h>
 #ifdef _MSC_VER
 #pragma warning(pop)
 #else
@@ -138,11 +138,6 @@ namespace spirv
 		if (rules == ::glsl::glsl_rules_vulkan)
 		{
 			client = glslang::EShClientVulkan;
-			// Target Vulkan 1.2 / SPIR-V 1.5 (0.0.41). SPIR-V 1.5 is core in Vulkan
-			// 1.2+; our Android target devices (armv8.4-a, e.g. Adreno 740 = Vulkan
-			// 1.3) support it. TODO before a broad release: make this device-aware
-			// (fall back to SpV 1.0/1.3 on Vulkan <1.2 devices) - some old/low-end
-			// Android Vulkan 1.0/1.1 drivers may reject SPIR-V 1.5 modules.
 			target_version = glslang::EShTargetClientVersion::EShTargetVulkan_1_2;
 			spirv_version = glslang::EShTargetLanguageVersion::EShTargetSpv_1_5;
 			msg = static_cast<EShMessages>(EShMsgVulkanRules | EShMsgSpvRules | EShMsgEnhanced);
@@ -158,7 +153,7 @@ namespace spirv
 		glslang::TProgram program;
 		glslang::TShader shader_object(lang);
 
-		shader_object.setEnvInput(glslang::EShSourceGlsl, lang, client, 100);
+		shader_object.setEnvInput(glslang::EShSourceGlsl, lang, client, 100); // NOTE: 100 here is the spec revision of GL_KHR_vulkan_glsl. There is only one version (100) for the past 10 years.
 		shader_object.setEnvClient(client, target_version);
 		shader_object.setEnvTarget(glslang::EshTargetSpv, spirv_version);
 

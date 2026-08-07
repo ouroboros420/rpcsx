@@ -66,7 +66,7 @@ namespace np
 		return sockaddr_ipv6;
 	}
 
-	u32 register_ip(const std::string& ip_bytes)
+	u32 register_ip(std::string_view ip_bytes)
 	{
 		if (ip_bytes.size() == 4)
 		{
@@ -167,13 +167,13 @@ namespace np
 		{
 			const addrinfo* found = addr_info;
 
-			while (found != nullptr)
-			{
-				if (found->ai_family == AF_INET6)
-					break;
+		while (found != nullptr)
+		{
+			if (found->ai_family == AF_INET6)
+				break;
 
-				found = found->ai_next;
-			}
+			found = found->ai_next;
+		}
 
 			return found;
 		};

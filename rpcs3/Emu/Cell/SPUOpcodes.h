@@ -21,9 +21,9 @@ union spu_opcode_t
 	bf_t<s32, 14, 7> si7;   // 11..17, signed
 	bf_t<u32, 14, 8> i8;    // 10..17
 	bf_t<s32, 14, 10> si10; // 8..17, signed
-	bf_t<u32, 7, 16> i16; // 9..24
-	bf_t<s32, 7, 16> si16; // 9..24, signed
-	bf_t<u32, 7, 18> i18; // 7..24
+	bf_t<u32, 7, 16> i16;   // 9..24
+	bf_t<s32, 7, 16> si16;  // 9..24, signed
+	bf_t<u32, 7, 18> i18;   // 7..24
 
 	// For 16-bit instructions in the context of 32-bits
 	u32 duplicate_si10() const

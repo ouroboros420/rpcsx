@@ -31,10 +31,7 @@ void fmt_class_string<lv2_mem_container_id>::format(std::string &out, u64 arg) {
 lv2_memory::lv2_memory(u32 size, u32 align, u64 flags, u64 key, bool pshared,
                        lv2_memory_container *ct)
     : size(size), align(align), flags(flags), key(key), pshared(pshared),
-      ct(ct), shm(null_ptr) {
-  // Host memory is allocated lazily at first map (see map_shared_memory /
-  // search_and_map), matching upstream.
-}
+      ct(ct), shm(null_ptr) {}
 
 lv2_memory::lv2_memory(utils::serial &ar)
     : size(ar), align(ar), flags(ar), key(ar), pshared(ar),
@@ -45,21 +42,9 @@ lv2_memory::lv2_memory(utils::serial &ar)
               ensure(vm::get(vm::any, addr)->peek(addr).second));
         }
 
-        // Savestates from before the lazy-shm port (lv2_memory version < 2)
-        // inlined the shm contents for unmapped (counter==0) memory right here.
-        // Consume those bytes so the stream stays aligned; the buffer is an
-        // unmapped (zero) region, kept as-is for that restored object.
-        if (GET_SERIALIZATION_VERSION(lv2_memory) < 2) {
-          // Non-const so make_single_value yields a mutable single_ptr that the
-          // atomic_ptr<shared_ptr<shm>> member accepts.
-          auto _shm = std::make_shared<utils::shm>(size, 1);
-          ar(std::span(_shm->map_self(), size));
-          return make_single_value(std::move(_shm));
-        }
-
         return null_ptr;
       }(ar.pop<u32>())),
-      counter(ar) {}
+      counter(ar.pop<u32>()) {}
 
 CellError lv2_memory::on_id_create() {
   if (!exists && !ct->take(size)) {
@@ -86,9 +71,6 @@ void lv2_memory::save(utils::serial &ar) {
 
   ar(size, align, flags, key, pshared, ct->id);
   ar(counter ? vm::get_shm_addr(*shm.load()) : 0);
-  // Unmapped (counter==0) memory has no host backing in the lazy model, so
-  // there are no inline contents to serialize (version >= 2). Old savestates
-  // that did inline them are handled in the load ctor via the version check.
   ar(counter);
 }
 
@@ -228,7 +210,7 @@ error_code sys_mmapper_allocate_shared_memory(ppu_thread &ppu, u64 ipc_key,
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -283,7 +265,7 @@ sys_mmapper_allocate_shared_memory_from_container(ppu_thread &ppu, u64 ipc_key,
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -323,7 +305,7 @@ error_code sys_mmapper_allocate_shared_memory_ext(
   }
   }
 
-  if (flags & ~SYS_MEMORY_PAGE_SIZE_MASK) {
+  if (flags & ~SYS_MEMORY_GRANULARITY_MASK) {
     return CELL_EINVAL;
   }
 
@@ -373,7 +355,7 @@ error_code sys_mmapper_allocate_shared_memory_ext(
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -467,7 +449,7 @@ error_code sys_mmapper_allocate_shared_memory_from_container_ext(
   }
 
   ppu.check_state();
-  *mem_id = idm::last_id();
+  *mem_id = idm::last_id<lv2_memory>();
   return CELL_OK;
 }
 
@@ -522,7 +504,6 @@ error_code sys_mmapper_free_address(ppu_thread &ppu, u32 addr) {
   // If a memory block is freed, remove it from page notification table.
   auto &pf_entries = g_fxo->get<page_fault_notification_entries>();
   std::unique_lock lock(pf_entries.mutex);
-
   auto ind_to_remove = pf_entries.entries.begin();
   for (; ind_to_remove != pf_entries.entries.end(); ++ind_to_remove) {
     if (addr == ind_to_remove->start_addr) {
@@ -530,11 +511,9 @@ error_code sys_mmapper_free_address(ppu_thread &ppu, u32 addr) {
     }
   }
   if (ind_to_remove != pf_entries.entries.end()) {
-    const u32 port_id = ind_to_remove->port_id;
+    u32 port_id = ind_to_remove->port_id;
     pf_entries.entries.erase(ind_to_remove);
     lock.unlock();
-    // Release the event port tied to this page-fault notification (was leaked);
-    // done outside the lock to avoid deadlock with the event subsystem.
     sys_event_port_disconnect(ppu, port_id);
     sys_event_port_destroy(ppu, port_id);
   }
@@ -602,9 +581,9 @@ error_code sys_mmapper_map_shared_memory(ppu_thread &ppu, u32 addr, u32 mem_id,
           return CELL_EALIGN;
         }
 
-        for (stx::shared_ptr<std::shared_ptr<utils::shm>> to_insert, null;
+        for (shared_ptr<std::shared_ptr<utils::shm>> to_insert, null;
              !mem.shm;) {
-          // Insert atomically the memory handle (lazily allocated)
+          // Insert atomically the memory handle (laziliy allocated)
           if (!to_insert) {
             to_insert = make_single_value(
                 std::make_shared<utils::shm>(mem.size, 1 /* shareable flag */));
@@ -672,9 +651,9 @@ error_code sys_mmapper_search_and_map(ppu_thread &ppu, u32 start_addr,
           return CELL_EALIGN;
         }
 
-        for (stx::shared_ptr<std::shared_ptr<utils::shm>> to_insert, null;
+        for (shared_ptr<std::shared_ptr<utils::shm>> to_insert, null;
              !mem.shm;) {
-          // Insert atomically the memory handle (lazily allocated)
+          // Insert atomically the memory handle (laziliy allocated)
           if (!to_insert) {
             to_insert = make_single_value(
                 std::make_shared<utils::shm>(mem.size, 1 /* shareable flag */));
@@ -744,7 +723,8 @@ error_code sys_mmapper_unmap_shared_memory(ppu_thread &ppu, u32 addr,
 
   const auto mem =
       idm::select<lv2_obj, lv2_memory>([&](u32 id, lv2_memory &mem) -> u32 {
-        if (auto shm0 = mem.shm.load(); shm0 && shm0->get() == shm.second.get()) {
+        if (auto shm0 = mem.shm.load();
+            shm0 && shm0->get() == shm.second.get()) {
           return id;
         }
 

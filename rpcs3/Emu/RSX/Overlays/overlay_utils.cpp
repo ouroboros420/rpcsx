@@ -50,16 +50,16 @@ static auto s_ascii_lowering_map = []()
 	_map[0x3019] = u8(']');
 	_map[0x301A] = u8('[');
 	_map[0x301B] = u8(']');
-	_map[0x301C] = u8('~');  // wave dash (inverted tilde)
-	_map[0x301D] = u8('"');  // reverse double prime quotation
-	_map[0x301E] = u8('"');  // double prime quotation
-	_map[0x301F] = u8('"');  // low double prime quotation
-	_map[0x3031] = u8('<');  // vertical kana repeat mark
+	_map[0x301C] = u8('~'); // wave dash (inverted tilde)
+	_map[0x301D] = u8('"'); // reverse double prime quotation
+	_map[0x301E] = u8('"'); // double prime quotation
+	_map[0x301F] = u8('"'); // low double prime quotation
+	_map[0x3031] = u8('<'); // vertical kana repeat mark
 
 	return _map;
 }();
 
-template<typename F>
+template <typename F>
 void process_multibyte(std::string_view s, F&& func)
 {
 	const usz end = s.length();
@@ -116,21 +116,21 @@ std::string utf8_to_ascii8(std::string_view utf8_string)
 	out.reserve(utf8_string.length());
 
 	process_multibyte(utf8_string, [&out](u32 code)
-	{
-		if (code <= 0x7F)
 		{
-			out.push_back(static_cast<u8>(code));
-		}
-		else if (auto replace = s_ascii_lowering_map.find(code);
-			replace == s_ascii_lowering_map.end())
-		{
-			out.push_back('#');
-		}
-		else
-		{
-			out.push_back(replace->second);
-		}
-	});
+			if (code <= 0x7F)
+			{
+				out.push_back(static_cast<u8>(code));
+			}
+			else if (auto replace = s_ascii_lowering_map.find(code);
+				replace == s_ascii_lowering_map.end())
+			{
+				out.push_back('#');
+			}
+			else
+			{
+				out.push_back(replace->second);
+			}
+		});
 
 	return out;
 }
@@ -174,9 +174,9 @@ std::u32string utf8_to_u32string(std::string_view utf8_string)
 	result.reserve(utf8_string.size());
 
 	process_multibyte(utf8_string, [&result](u32 code)
-	{
-		result.push_back(static_cast<char32_t>(code));
-	});
+		{
+			result.push_back(static_cast<char32_t>(code));
+		});
 
 	return result;
 }

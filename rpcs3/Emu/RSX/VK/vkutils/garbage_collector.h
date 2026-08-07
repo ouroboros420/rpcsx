@@ -15,8 +15,8 @@ namespace vk
 		disposable_t() = delete;
 		disposable_t(const disposable_t&) = delete;
 
-		disposable_t(disposable_t&& other) : ptr(std::exchange(other.ptr, nullptr)),
-											 deleter(other.deleter)
+		disposable_t(disposable_t&& other) noexcept : ptr(std::exchange(other.ptr, nullptr)),
+													  deleter(other.deleter)
 		{
 		}
 

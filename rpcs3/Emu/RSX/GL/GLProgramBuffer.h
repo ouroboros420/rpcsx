@@ -13,6 +13,11 @@ struct GLTraits
 	using pipeline_storage_type = std::unique_ptr<gl::glsl::program>;
 	using pipeline_properties = void*;
 
+	// GL shader compilation is bound to the thread holding the GL context, so it
+	// cannot be moved onto the pipeline compiler workers the way the Vulkan backend
+	// does. Behaviour here is unchanged.
+	static constexpr bool supports_deferred_shader_compilation = false;
+
 	static void recompile_fragment_program(const RSXFragmentProgram& RSXFP, fragment_program_type& fragmentProgramData, usz /*ID*/)
 	{
 		fragmentProgramData.Decompile(RSXFP);
@@ -96,6 +101,13 @@ struct GLTraits
 			// Bind locations 0 and 1 to the stream buffers
 			program->uniforms[0] = GL_STREAM_BUFFER_START + 0;
 			program->uniforms[1] = GL_STREAM_BUFFER_START + 1;
+
+			// Optional inputs
+			int location = 0;
+			if (program->uniforms.has_location("frag_depth", &location))
+			{
+				program->uniforms[location] = GL_TEMP_IMAGE_SLOT(0);
+			}
 		};
 
 		auto pipeline = compiler->compile(flags, post_create_func, post_link_func, callback);

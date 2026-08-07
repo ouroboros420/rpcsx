@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
+
+find_program(CCACHE_PATH ccache HINTS ENV PATH)
+if(CCACHE_PATH)
+    message(STATUS "Using ccache: ${CCACHE_PATH}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PATH}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PATH}")
+endif()
+
 project(rpcsx)
 
 if(CMAKE_CROSSCOMPILING)
@@ -147,6 +155,12 @@ if(USE_FS_GS_SYSCALL)
     add_definitions(-DUSE_FS_GS_SYSCALL)
 endif()
 
+if(APPLE OR WIN32)
+    set(USE_SYSTEM_OPENAL_DEFAULT OFF)
+else()
+    set(USE_SYSTEM_OPENAL_DEFAULT ON)
+endif()
+
 # rpcs3 options
 option(USE_NATIVE_INSTRUCTIONS "USE_NATIVE_INSTRUCTIONS makes rpcs3 compile with -march=native, which is useful for local builds, but not good for packages." ON)
 option(WITH_LLVM "Enable usage of LLVM library" ON)
@@ -155,17 +169,34 @@ option(STATIC_LINK_LLVM "Link against LLVM statically. This will get set to ON i
 option(USE_FAUDIO "FAudio audio backend" ON)
 option(USE_LIBEVDEV "libevdev-based joystick support" ON)
 option(USE_DISCORD_RPC "Discord rich presence integration" OFF)
-option(USE_SYSTEM_ZLIB "Prefer system ZLIB instead of the builtin one" ON)
 option(USE_VULKAN "Vulkan render backend" ON)
 option(USE_PRECOMPILED_HEADERS "Use precompiled headers" OFF)
-option(USE_SDL "Enables SDL input handler" OFF)
-option(USE_SYSTEM_SDL "Prefer system SDL instead of the builtin one" ON)
-option(USE_SYSTEM_FFMPEG "Prefer system ffmpeg instead of the prebuild one" OFF)
-option(USE_SYSTEM_OPENAL "Prefer system OpenAL instead of the prebuild one" ON)
+option(USE_SDL "Enables SDL input handler" ON)
+option(USE_SYSTEM_CUBEB "Prefer system cubeb instead of the builtin one" OFF)
 option(USE_SYSTEM_CURL "Prefer system Curl instead of the prebuild one" ON)
+option(USE_SYSTEM_FAUDIO "Prefer system FAudio instead of the builtin one" OFF)
+option(USE_SYSTEM_FFMPEG "Prefer system ffmpeg instead of the prebuild one" OFF)
+option(USE_SYSTEM_PROTOBUF "Prefer system protobuf instead of the builtin one" OFF)
+option(USE_SYSTEM_GLSLANG "Prefer system glslang instead of the builtin one" OFF)
+option(USE_SYSTEM_HIDAPI "Prefer system hidapi instead of the builtin one" OFF)
+option(USE_SYSTEM_LIBPNG "Prefer system libpng instead of the builtin one" OFF)
+option(USE_SYSTEM_LIBUSB "Prefer system libusb instead of the builtin one" OFF)
+option(USE_SYSTEM_MINIUPNPC "Prefer system MiniUPnPc instead of the builtin one" OFF)
+option(USE_SYSTEM_MVK "Prefer system MoltenVK instead of the builtin one" OFF)
+option(USE_SYSTEM_OPENAL "Prefer system OpenAL instead of the prebuild one" ${USE_SYSTEM_OPENAL_DEFAULT})
 option(USE_SYSTEM_OPENCV "Prefer system OpenCV instead of the builtin one" ON)
+option(USE_SYSTEM_PUGIXML "Prefer system pugixml instead of the builtin one" OFF)
+option(USE_SYSTEM_RTMIDI "Prefer system RtMidi instead of the builtin one" OFF)
+option(USE_SYSTEM_SDL "Prefer system SDL instead of the builtin one" ON)
+option(USE_SYSTEM_VULKAN_MEMORY_ALLOCATOR "Prefer system Vulkan Memory Allocator instead of the builtin one" OFF)
+option(USE_SYSTEM_WOLFSSL "Prefer system wolfSSL instead of the builtin one" OFF)
+option(USE_SYSTEM_ZLIB "Prefer system ZLIB instead of the builtin one" ON)
+option(USE_SYSTEM_ZSTD "Prefer system zstd instead of the builtin one" OFF)
 option(HAS_MEMORY_BREAKPOINTS "Add support for memory breakpoints to the interpreter" OFF)
 option(USE_LTO "Use LTO for building" ON)
+option(BUILD_RPCS3_TESTS "Build RPCS3 unit tests." OFF)
+option(RUN_RPCS3_TESTS "Run RPCS3 unit tests. Requires BUILD_RPCS3_TESTS" OFF)
+option(USE_GAMEMODE "Choose whether to enable GameMode features or not." ON)
 
 if (NOT WITH_PS3)
     set(WITHOUT_OPENGL on)
@@ -197,12 +228,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
-        message(FATAL_ERROR "RPCS3 requires at least gcc-11.")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+        message(FATAL_ERROR "RPCS3 requires at least gcc-13.")
     endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12.0)
-        message(FATAL_ERROR "RPCS3 requires at least clang-12.0.")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.0)
+        message(FATAL_ERROR "RPCS3 requires at least clang-19.0.")
     endif()
 endif()
 
@@ -223,6 +254,9 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug" AND NOT MSVC)
 endif()
 
 if(MSVC)
+    # NOTE: kept in RPCSX (upstream dropped it in v0.0.41) because
+    # 3rdparty/llvm/CMakeLists.txt still selects the MT/MD prebuilt LLVM archive
+    # based on USE_MSVC_STATIC_CRT.
     option(USE_MSVC_STATIC_CRT "Use static MSVC C runtime" OFF)
 
     if(NOT IS_MULTI_CONFIG)
@@ -237,21 +271,16 @@ if(MSVC)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
     endif()
 
-    add_compile_options(/MP)
-endif()
-
-find_program(CCACHE_FOUND ccache)
-if(CCACHE_FOUND)
-    set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/MP>")
 endif()
 
 if(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
-    include_directories(/opt/homebrew/include)
-    link_directories(/opt/homebrew/lib)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+    list(APPEND CMAKE_SYSTEM_PREFIX_PATH "/opt/homebrew")
 endif()
 
 if(MSVC)
-    add_compile_options(/wd4530 /utf-8) # C++ exception handler used, but unwind semantics are not enabled
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/wd4530;/utf-8>") # C++ exception handler used, but unwind semantics are not enabled
 endif()
 
 include(CheckFunctionExists)
@@ -278,6 +307,14 @@ target_compile_definitions(rx PRIVATE
 if (WITH_PS4)
     find_package(nlohmann_json CONFIG)
     add_subdirectory(tools)
+endif()
+
+## Look for Gamemode if its installed on Linux
+if(LINUX)
+    ## User chooses whether to Enable GameMode features or not
+    if(USE_GAMEMODE)
+        add_compile_definitions(GAMEMODE_AVAILABLE)
+    endif()
 endif()
 
 add_subdirectory(rpcsx)

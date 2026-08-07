@@ -27,6 +27,7 @@ std::string g_android_cache_dir;
 
 #include <cwchar>
 #include <windows.h>
+#include <winioctl.h>
 
 static std::unique_ptr<wchar_t[]> to_wchar(std::string_view source)
 {
@@ -613,12 +614,12 @@ namespace fs
 		{
 			if (!m_raw_device)
 			{
-				// NOTE: this can fail if we access a mounted empty drive (e.g. after unmounting an iso).
-				LARGE_INTEGER size;
+			// NOTE: this can fail if we access a mounted empty drive (e.g. after unmounting an iso).
+			LARGE_INTEGER size;
 
 				ensure(GetFileSizeEx(m_handle, &size)); // "file::size"
-				return size.QuadPart;
-			}
+			return size.QuadPart;
+		}
 
 			// For a raw device, we need to use DeviceIoControl.
 			DISK_GEOMETRY_EX geometry;
@@ -723,7 +724,7 @@ namespace fs
 				if (r < 0)
 				{
 					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
-					ensure(r > 0); // "file::read"
+				ensure(r > 0); // "file::read"
 				}
 				count -= r;
 				result += r;
@@ -745,7 +746,7 @@ namespace fs
 				if (r < 0)
 				{
 					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
-					ensure(r > 0); // "file::read_at"
+				ensure(r > 0); // "file::read_at"
 				}
 				count -= r;
 				offset += r;
@@ -768,7 +769,7 @@ namespace fs
 				if (r < 0)
 				{
 					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
-					ensure(r > 0); // "file::write"
+				ensure(r > 0); // "file::write"
 				}
 				count -= r;
 				result += r;
@@ -790,7 +791,7 @@ namespace fs
 				if (r < 0)
 				{
 					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
-					ensure(r > 0); // "file::write"
+				ensure(r > 0); // "file::write"
 				}
 				count -= r;
 				offset += r;
@@ -997,6 +998,22 @@ std::string_view fs::get_parent_dir_view(std::string_view path, u32 parent_level
 	}
 
 	return result;
+}
+
+std::string fs::get_path_if_dir(const std::string& path)
+{
+	if (path.empty() || !fs::is_dir(path))
+	{
+		return {};
+	}
+
+	// If delimiters are already present at the end of the string then nothing else to do
+	if (usz sz = path.find_last_of(delim); sz != umax && (sz + 1) == path.size())
+	{
+		return path;
+	}
+
+	return path + '/';
 }
 
 bool fs::get_stat(const std::string& path, stat_t& info)
@@ -1828,7 +1845,7 @@ fs::file::file(const std::string& path, rx::EnumBitSet<open_mode> mode)
 			g_tls_error = fs::error::isdir;
 			return;
 		}
-
+	
 		g_tls_error = to_error(last_error);
 		return;
 	}
@@ -1937,7 +1954,7 @@ fs::file fs::file::from_native_handle(native_handle handle)
 	fs::file result;
 
 #ifdef _WIN32
-	result.m_file = std::make_unique<windows_file>((const HANDLE)handle);
+	result.m_file = std::make_unique<windows_file>(static_cast<HANDLE>(handle));
 #else
 	result.m_file = std::make_unique<unix_file>(handle);
 #endif
@@ -2043,6 +2060,17 @@ fs::native_handle fs::file::get_handle() const
 	return INVALID_HANDLE_VALUE;
 #else
 	return -1;
+#endif
+}
+
+bool fs::set_sparse([[maybe_unused]] const fs::file& file)
+{
+#ifdef _WIN32
+	FILE_SET_SPARSE_BUFFER sparse{TRUE};
+	DWORD returned = 0;
+	return DeviceIoControl(file.get_handle(), FSCTL_SET_SPARSE, &sparse, sizeof(sparse), nullptr, 0, &returned, nullptr) != FALSE;
+#else
+	return true;
 #endif
 }
 
@@ -2996,21 +3024,21 @@ void fmt_class_string<fs::error>::format(std::string& out, u64 arg)
 		{
 			switch (arg)
 			{
-		case fs::error::ok: return "OK";
+			case fs::error::ok: return "OK";
 
-		case fs::error::inval: return "Invalid arguments";
-		case fs::error::noent: return "Not found";
-		case fs::error::exist: return "Already exists";
-		case fs::error::acces: return "Access violation";
-		case fs::error::notempty: return "Not empty";
-		case fs::error::readonly: return "Read only";
-		case fs::error::isdir: return "Is a directory";
+			case fs::error::inval: return "Invalid arguments";
+			case fs::error::noent: return "Not found";
+			case fs::error::exist: return "Already exists";
+			case fs::error::acces: return "Access violation";
+			case fs::error::notempty: return "Not empty";
+			case fs::error::readonly: return "Read only";
+			case fs::error::isdir: return "Is a directory";
 		case fs::error::notdir: return "Not a directory";
-		case fs::error::toolong: return "Path too long";
-		case fs::error::nospace: return "Not enough space on the device";
-		case fs::error::xdev: return "Device mismatch";
-		case fs::error::unknown: return "Unknown system error";
-		}
+			case fs::error::toolong: return "Path too long";
+			case fs::error::nospace: return "Not enough space on the device";
+			case fs::error::xdev: return "Device mismatch";
+			case fs::error::unknown: return "Unknown system error";
+			}
 
 			return unknown;
 		});

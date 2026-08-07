@@ -8,8 +8,10 @@
 #include "mutex.h"
 #include "util/vm.hpp"
 #include "rx/asm.hpp"
+#include "rx/align.hpp"
 #include "Crypto/unzip.h"
 
+#include <algorithm>
 #include <charconv>
 
 #if defined(__APPLE__)
@@ -94,10 +96,6 @@ namespace
 
 const bool jit_initialize = []() -> bool
 {
-	// NOTE: InitializeNativeTarget() registers LLVM_NATIVE_ARCH, which is fixed at
-	// LLVM *build* time. Our LLVM is a cross-compiled prebuilt, so "native" is not
-	// AArch64 and the JIT target would be missing -> EngineBuilder::create() returns
-	// null -> segfault. Register all targets so the AArch64 backend is always present.
 	llvm::InitializeAllTargetInfos();
 	llvm::InitializeAllTargets();
 	llvm::InitializeAllTargetMCs();
@@ -147,39 +145,39 @@ static u64 make_null_function(const std::string& name)
 
 		// Build a "null" function that contains its name
 		const auto func = build_function_asm<void (*)()>("NULL", [&](native_asm& c, auto& args)
-		{
+			{
 #if defined(ARCH_X64)
-			Label data = c.newLabel();
-			c.lea(args[0], x86::qword_ptr(data, 0));
-			c.jmp(Imm(&null));
-			c.align(AlignMode::kCode, 16);
-			c.bind(data);
+				Label data = c.newLabel();
+				c.lea(args[0], x86::qword_ptr(data, 0));
+				c.jmp(Imm(&null));
+				c.align(AlignMode::kCode, 16);
+				c.bind(data);
 
-			// Copy function name bytes
-			for (char ch : name)
-				c.db(ch);
-			c.db(0);
-			c.align(AlignMode::kData, 16);
+				// Copy function name bytes
+				for (char ch : name)
+					c.db(ch);
+				c.db(0);
+				c.align(AlignMode::kData, 16);
 #else
-			// AArch64 implementation
-			Label data = c.newLabel();
-			Label jump_address = c.newLabel();
-			c.ldr(args[0], arm::ptr(data, 0));
-			c.ldr(a64::x14, arm::ptr(jump_address, 0));
-			c.br(a64::x14);
+				// AArch64 implementation
+				Label data = c.newLabel();
+				Label jump_address = c.newLabel();
+				c.ldr(args[0], arm::ptr(data, 0));
+				c.ldr(a64::x14, arm::ptr(jump_address, 0));
+				c.br(a64::x14);
 
-			// Data frame
-			c.align(AlignMode::kCode, 16);
-			c.bind(jump_address);
-			c.embedUInt64(reinterpret_cast<u64>(&null));
+				// Data frame
+				c.align(AlignMode::kCode, 16);
+				c.bind(jump_address);
+				c.embedUInt64(reinterpret_cast<u64>(&null));
 
-			c.align(AlignMode::kData, 16);
-			c.bind(data);
-			c.embed(name.c_str(), name.size());
-			c.embedUInt8(0U);
-			c.align(AlignMode::kData, 16);
+				c.align(AlignMode::kData, 16);
+				c.bind(data);
+				c.embed(name.c_str(), name.size());
+				c.embedUInt8(0U);
+				c.align(AlignMode::kData, 16);
 #endif
-		});
+			});
 
 		func_ptr = reinterpret_cast<u64>(func);
 		return func_ptr;
@@ -247,11 +245,11 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 	MemoryManager1(std::function<u64(const std::string&)> symbols_cement = {}) noexcept
 		: m_symbols_cement(std::move(symbols_cement))
 	{
-		auto ptr = reinterpret_cast<u8*>(utils::memory_reserve(c_max_size * 3));
+		auto ptr = reinterpret_cast<u8*>(utils::memory_reserve(c_max_size * 3, true));
 		m_code_mems = ptr;
 		// ptr += c_max_size;
 		// m_data_ro_mems = ptr;
-		 ptr += c_max_size;
+		ptr += c_max_size;
 		m_data_rw_mems = ptr;
 	}
 
@@ -262,11 +260,11 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 	~MemoryManager1() override
 	{
 		// Hack: don't release to prevent reuse of address space, see jit_announce
-		// constexpr auto how_much = [](u64 pos) { return rx::align(pos, pos < c_page_size ? c_page_size / 4 : c_page_size); };
+		// constexpr auto how_much = [](u64 pos) { return rx::alignUp(pos, pos < c_page_size ? c_page_size / 4 : c_page_size); };
 		// utils::memory_decommit(m_code_mems, how_much(code_ptr));
 		// utils::memory_decommit(m_data_ro_mems, how_much(data_ro_ptr));
 		// utils::memory_decommit(m_data_rw_mems, how_much(data_rw_ptr));
-		utils::memory_decommit(m_code_mems, c_max_size * 3);
+		utils::memory_decommit(m_code_mems, c_max_size * 3, true);
 	}
 
 	llvm::JITSymbol findSymbol(const std::string& name) override
@@ -294,8 +292,8 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 	u8* allocate(u64& alloc_pos, void* block, uptr size, u64 align, utils::protection prot)
 	{
 		align = align ? align : 16;
- 
-		const u64 sizea = rx::align(size, align);
+
+		const u64 sizea = rx::alignUp(size, align);
 
 		if (!size || align > c_page_size || sizea > c_max_size || sizea < size)
 		{
@@ -305,7 +303,7 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 
 		u64 oldp = alloc_pos;
 
-		u64 olda = rx::align(oldp, align);
+		u64 olda = rx::alignUp(oldp, align);
 
 		ensure(olda >= oldp);
 		ensure(olda < ~sizea);
@@ -331,8 +329,8 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 		// Optimization: split the first allocation to 512 KiB for single-module compilers
 		if (oldp < c_page_size && align < page_quarter && (std::min(newp, c_page_size) - 1) / page_quarter != (oldp - 1) / page_quarter)
 		{
-			const u64 pagea = rx::align(oldp, page_quarter);
-			const u64 psize = rx::align(std::min(newp, c_page_size) - pagea, page_quarter);
+			const u64 pagea = rx::alignUp(oldp, page_quarter);
+			const u64 psize = rx::alignUp(std::min(newp, c_page_size) - pagea, page_quarter);
 			utils::memory_commit(reinterpret_cast<u8*>(block) + (pagea % c_max_size), psize, prot);
 
 			// Advance
@@ -342,8 +340,8 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 		if ((newp - 1) / c_page_size != (oldp - 1) / c_page_size)
 		{
 			// Allocate pages on demand
-			const u64 pagea = rx::align(oldp, c_page_size);
-			const u64 psize = rx::align(newp - pagea, c_page_size);
+			const u64 pagea = rx::alignUp(oldp, c_page_size);
+			const u64 psize = rx::alignUp(newp - pagea, c_page_size);
 			utils::memory_commit(reinterpret_cast<u8*>(block) + (pagea % c_max_size), psize, prot);
 		}
 
@@ -360,7 +358,7 @@ struct MemoryManager1 : llvm::RTDyldMemoryManager
 		if (is_ro)
 		{
 			// Disabled
-			//return allocate(data_ro_ptr, m_data_ro_mems, size, align, utils::protection::rw);
+			// return allocate(data_ro_ptr, m_data_ro_mems, size, align, utils::protection::rw);
 		}
 
 		return allocate(data_rw_ptr, m_data_rw_mems, size, align, utils::protection::rw);
@@ -389,12 +387,12 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 
 #ifdef ARCH_ARM64
 	// Code sections allocated since the last finalizeMemory(), recorded so the I-cache can be
-	// made coherent for CROSS-CORE execution. The fork's jit_runtime is WX and never re-protects,
-	// and this manager's finalizeMemory historically did nothing (unlike upstream's
-	// SectionMemoryManager, which calls __clear_cache). On a single PE the existing ISB+DSB ISH
-	// after codegen suffices, but a block finalized on one core and executed on another (the async
-	// background compile, and boot precompile) can fetch stale bytes without an explicit
-	// dc cvau + ic ivau publish. We record the ranges here and flush them in finalizeMemory.
+	// made coherent for CROSS-CORE execution (ouroboros420 04f9683). jit_runtime is WX and never
+	// re-protects, and this manager's finalizeMemory does nothing (unlike upstream's
+	// SectionMemoryManager, which calls __clear_cache). On a single PE the ISB+DSB ISH issued
+	// after codegen suffices, but a block finalized on one core and executed on another - the
+	// async background compile, and the boot-precompile workers - can fetch stale bytes without
+	// an explicit dc cvau + ic ivau publish.
 	// ARM64-only: x86-64 has coherent I/D caches, so this bookkeeping is pure overhead there.
 	std::vector<std::pair<u8*, usz>> m_code_sections;
 #endif
@@ -452,16 +450,17 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 	bool finalizeMemory(std::string* = nullptr) override
 	{
 #ifdef ARCH_ARM64
-		// Make freshly written code coherent for execution on a DIFFERENT core: clean the
-		// data cache to the Point of Unification and invalidate stale instruction cache lines
-		// across the inner-shareable domain (dc cvau -> dsb ish -> ic ivau -> dsb ish). Bionic's
-		// __clear_cache emits exactly this. Plain ISB+DSB ISH (the same-core SMC flush used
-		// elsewhere) is NOT sufficient cross-core. Required for the async background compile;
-		// also closes a latent gap for blocks compiled by the boot-precompile worker threads.
+		// Make freshly written code coherent for execution on a DIFFERENT core: clean the data
+		// cache to the Point of Unification and invalidate stale instruction cache lines across
+		// the inner-shareable domain (dc cvau -> dsb ish -> ic ivau -> dsb ish), which is exactly
+		// what Bionic's __clear_cache emits. The plain ISB+DSB ISH used elsewhere is a same-core
+		// SMC flush and is NOT sufficient cross-core. See ouroboros420 04f9683.
+#if defined(__GNUC__) || defined(__clang__)
 		for (const auto& [ptr, size] : m_code_sections)
 		{
 			__builtin___clear_cache(reinterpret_cast<char*>(ptr), reinterpret_cast<char*>(ptr + size));
 		}
+#endif
 
 		m_code_sections.clear();
 #endif
@@ -485,8 +484,7 @@ class ObjectCache final : public llvm::ObjectCache
 
 public:
 	ObjectCache(const std::string& path, jit_compiler* compiler = nullptr)
-		: m_path(path)
-		, m_compiler(compiler)
+		: m_path(path), m_compiler(compiler)
 	{
 	}
 
@@ -497,7 +495,7 @@ public:
 		std::string name = m_path;
 
 		name.append(_module->getName());
-		//fs::file(name, fs::rewrite).write(obj.getBufferStart(), obj.getBufferSize());
+		// fs::file(name, fs::rewrite).write(obj.getBufferStart(), obj.getBufferSize());
 		name.append(".gz");
 
 		if (!obj.getBufferSize())
@@ -592,21 +590,25 @@ public:
 	}
 };
 
-std::string jit_compiler::cpu(const std::string& _cpu)
+std::string jit_compiler::cpu(std::string_view _cpu)
 {
-	std::string m_cpu = _cpu;
+	std::string m_cpu = std::string(_cpu);
 
 	if (m_cpu.empty())
 	{
-#if defined(ARCH_ARM64)
-		// LLVM's host detection misreports many modern ARM SoCs - e.g. it returns
-		// "cortex-a34" (a tiny in-order ARMv8.0 core) for Cortex-A520/A720 devices,
-		// so the JIT ends up scheduled and cost-modeled for the wrong, much weaker
-		// microarchitecture. Prefer our own MIDR table, which knows the current
-		// cores. CPU *features* are pinned separately via setMAttrs, so this only
-		// affects scheduling/cost; an unknown name simply degrades to "generic".
+#if defined(ARCH_ARM64) && !defined(__APPLE__)
+		// LLVM's host detection misreports many modern ARM SoCs - it returns e.g.
+		// "cortex-a34" (a tiny in-order ARMv8.0 core) on Cortex-A520/A720 devices, so
+		// the recompilers end up scheduled and cost-modeled for the wrong, far weaker
+		// microarchitecture. Prefer our own MIDR table (aarch64::get_cpu_name picks the
+		// prime/big core, where the hot PPU/SPU threads run); it used to be consulted
+		// only when getHostCPUName said "generic", i.e. never when LLVM was
+		// confidently wrong. CPU *features* are pinned separately via setMAttrs below,
+		// so this only affects scheduling/cost - it can never select an illegal
+		// instruction. (ouroboros420 e3254ee + cc3a18e; Apple targets excluded because
+		// getHostCPUName is accurate there and get_cpu_name returns a marketing name.)
 		m_cpu = aarch64::get_cpu_name();
-		std::transform(m_cpu.begin(), m_cpu.end(), m_cpu.begin(), [](unsigned char c) { return std::tolower(c); });
+		std::transform(m_cpu.begin(), m_cpu.end(), m_cpu.begin(), [](unsigned char c) { return ::tolower(c); });
 
 		if (m_cpu.empty())
 		{
@@ -614,14 +616,13 @@ std::string jit_compiler::cpu(const std::string& _cpu)
 		}
 
 		// Last-resort guard: if detection lands on "generic" or a tiny in-order core
-		// (LLVM reports these for unknown/new SoCs - e.g. 2nd-gen Oryon / Snapdragon
-		// 8 Elite resolves to "generic"), use a known modern out-of-order core as the
-		// schedule/cost-model baseline. CPU *features* come from setMAttrs (HWCAP-gated)
-		// independently, so this only affects scheduling and can never emit an illegal
-		// instruction - it is strictly better than ARMv8.0 "generic" on any device able
-		// to run this emulator. cortex-a78 (ARMv8.2-A, wide OoO) is LLVM-19-known and is
-		// already the fallback used below for the empty-MIDR path.
-		if (m_cpu.empty() || m_cpu == "cortex-a34" || m_cpu == "cortex-a35" || m_cpu == "generic")
+		// (what LLVM reports for unknown/new SoCs - 2nd-gen Oryon / Snapdragon 8 Elite
+		// resolves to "generic"), use a known modern out-of-order core as the
+		// schedule/cost-model baseline instead. cortex-a78 (ARMv8.2-A, wide OoO) is the
+		// same baseline fallback_cpu_detection() uses for non-Android ARM64. (On Android
+		// it returns "cortex-a34" for the empty-MIDR case, which is precisely the value
+		// this guard exists to reject, so we do not route through it here.)
+		if (m_cpu.empty() || m_cpu == "generic" || m_cpu == "cortex-a34" || m_cpu == "cortex-a35")
 		{
 			m_cpu = "cortex-a78";
 		}
@@ -740,27 +741,31 @@ bool jit_compiler::add_sub_disk_space(ssz space)
 	}
 
 	return m_disk_space.fetch_op([sub_size = static_cast<usz>(0 - space)](usz& val)
-	{
-		if (val >= sub_size)
-		{
-			val -= sub_size;
-			return true;
-		}
+						   {
+							   if (val >= sub_size)
+							   {
+								   val -= sub_size;
+								   return true;
+							   }
 
-		return false;
-	}).second;
+							   return false;
+						   })
+	    .second;
 }
 
-jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, const std::string& _cpu, u32 flags, std::function<u64(const std::string&)> symbols_cement) noexcept
-	: m_context(new llvm::LLVMContext)
-	, m_cpu(cpu(_cpu))
+jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, std::string_view _cpu, u32 flags, std::function<u64(const std::string&)> symbols_cement) noexcept
+	: m_context(new llvm::LLVMContext, [](llvm::LLVMContext* context)
+		  {
+			  delete context;
+		  }),
+	  m_cpu(cpu(_cpu))
 {
 	[[maybe_unused]] static const bool s_install_llvm_error_handler = []()
 	{
 		llvm::remove_fatal_error_handler();
 		llvm::install_fatal_error_handler([](void*, const char* msg, bool)
-		{
-			const std::string_view out = msg ? msg : "";
+			{
+				const std::string_view out = msg ? msg : "";
 
 			if (g_llvm_fatal_message)
 			{
@@ -768,40 +773,45 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 				thread_ctrl::silent_exit();
 			}
 
-			fmt::throw_exception("LLVM Emergency Exit Invoked: '%s'", out);
-		}, nullptr);
+				fmt::throw_exception("LLVM Emergency Exit Invoked: '%s'", out);
+			},
+			nullptr);
 
-		// Separate handler from the fatal one (LLVM installs/dispatches them
-		// independently). Without it, an allocation failure inside LLVM (e.g.
-		// report_bad_alloc_error from SmallVector growth while codegenning the
-		// ~478k-declaration PPU symbol-resolver module) writes "LLVM ERROR: out
-		// of memory" to fd 2 - which goes nowhere in an Android app - and calls
-		// abort(): a signal-6 death with ZERO file log (observed on device,
-		// Demon's Souls BLUS30443). Route it through the same recoverable path
-		// as the fatal handler so a guarded compile survives and everything
-		// else at least logs before dying. Note: allocating in a bad-alloc
-		// handler is best-effort; typical failures here are huge single
-		// allocations, so small log/string allocations still succeed.
+		// Separate handler from the fatal one - LLVM installs and dispatches them
+		// independently (ouroboros420 39a6a4c). Without it, an allocation failure inside
+		// LLVM (report_bad_alloc_error, e.g. SmallVector growth while codegenning the
+		// ~478k-declaration PPU symbol-resolver module) writes "LLVM ERROR: out of memory"
+		// to fd 2 - which goes nowhere in an Android app - and abort()s: a signal-6 death
+		// with zero file log. Route it through the same recoverable path as the fatal
+		// handler so a guarded compile survives and everything else at least logs first.
+		// Allocating inside a bad-alloc handler is best-effort, but the failures seen here
+		// are huge single allocations, so small log/string allocations still succeed.
 		llvm::remove_bad_alloc_error_handler();
 		llvm::install_bad_alloc_error_handler([](void*, const char* msg, bool)
-		{
-			const std::string_view out = msg ? msg : "";
-
-			if (g_llvm_fatal_message)
 			{
-				*g_llvm_fatal_message = out;
-				thread_ctrl::silent_exit();
-			}
+				const std::string_view out = msg ? msg : "";
 
-			fmt::throw_exception("LLVM Out Of Memory: '%s'", out);
-		}, nullptr);
+				if (g_llvm_fatal_message)
+				{
+					*g_llvm_fatal_message = out;
+					thread_ctrl::silent_exit();
+				}
+
+				fmt::throw_exception("LLVM Out Of Memory: '%s'", out);
+			},
+			nullptr);
 
 		return true;
 	}();
 
 	std::string result;
 
-	auto null_mod = std::make_unique<llvm::Module> ("null_", *m_context);
+	auto null_mod = std::make_unique<llvm::Module>("null_", *m_context);
+	// Upstream dropped this guard once it required LLVM 21+. Keep it: the
+	// Android build compiles the 3rdparty/llvm submodule (now llvmorg-22.1.8,
+	// so the first branch is taken), but the desktop path can still download a
+	// prebuilt USE_LLVM_VERSION - 20.1.3 at the time of writing - where
+	// Module::setTargetTriple takes a StringRef.
 #if LLVM_VERSION_MAJOR >= 21 && (LLVM_VERSION_MINOR >= 1 || LLVM_VERSION_MAJOR >= 22)
 	null_mod->setTargetTriple(llvm::Triple(jit_compiler::triple1()));
 #else
@@ -848,44 +858,66 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, co
 	// The recompilers emit i8mm intrinsics (e.g. ummla) gated on utils::has_i8mm().
 	// The JIT target features must advertise i8mm too, otherwise the backend fails
 	// with "Cannot select: intrinsic %llvm.aarch64.neon.ummla" whenever the resolved
-	// -mcpu does not already imply it.
+	// -mcpu does not already imply it (e.g. the cortex-a78 fallback on Apple silicon).
 	if (utils::has_i8mm())
 		attributes.push_back("+i8mm");
 	else
 		attributes.push_back("-i8mm");
 
-	// We do not emit any SVE/SVE2 intrinsics in the PPU/SPU recompilers (unlike
-	// i8mm/dotprod above, which we do emit and therefore must advertise). Enabling
-	// these features here gives no benefit and only lets LLVM's AArch64 backend
-	// auto-select SVE/SVE2 for our otherwise-NEON-width JIT code. LLVM's SVE2
-	// codegen has been observed to miscompile recompiled SPU code on SVE2 mobile
-	// cores (e.g. Cortex-A720): the SPU register file gets corrupted (lr=0, sp=0)
-	// and the thread jumps to LS address 0 -> "Unknown STOP code: 0x0". This is the
-	// RADT5 Bink-decoder crash that freezes inFamous; the SPU interpreter, which
-	// does not JIT, runs the exact same code correctly. Force NEON-only codegen,
-	// the proven baseline on every other ARM64 target (incl. Apple Silicon, no SVE).
-	attributes.push_back("-sve");
-	attributes.push_back("-sve2");
+	// MUST stay gated on the same runtime HWCAP the recompilers gate their intrinsics on.
+	// cpu_translator::initialize() sets m_use_sve_128 / m_use_sve2_128 from utils::has_sve()
+	// / utils::has_sve2() (+ sve_length() == 128), and the SPU LLVM recompiler then emits
+	// llvm.aarch64.sve.* directly: smullb/smullt/umullb/umullt/smlalt/umlalt (MPY, MPYS,
+	// MPYHH, MPYU, MPYHHA...) and, via llvm_rol's use_sve_xar, llvm.aarch64.sve.xar for
+	// every constant-amount rotate. Advertising -sve/-sve2 while those are still emitted
+	// makes ISel abort with "Cannot select: intrinsic %llvm.aarch64.sve.xar" on exactly the
+	// SVE2 devices it would have been meant to protect - same failure mode as the i8mm note
+	// above.
+	//
+	// ouroboros420 da93bef force-pins these off, but it can only do that because that fork
+	// ALSO deleted the SVE2 paths from SPULLVMRecompiler.cpp; we kept them (they are the
+	// "ours" side of this merge). If the SVE2 SPU miscompile is ever reproduced on our LLVM
+	// (22.1.8 - da93bef's diagnosis was on LLVM 20), the fix is to clear m_use_sve_128 /
+	// m_use_sve2_128 in CPUTranslator.cpp AND pin these off in the same change, never one
+	// without the other.
+	if (utils::has_sve())
+		attributes.push_back("+sve");
+	else
+		attributes.push_back("-sve");
+
+	if (utils::has_sve2())
+		attributes.push_back("+sve2");
+	else
+		attributes.push_back("-sve2");
 #endif
 
 	{
-		m_engine.reset(llvm::EngineBuilder(std::move(null_mod))
-			.setErrorStr(&result)
-			.setEngineKind(llvm::EngineKind::JIT)
-			.setMCJITMemoryManager(std::move(mem))
-			.setOptLevel(llvm::CodeGenOptLevel::Aggressive)
-			.setCodeModel(flags & 0x2 ? llvm::CodeModel::Large : llvm::CodeModel::Small)
+
+		m_engine = std::unique_ptr<llvm::ExecutionEngine, void (*)(llvm::ExecutionEngine*)>{
+			llvm::EngineBuilder(std::move(null_mod))
+				.setErrorStr(&result)
+				.setEngineKind(llvm::EngineKind::JIT)
+				.setMCJITMemoryManager(std::move(mem))
+				.setOptLevel(llvm::CodeGenOptLevel::Aggressive)
+				.setCodeModel(flags & 0x2 ? llvm::CodeModel::Large : llvm::CodeModel::Small)
 #ifdef __APPLE__
-			//.setCodeModel(llvm::CodeModel::Large)
+		//.setCodeModel(llvm::CodeModel::Large)
 #endif
-			.setRelocationModel(llvm::Reloc::Model::PIC_)
+				.setRelocationModel(llvm::Reloc::Model::PIC_)
 			.setMAttrs(attributes)
-			.setMCPU(m_cpu)
-			.create());
+				.setMCPU(m_cpu)
+				.create(),
+			[](llvm::ExecutionEngine* engine)
+			{
+				delete engine;
+			},
+		};
 	}
 
-	// Check before any m_engine use: create() can return null and these calls would
-	// otherwise dereference it (crash inside pthread_mutex_lock on the engine's mutex).
+	// Check before any m_engine use (ouroboros420 e3e1edf): create() can return null
+	// (e.g. when the target backend was never registered) and the calls below would
+	// otherwise dereference it, crashing inside pthread_mutex_lock on the engine's
+	// own mutex instead of reporting the real error.
 	if (!m_engine)
 	{
 		fmt::throw_exception("LLVM: Failed to create ExecutionEngine: %s", result);
@@ -961,7 +993,8 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 		m_engine->generateCodeForModule(ptr);
 	}, error))
 	{
-		// Do not leave the engine pointing at the (stack) cache object
+		// Do not leave the engine pointing at the (stack-local) cache object
+		// once we unwind past it (ouroboros420 0f7c8aa).
 		m_engine->setObjectCache(nullptr);
 		return false;
 	}
@@ -1071,72 +1104,12 @@ bool jit_compiler::try_fin(std::string& error)
 	}, error);
 }
 
-bool jit_compiler::try_add_fin(std::unique_ptr<llvm::Module> _module, const std::string& path, std::string& error)
-{
-	ObjectCache cache{path, this};
-	m_engine->setObjectCache(&cache);
-
-	const auto ptr = _module.get();
-	m_engine->addModule(std::move(_module));
-
-	// Codegen and finalize on a single recoverable helper thread. finalizeObject
-	// only touches the emitted object (relocation + permissions), not the IR, so
-	// running it back-to-back with generateCodeForModule is equivalent to the old
-	// two-call sequence - just one thread spawn/join instead of two.
-	const bool ok = run_recoverable_llvm([&]()
-	{
-		m_engine->generateCodeForModule(ptr);
-		m_engine->finalizeObject();
-	}, error);
-
-	// Always detach the (stack-local) cache before it goes out of scope.
-	m_engine->setObjectCache(nullptr);
-
-	if (!ok)
-	{
-		return false;
-	}
-
-	for (auto& func : ptr->functions())
-	{
-		// Delete IR to lower memory consumption
-		func.deleteBody();
-	}
-
-	return true;
-}
-
-bool jit_compiler::try_add_fin(std::unique_ptr<llvm::Module> _module, std::string& error)
-{
-	const auto ptr = _module.get();
-	m_engine->addModule(std::move(_module));
-
-	const bool ok = run_recoverable_llvm([&]()
-	{
-		m_engine->generateCodeForModule(ptr);
-		m_engine->finalizeObject();
-	}, error);
-
-	if (!ok)
-	{
-		return false;
-	}
-
-	for (auto& func : ptr->functions())
-	{
-		// Delete IR to lower memory consumption
-		func.deleteBody();
-	}
-
-	return true;
-}
-
 u64 jit_compiler::get(const std::string& name)
 {
 	return m_engine->getGlobalValueAddress(name);
 }
 
-const char * fallback_cpu_detection()
+const char* fallback_cpu_detection()
 {
 #if defined(ARCH_X64)
 	// If we got here we either have a very old and outdated CPU or a new CPU that has not been seen by LLVM yet.
@@ -1208,7 +1181,7 @@ const char * fallback_cpu_detection()
 		std::string result = aarch64::get_cpu_name();
 		if (result.empty())
 		{
-			return "cortex-a78";
+			return "cortex-a34";
 		}
 
 		std::transform(result.begin(), result.end(), result.begin(), ::tolower);

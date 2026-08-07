@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rx/asm.hpp"
+#include <rx/asm.hpp>
 
 namespace rsx::assembler
 {

@@ -1072,13 +1072,13 @@ s32 lv2_socket_native::shutdown(s32 how) {
   return -get_last_error(false);
 }
 
-s32 lv2_socket_native::poll(sys_net_pollfd &sn_pfd, pollfd &native_pfd) {
+void lv2_socket_native::poll(sys_net_pollfd &sn_pfd, pollfd &native_pfd) {
   // Check for fake packet for dns interceptions
   auto &dnshook = g_fxo->get<np::dnshook>();
   if (sn_pfd.events & SYS_NET_POLLIN && dnshook.is_dns(sn_pfd.fd) &&
       dnshook.is_dns_queue(sn_pfd.fd)) {
     sn_pfd.revents |= SYS_NET_POLLIN;
-    return 1;
+    return;
   }
   if (sn_pfd.events & ~(SYS_NET_POLLIN | SYS_NET_POLLOUT | SYS_NET_POLLERR)) {
     sys_net.warning("sys_net_bnet_poll(fd=%d): events=0x%x", sn_pfd.fd,
@@ -1093,8 +1093,6 @@ s32 lv2_socket_native::poll(sys_net_pollfd &sn_pfd, pollfd &native_pfd) {
   if (sn_pfd.events & SYS_NET_POLLOUT) {
     native_pfd.events |= POLLOUT;
   }
-
-  return 0;
 }
 
 std::tuple<bool, bool, bool>
@@ -1161,6 +1159,7 @@ bool lv2_socket_native::is_socket_connected() {
   pfd.fd = native_socket;
   pfd.events = POLLIN | POLLOUT;
 
+  // Use poll to check for readability and writability
 #ifdef _WIN32
   const int result = WSAPoll(&pfd, 1, 0);
 #else

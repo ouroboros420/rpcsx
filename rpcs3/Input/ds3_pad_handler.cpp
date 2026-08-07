@@ -180,7 +180,7 @@ void ds3_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, DS3KeyCodes::RSYPos);
 	cfg->start.def = ::at32(button_list, DS3KeyCodes::Start);
 	cfg->select.def = ::at32(button_list, DS3KeyCodes::Select);
-	cfg->ps.def = ::at32(button_list, DS3KeyCodes::PSButton);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{DS3KeyCodes::PSButton}, {DS3KeyCodes::Start, DS3KeyCodes::Select}});
 	cfg->square.def = ::at32(button_list, DS3KeyCodes::Square);
 	cfg->cross.def = ::at32(button_list, DS3KeyCodes::Cross);
 	cfg->circle.def = ::at32(button_list, DS3KeyCodes::Circle);
@@ -209,6 +209,7 @@ void ds3_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rtriggerthreshold.def = 0; // between 0 and 255
 	cfg->lpadsquircling.def = 0;
 	cfg->rpadsquircling.def = 0;
+	cfg->vibration_threshold.def = 0;
 
 	// Set default LED options
 	cfg->led_battery_indicator.def = false;
@@ -259,20 +260,12 @@ void ds3_pad_handler::check_add_device(hid_device* hidDevice, hid_enumerated_dev
 		if (res <= 0 || buf[0] != 0x0)
 		{
 			ds3_log.error("check_add_device: hid_get_feature_report 0x0 failed! result=%d, buf[0]=0x%x, error=%s", res, buf[0], hid_error(hidDevice));
-			hid_close(hidDevice);
+			HidDevice::close(hidDevice);
 			return;
 		}
 	}
 
 	device->report_id = buf[0];
-#elif defined(__APPLE__)
-	int res = hid_init_sixaxis_usb(hidDevice);
-	if (res < 0)
-	{
-		ds3_log.error("check_add_device: hid_init_sixaxis_usb failed! (result=%d, error=%s)", res, hid_error(hidDevice));
-		hid_close(hidDevice);
-		return;
-	}
 #endif
 
 	for (wchar_t ch : wide_serial)
@@ -281,7 +274,7 @@ void ds3_pad_handler::check_add_device(hid_device* hidDevice, hid_enumerated_dev
 	if (hid_set_nonblocking(hidDevice, 1) == -1)
 	{
 		ds3_log.error("check_add_device: hid_set_nonblocking failed! Reason: %s", hid_error(hidDevice));
-		hid_close(hidDevice);
+		HidDevice::close(hidDevice);
 		return;
 	}
 
@@ -355,9 +348,9 @@ ds3_pad_handler::DataStatus ds3_pad_handler::get_data(ds3_device* ds3dev)
 	return DataStatus::NoNewData;
 }
 
-std::unordered_map<u64, u16> ds3_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> ds3_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	std::unordered_map<u64, u16> key_buf;
+	std::unordered_map<u32, u16> key_buf;
 	ds3_device* dev = static_cast<ds3_device*>(device.get());
 	if (!dev)
 		return key_buf;
@@ -404,7 +397,7 @@ std::unordered_map<u64, u16> ds3_pad_handler::get_button_values(const std::share
 	return key_buf;
 }
 
-pad_preview_values ds3_pad_handler::get_preview_values(const std::unordered_map<u64, u16>& data)
+pad_preview_values ds3_pad_handler::get_preview_values(const std::unordered_map<u32, u16>& data, const std::vector<std::string>& /*buttons*/)
 {
 	return {
 		::at32(data, L2),
@@ -466,17 +459,17 @@ void ds3_pad_handler::get_extended_info(const pad_ensemble& binding)
 	set_raw_orientation(*pad);
 }
 
-bool ds3_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == DS3KeyCodes::L2;
 }
 
-bool ds3_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == DS3KeyCodes::R2;
 }
 
-bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -490,7 +483,7 @@ bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*devi
 	}
 }
 
-bool ds3_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool ds3_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -512,17 +505,12 @@ PadHandlerBase::connection ds3_pad_handler::update_connection(const std::shared_
 
 	if (dev->hidDevice == nullptr)
 	{
-#ifdef ANDROID
-		if (hid_device* hid_dev = hid_libusb_wrap_sys_device(dev->path, -1))
-#else
-		if (hid_device* hid_dev = hid_open_path(dev->path.c_str()))
-#endif
+		if (hid_device* hid_dev = dev->open())
 		{
 			if (hid_set_nonblocking(hid_dev, 1) == -1)
 			{
 				ds3_log.error("Reconnecting Device %s: hid_set_nonblocking failed with error %s", dev->path, hid_error(hid_dev));
 			}
-			dev->hidDevice = hid_dev;
 		}
 		else
 		{
@@ -552,8 +540,8 @@ void ds3_pad_handler::apply_pad_data(const pad_ensemble& binding)
 
 	cfg_pad* config = dev->config;
 
-	const u8 speed_large = config->get_large_motor_speed(pad->m_vibrateMotors);
-	const u8 speed_small = config->get_small_motor_speed(pad->m_vibrateMotors);
+	const u8 speed_large = config->get_large_motor_speed(pad->m_vibrate_motors);
+	const u8 speed_small = config->get_small_motor_speed(pad->m_vibrate_motors);
 
 	const bool wireless = dev->cable_state == 0;
 	const bool low_battery = dev->battery_level < 25;

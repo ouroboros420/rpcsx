@@ -957,8 +957,8 @@ s32 lv2_socket_p2ps::shutdown([[maybe_unused]] s32 how) {
   return CELL_OK;
 }
 
-s32 lv2_socket_p2ps::poll(sys_net_pollfd &sn_pfd,
-                          [[maybe_unused]] pollfd &native_pfd) {
+void lv2_socket_p2ps::poll(sys_net_pollfd &sn_pfd,
+                           [[maybe_unused]] pollfd &native_pfd) {
   std::lock_guard lock(mutex);
   sys_net.trace("[P2PS] poll checking for 0x%X", sn_pfd.events);
   if (status == p2ps_stream_status::stream_connected) {
@@ -972,13 +972,7 @@ s32 lv2_socket_p2ps::poll(sys_net_pollfd &sn_pfd,
         status == p2ps_stream_status::stream_connected) {
       sn_pfd.revents |= SYS_NET_POLLOUT;
     }
-
-    if (sn_pfd.revents) {
-      return 1;
-    }
   }
-
-  return 0;
 }
 
 std::tuple<bool, bool, bool>

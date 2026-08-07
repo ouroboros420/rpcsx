@@ -814,7 +814,7 @@ namespace np
 		cb_info_opt->queue_callback(req_id, 0, error_code, 0);
 	}
 
-	void np_handler::req_sign_infos(const std::string& npid, u32 conn_id)
+	void np_handler::req_sign_infos(std::string_view npid, u32 conn_id)
 	{
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::MISC);
 		{
@@ -923,7 +923,7 @@ namespace np
 		ensure(!reply.is_error(), "Malformed reply to RequestTicket command");
 
 		auto incoming_ticket = ticket(std::move(ticket_raw));
-
+		
 		// Clans: check if ticket belongs to the clan service.
 		//        If so, hijack the ticket and cache it for future use.
 		if (incoming_ticket.get_service_id() == CLANS_SERVICE_ID)
@@ -931,7 +931,7 @@ namespace np
 			clan_ticket = std::move(incoming_ticket);
 			clan_ticket_ready.store(1);
 			clan_ticket_ready.notify_all();
-
+			
 			return;
 		}
 
@@ -1039,8 +1039,7 @@ namespace np
 			.updateMode = resp->updatemode(),
 			.sortMode = resp->sortmode(),
 			.uploadNumLimit = resp->uploadnumlimit(),
-			.uploadSizeLimit = resp->uploadsizelimit()
-		};
+			.uploadSizeLimit = resp->uploadsizelimit()};
 
 		std::lock_guard lock(score_trans->mutex);
 
@@ -1662,7 +1661,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_variables_generic {
+		trans_ctx->tdata = tdata_tus_get_variables_generic{
 			.variableArray = variableArray,
 			.arrayNum = arrayNum,
 		};
@@ -1681,7 +1680,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_variables_generic {
+		trans_ctx->tdata = tdata_tus_get_variables_generic{
 			.variableArray = variableArray,
 			.arrayNum = arrayNum,
 		};
@@ -1695,12 +1694,12 @@ namespace np
 		return handle_TusVarResponse(req_id, error, reply);
 	}
 
-	void np_handler::tus_get_friends_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, SceNpTusSlotId slotId, s32 includeSelf, s32 sortType, vm::ptr<SceNpTusVariable> variableArray,s32 arrayNum, bool async)
+	void np_handler::tus_get_friends_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, SceNpTusSlotId slotId, s32 includeSelf, s32 sortType, vm::ptr<SceNpTusVariable> variableArray, s32 arrayNum, bool async)
 	{
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_variables_generic {
+		trans_ctx->tdata = tdata_tus_get_variables_generic{
 			.variableArray = variableArray,
 			.arrayNum = arrayNum,
 		};
@@ -1719,7 +1718,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_variable_generic {
+		trans_ctx->tdata = tdata_tus_get_variable_generic{
 			.outVariable = outVariable,
 		};
 
@@ -1737,7 +1736,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_variable_generic {
+		trans_ctx->tdata = tdata_tus_get_variable_generic{
 			.outVariable = resultVariable,
 		};
 
@@ -1860,7 +1859,7 @@ namespace np
 		const auto& pb_status = pb_data->status();
 
 		auto* data_status = tdata->dataStatus.get_ptr();
-		auto* data = static_cast<u8 *>(tdata->data.get_ptr());
+		auto* data = static_cast<u8*>(tdata->data.get_ptr());
 
 		memset(data_status, 0, sizeof(SceNpTusDataStatus));
 		string_to_npid(pb_status.ownerid(), data_status->ownerId);
@@ -1899,7 +1898,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_datastatus_generic {
+		trans_ctx->tdata = tdata_tus_get_datastatus_generic{
 			.statusArray = statusArray,
 			.arrayNum = arrayNum,
 		};
@@ -1918,7 +1917,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_datastatus_generic {
+		trans_ctx->tdata = tdata_tus_get_datastatus_generic{
 			.statusArray = statusArray,
 			.arrayNum = arrayNum,
 		};
@@ -1937,7 +1936,7 @@ namespace np
 		std::unique_lock lock(trans_ctx->mutex);
 		const u32 req_id = get_req_id(REQUEST_ID_HIGH::TUS);
 
-		trans_ctx->tdata = tdata_tus_get_datastatus_generic {
+		trans_ctx->tdata = tdata_tus_get_datastatus_generic{
 			.statusArray = statusArray,
 			.arrayNum = arrayNum,
 		};

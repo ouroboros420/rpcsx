@@ -14,7 +14,7 @@ namespace rsx
 			text_display.set_font("n023055ms.ttf", 10);
 			text_display.align_text(overlay_element::text_align::left);
 			text_display.set_wrap_text(true);
-			text_display.fore_color = {0.3f, 1.f, 0.3f, 1.f};
+			text_display.fore_color = { 0.3f, 1.f, 0.3f, 1.f };
 			text_display.back_color.a = 0.f;
 		}
 
@@ -50,7 +50,7 @@ namespace rsx
 			{
 				auto overlay = manager->get<rsx::overlays::debug_overlay>();
 
-				if (g_cfg.video.debug_overlay || g_cfg.io.debug_overlay)
+				if (g_cfg.video.debug_overlay || g_cfg.io.pad_debug_overlay || g_cfg.io.mouse_debug_overlay)
 				{
 					if (!overlay)
 					{
@@ -66,7 +66,7 @@ namespace rsx
 
 		extern void set_debug_overlay_text(std::string&& text)
 		{
-			if (!g_cfg.misc.use_native_interface || (!g_cfg.video.debug_overlay && !g_cfg.io.debug_overlay))
+			if (!g_cfg.misc.use_native_interface || (!g_cfg.video.debug_overlay && !g_cfg.io.pad_debug_overlay && !g_cfg.io.mouse_debug_overlay))
 				return;
 
 			if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())

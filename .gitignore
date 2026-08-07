@@ -47,6 +47,9 @@ CMakeSettings.json
 *PVS-Studio*
 PVS/*
 
+# Zed Editor files
+.zed/*
+
 # cmake
 Makefile
 *CMakeFiles*

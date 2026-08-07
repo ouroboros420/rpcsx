@@ -1,10 +1,13 @@
 #include "stdafx.h"
+
+#include "rx/align.hpp"
+#include "rx/asm.hpp"
+
+#include "Emu/Cell/PPUModule.h"
+#include "Emu/savestate_utils.hpp"
 #include "cellos/sys_mutex.h"
 #include "cellos/sys_sync.h"
 #include "cellos/sys_timer.h"
-#include "Emu/Cell/PPUModule.h"
-#include "Emu/savestate_utils.hpp"
-#include "rx/asm.hpp"
 
 #include "cellPamf.h"
 #include "cellDmux.h"
@@ -292,7 +295,7 @@ static error_code query_attr(ppu_thread& ppu, vm::ptr<CellDmuxAttr> demuxerAttr,
 		return ret;
 	}
 
-	demuxerAttr->memSize = rx::align<u32, u32>(sizeof(DmuxContext) + (pamf_attr->maxEnabledEsNum * sizeof(vm::addr_t)) + sizeof(DmuxEsContext), alignof(DmuxContext))
+	demuxerAttr->memSize = rx::alignUp<u32, u32>(sizeof(DmuxContext) + (pamf_attr->maxEnabledEsNum * sizeof(vm::addr_t)) + sizeof(DmuxEsContext), alignof(DmuxContext))
 		+ pamf_attr->memSize + 0xf;
 	demuxerAttr->demuxerVerUpper = 0x260000;
 	demuxerAttr->demuxerVerLower = pamf_attr->version;
@@ -356,9 +359,9 @@ static error_code open(ppu_thread& ppu, vm::cptr<CellDmuxType> demuxerType, vm::
 		return ret;
 	}
 
-	const auto handle = vm::ptr<DmuxContext>::make(rx::align<u32, u32>(demuxerResource->memAddr.addr(), alignof(DmuxContext)));
+	const auto handle = vm::ptr<DmuxContext>::make(rx::alignUp<u32, u32>(demuxerResource->memAddr.addr(), alignof(DmuxContext)));
 	const u32 es_handles_size = core_attr->maxEnabledEsNum * sizeof(vm::addr_t);
-	const auto core_mem_addr = vm::ptr<void>::make(rx::align<u32>(handle.addr() + sizeof(DmuxContext) + es_handles_size, 0x10));
+	const auto core_mem_addr = vm::ptr<void>::make(rx::alignUp<u32>(handle.addr() + sizeof(DmuxContext) + es_handles_size, 0x10));
 
 	const vm::var<CellDmuxResource> core_resource =
 	{{
@@ -745,7 +748,7 @@ error_code cellDmuxQueryEsAttr(ppu_thread& ppu, vm::cptr<CellDmuxType> demuxerTy
 		return ret;
 	}
 
-	esAttr->memSize = rx::align<u32, u32>(sizeof(DmuxEsContext) + ((core_es_attr->auQueueMaxSize + 1) * (core_es_attr->specificInfoSize + sizeof(DmuxAuQueueElement))), alignof(DmuxEsContext))
+	esAttr->memSize = rx::alignUp<u32, u32>(sizeof(DmuxEsContext) + ((core_es_attr->auQueueMaxSize + 1) * (core_es_attr->specificInfoSize + sizeof(DmuxAuQueueElement))), alignof(DmuxEsContext))
 		+ core_es_attr->memSize + 0xf;
 
 	return CELL_OK;
@@ -822,9 +825,9 @@ error_code cellDmuxEnableEs(ppu_thread& ppu, vm::ptr<DmuxContext> demuxerHandle,
 
 	core_es_attr->auQueueMaxSize++; // One extra slot for the access unit produced by flushing the stream, so that flushing always succeeds
 
-	const auto es_handle = vm::ptr<DmuxEsContext>::make(rx::align<u32, u32>(esResourceInfo->memAddr.addr(), alignof(DmuxEsContext)));
+	const auto es_handle = vm::ptr<DmuxEsContext>::make(rx::alignUp<u32, u32>(esResourceInfo->memAddr.addr(), alignof(DmuxEsContext)));
 	const u32 au_queue_elements_size = core_es_attr->auQueueMaxSize * (core_es_attr->specificInfoSize + sizeof(DmuxAuQueueElement));
-	const auto core_mem_addr = vm::bptr<void>::make(rx::align<u32>(es_handle.addr() + sizeof(DmuxEsContext) + au_queue_elements_size, 0x10));
+	const auto core_mem_addr = vm::bptr<void>::make(rx::alignUp<u32>(es_handle.addr() + sizeof(DmuxEsContext) + au_queue_elements_size, 0x10));
 
 	const vm::var<CellDmuxEsResource> core_es_resource
 	{{

@@ -156,16 +156,23 @@ namespace rsx
 		home_menu_settings_video::home_menu_settings_video(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_VIDEO))
 		{
+			add_unsigned_slider(&g_cfg.video.resolution_scale_percent, localized_string_id::HOME_MENU_SETTINGS_VIDEO_RESOLUTION_SCALE_PERCENT, "%", 25);
+			add_unsigned_slider(&g_cfg.video.min_scalable_dimension, localized_string_id::HOME_MENU_SETTINGS_VIDEO_RESOLUTION_SCALE_THRESHOLD, "px", 1);
+
+			add_dropdown(&g_cfg.video.vsync, localized_string_id::HOME_MENU_SETTINGS_VIDEO_VSYNC);
+
 			add_dropdown(&g_cfg.video.frame_limit, localized_string_id::HOME_MENU_SETTINGS_VIDEO_FRAME_LIMIT);
 			add_unsigned_slider(&g_cfg.video.anisotropic_level_override, localized_string_id::HOME_MENU_SETTINGS_VIDEO_ANISOTROPIC_OVERRIDE, "x", 2, {{0, "Auto"}}, {14});
 
 			add_dropdown(&g_cfg.video.output_scaling, localized_string_id::HOME_MENU_SETTINGS_VIDEO_OUTPUT_SCALING);
-			if (g_cfg.video.renderer == video_renderer::vulkan && g_cfg.video.output_scaling == output_scaling_mode::fsr)
-			{
-				add_unsigned_slider(&g_cfg.video.vk.rcas_sharpening_intensity, localized_string_id::HOME_MENU_SETTINGS_VIDEO_RCAS_SHARPENING, " %", 1);
-			}
+			add_unsigned_slider(&g_cfg.video.rcas_sharpening_intensity, localized_string_id::HOME_MENU_SETTINGS_VIDEO_RCAS_SHARPENING, " %", 1);
 
 			add_checkbox(&g_cfg.video.stretch_to_display_area, localized_string_id::HOME_MENU_SETTINGS_VIDEO_STRETCH_TO_DISPLAY);
+
+			if (g_cfg.video.stereo_enabled)
+			{
+				add_dropdown(&g_cfg.video.stereo_render_mode, localized_string_id::HOME_MENU_SETTINGS_VIDEO_STEREO_MODE);
+			}
 
 			apply_layout();
 		}
@@ -180,8 +187,9 @@ namespace rsx
 			add_signed_slider(&g_cfg.core.max_spurs_threads, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_MAX_SPURS_THREADS, "", 1);
 
 			add_unsigned_slider(&g_cfg.video.driver_wakeup_delay, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_DRIVER_WAKE_UP_DELAY, " µs", 20, {}, {}, g_cfg.video.driver_wakeup_delay.min, 800);
-			add_signed_slider(&g_cfg.video.vblank_rate, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_VBLANK_FREQUENCY, " Hz", 30);
+			add_signed_slider(&g_cfg.video.vblank_rate, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_VBLANK_FREQUENCY, " Hz", 30, {}, 30);
 			add_checkbox(&g_cfg.video.vblank_ntsc, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_VBLANK_NTSC);
+			add_checkbox(&g_cfg.video.handle_tiled_memory, localized_string_id::HOME_MENU_SETTINGS_ADVANCED_RSX_MEMORY_TILING);
 
 			apply_layout();
 		}
@@ -193,9 +201,17 @@ namespace rsx
 			add_checkbox(&g_cfg.io.keep_pads_connected, localized_string_id::HOME_MENU_SETTINGS_INPUT_KEEP_PADS_CONNECTED);
 			add_checkbox(&g_cfg.io.show_move_cursor, localized_string_id::HOME_MENU_SETTINGS_INPUT_SHOW_PS_MOVE_CURSOR);
 
-			if (g_cfg.io.camera == camera_handler::qt)
+			switch (g_cfg.io.camera)
 			{
+	#ifdef HAVE_SDL3
+			case camera_handler::sdl:
+	#endif
+			case camera_handler::qt:
 				add_dropdown(&g_cfg.io.camera_flip_option, localized_string_id::HOME_MENU_SETTINGS_INPUT_CAMERA_FLIP);
+				break;
+			case camera_handler::fake:
+			case camera_handler::null:
+				break;
 			}
 
 			add_dropdown(&g_cfg.io.pad_mode, localized_string_id::HOME_MENU_SETTINGS_INPUT_PAD_MODE);
@@ -209,6 +225,7 @@ namespace rsx
 		home_menu_settings_overlays::home_menu_settings_overlays(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_OVERLAYS))
 		{
+			add_checkbox(&g_cfg.misc.play_music_during_boot, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_PLAY_MUSIC_DURING_BOOT);
 			add_checkbox(&g_cfg.misc.show_trophy_popups, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_TROPHY_POPUPS);
 			add_checkbox(&g_cfg.misc.show_rpcn_popups, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_RPCN_POPUPS);
 			add_checkbox(&g_cfg.misc.show_shader_compilation_hint, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_SHADER_COMPILATION_HINT);
@@ -217,6 +234,8 @@ namespace rsx
 			add_checkbox(&g_cfg.misc.show_pressure_intensity_toggle_hint, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_PRESSURE_INTENSITY_TOGGLE_HINT);
 			add_checkbox(&g_cfg.misc.show_analog_limiter_toggle_hint, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_ANALOG_LIMITER_TOGGLE_HINT);
 			add_checkbox(&g_cfg.misc.show_mouse_and_keyboard_toggle_hint, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_MOUSE_AND_KB_TOGGLE_HINT);
+			add_checkbox(&g_cfg.misc.show_fatal_error_hints, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_SHOW_FATAL_ERROR_HINTS);
+			add_checkbox(&g_cfg.video.record_with_overlays, localized_string_id::HOME_MENU_SETTINGS_OVERLAYS_RECORD_WITH_OVERLAYS);
 
 			apply_layout();
 		}
@@ -224,7 +243,7 @@ namespace rsx
 		home_menu_settings_performance_overlay::home_menu_settings_performance_overlay(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY))
 		{
-			add_checkbox(&g_cfg.video.perf_overlay.perf_overlay_enabled, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE);
+			add_checkbox(&g_cfg.video.perf_overlay.enabled, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE);
 			add_checkbox(&g_cfg.video.perf_overlay.framerate_graph_enabled, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMERATE_GRAPH);
 			add_checkbox(&g_cfg.video.perf_overlay.frametime_graph_enabled, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_ENABLE_FRAMETIME_GRAPH);
 
@@ -239,10 +258,11 @@ namespace rsx
 			add_dropdown(&g_cfg.video.perf_overlay.position, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_POSITION);
 			add_checkbox(&g_cfg.video.perf_overlay.center_x, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_X);
 			add_checkbox(&g_cfg.video.perf_overlay.center_y, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_CENTER_Y);
-			add_unsigned_slider(&g_cfg.video.perf_overlay.margin_x, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_X, " px", 1);
-			add_unsigned_slider(&g_cfg.video.perf_overlay.margin_y, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_Y, " px", 1);
+			add_float_slider(&g_cfg.video.perf_overlay.margin_x, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_X, " %", 0.25f);
+			add_float_slider(&g_cfg.video.perf_overlay.margin_y, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_MARGIN_Y, " %", 0.25f);
 			add_unsigned_slider(&g_cfg.video.perf_overlay.font_size, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_FONT_SIZE, " px", 1);
 			add_unsigned_slider(&g_cfg.video.perf_overlay.opacity, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_OPACITY, " %", 1);
+			add_checkbox(&g_cfg.video.perf_overlay.use_window_space, localized_string_id::HOME_MENU_SETTINGS_PERFORMANCE_OVERLAY_USE_WINDOW_SPACE);
 
 			apply_layout();
 		}
@@ -251,14 +271,15 @@ namespace rsx
 			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_DEBUG))
 		{
 			add_checkbox(&g_cfg.video.debug_overlay, localized_string_id::HOME_MENU_SETTINGS_DEBUG_OVERLAY);
-			add_checkbox(&g_cfg.io.debug_overlay, localized_string_id::HOME_MENU_SETTINGS_DEBUG_INPUT_OVERLAY);
+			add_checkbox(&g_cfg.io.pad_debug_overlay, localized_string_id::HOME_MENU_SETTINGS_DEBUG_INPUT_OVERLAY);
+			add_checkbox(&g_cfg.io.mouse_debug_overlay, localized_string_id::HOME_MENU_SETTINGS_MOUSE_DEBUG_INPUT_OVERLAY);
 			add_checkbox(&g_cfg.video.disable_video_output, localized_string_id::HOME_MENU_SETTINGS_DEBUG_DISABLE_VIDEO_OUTPUT);
 			add_float_slider(&g_cfg.video.texture_lod_bias, localized_string_id::HOME_MENU_SETTINGS_DEBUG_TEXTURE_LOD_BIAS, "", 0.25f);
 
 			apply_layout();
 		}
 
-		// Android fork: in-game quick access to the "Clanker" runtime feature flags
+		// Android fork (theirs 3f49cbd + b666063): in-game quick access to our runtime feature flags
 		// so they can be flipped without leaving the game (eases on-device testing).
 		// Battery saver and WFE take effect live at the next idle/spin site; smooth
 		// shaders and CPU affinity are read when the render/threads are created, so
@@ -286,6 +307,8 @@ namespace rsx
 				[](bool v) { thread_ctrl::set_android_affinity(v); },
 				"Efficiency-core affinity (restart game to apply)");
 
+			// Session-only: the app's saved GeneralSettings stays the persistent source of
+			// truth; the actual KGSL clock pin runs in the app-registered turbo handler.
 			add_clanker_checkbox(
 				[]() { return rpcs3::utils::get_gpu_turbo(); },
 				[](bool v) { rpcs3::utils::set_gpu_turbo(v); },
@@ -293,5 +316,5 @@ namespace rsx
 
 			apply_layout();
 		}
-	}
-}
+	} // namespace overlays
+} // namespace rsx

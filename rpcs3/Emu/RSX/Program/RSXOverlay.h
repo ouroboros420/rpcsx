@@ -15,10 +15,6 @@ namespace rsx
 			texture2D = 3
 		};
 
-		// Defined in Overlays/overlay_controls.h; forward-declared so fragment_options
-		// can take it without pulling the whole overlay control header in here.
-		enum class sdf_function : u8;
-
 		class fragment_options
 		{
 			u32 value = 0;
@@ -58,7 +54,7 @@ namespace rsx
 
 			fragment_options& set_sdf(sdf_function func)
 			{
-				value &= ~(0x3u << e_offsets::sdf_func_offset_bit);
+				value &= ~(0x3 << e_offsets::sdf_func_offset_bit);
 				value |= (static_cast<u32>(func) << e_offsets::sdf_func_offset_bit);
 				return *this;
 			}
@@ -71,12 +67,38 @@ namespace rsx
 
 		class vertex_options
 		{
+		private:
 			u32 value = 0;
+
+			void set_bit(u32 bit, bool enable)
+			{
+				if (enable)
+				{
+					value |= (1u << bit);
+				}
+				else
+				{
+					value &= ~(1u << bit);
+				}
+			}
+
+			void set_bits(u32 offset, u32 count, u32 set)
+			{
+				const u32 mask = (0xffffffffu >> (32 - count)) << offset;
+				value &= ~mask;
+				value |= set;
+			}
 
 		public:
 			vertex_options& disable_vertex_snap(bool enable)
 			{
-				value = enable ? 1 : 0;
+				set_bit(0, enable);
+				return *this;
+			}
+
+			vertex_options& enable_vertical_flip(bool enable)
+			{
+				set_bit(1, enable);
 				return *this;
 			}
 

@@ -19,7 +19,7 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
-#include <WS2tcpip.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 #else
 #ifdef __clang__
@@ -116,7 +116,7 @@ namespace np
 		parse();
 	}
 
-	std::size_t ticket::size() const
+	usz ticket::size() const
 	{
 		return raw_data.size();
 	}
@@ -154,25 +154,25 @@ namespace np
 		case SCE_NP_TICKET_PARAM_ISSUER_ID:
 		{
 			const auto& node = nodes[0].data.data_nodes[1];
-			param->ui32      = node.data.data_u32;
+			param->ui32 = node.data.data_u32;
 			break;
 		}
 		case SCE_NP_TICKET_PARAM_ISSUED_DATE:
 		{
 			const auto& node = nodes[0].data.data_nodes[2];
-			param->ui64      = node.data.data_u64;
+			param->ui64 = node.data.data_u64;
 			break;
 		}
 		case SCE_NP_TICKET_PARAM_EXPIRE_DATE:
 		{
 			const auto& node = nodes[0].data.data_nodes[3];
-			param->ui64      = node.data.data_u64;
+			param->ui64 = node.data.data_u64;
 			break;
 		}
 		case SCE_NP_TICKET_PARAM_SUBJECT_ACCOUNT_ID:
 		{
 			const auto& node = nodes[0].data.data_nodes[4];
-			param->ui64      = node.data.data_u64;
+			param->ui64 = node.data.data_u64;
 			break;
 		}
 		case SCE_NP_TICKET_PARAM_SUBJECT_ONLINE_ID:
@@ -222,7 +222,7 @@ namespace np
 		case SCE_NP_TICKET_PARAM_SUBJECT_STATUS:
 		{
 			const auto& node = nodes[0].data.data_nodes[9];
-			param->ui32      = node.data.data_u32;
+			param->ui32 = node.data.data_u32;
 			break;
 		}
 		case SCE_NP_TICKET_PARAM_STATUS_DURATION:
@@ -258,7 +258,7 @@ namespace np
 		return std::string(vec.begin(), it);
 	}
 
-	std::optional<ticket_data> ticket::parse_node(std::size_t index) const
+	std::optional<ticket_data> ticket::parse_node(usz index) const
 	{
 		if ((index + MIN_TICKET_DATA_SIZE) > size())
 		{
@@ -268,11 +268,11 @@ namespace np
 
 		ticket_data tdata{};
 		const auto* ptr = data() + index;
-		tdata.id = read_from_ptr<be_t<u16>>(ptr);
-		tdata.len = read_from_ptr<be_t<u16>>(ptr + 2);
-		const auto* data_ptr = data() + index + 4;
+		tdata.id = read_from_ptr_unsafe<be_t<u16>>(ptr);
+		tdata.len = read_from_ptr_unsafe<be_t<u16>>(ptr, 2);
+		const usz data_offset = index + 4;
 
-		auto check_size = [&](std::size_t expected) -> bool
+		auto check_size = [&](usz expected) -> bool
 		{
 			if ((index + MIN_TICKET_DATA_SIZE + expected) > size())
 			{
@@ -294,7 +294,7 @@ namespace np
 			{
 				return std::nullopt;
 			}
-			tdata.data.data_u32 = read_from_ptr<be_t<u32>>(data_ptr);
+			tdata.data.data_u32 = read_from_ptr_unsafe<be_t<u32>>(data(), data_offset);
 			break;
 		case 2:
 		case 7:
@@ -302,7 +302,7 @@ namespace np
 			{
 				return std::nullopt;
 			}
-			tdata.data.data_u64 = read_from_ptr<be_t<u64>>(data_ptr);
+			tdata.data.data_u64 = read_from_ptr_unsafe<be_t<u64>>(data(), data_offset);
 			break;
 		case 4:
 		case 8:
@@ -311,7 +311,7 @@ namespace np
 				return std::nullopt;
 			}
 			tdata.data.data_vec = std::vector<u8>(tdata.len);
-			memcpy(tdata.data.data_vec.data(), data_ptr, tdata.len);
+			memcpy(tdata.data.data_vec.data(), data() + data_offset, tdata.len);
 			break;
 		default:
 			if ((tdata.id & 0x3000) == 0x3000)
@@ -321,7 +321,7 @@ namespace np
 					return std::nullopt;
 				}
 
-				std::size_t sub_index = 0;
+				usz sub_index = 0;
 				tdata.data.data_nodes = {};
 				while (sub_index < tdata.len)
 				{
@@ -352,14 +352,14 @@ namespace np
 			return;
 		}
 
-		version = read_from_ptr<be_t<u32>>(data());
+		version = read_from_ptr_unsafe<be_t<u32>>(data());
 		if (version != 0x21010000)
 		{
 			ticket_log.error("Invalid version: 0x%08x", version);
 			return;
 		}
 
-		u32 given_size = read_from_ptr<be_t<u32>>(data() + 4);
+		u32 given_size = read_from_ptr_unsafe<be_t<u32>>(data(), 4);
 		if ((given_size + 8) != size())
 		{
 			ticket_log.error("Size mismatch (gs: %d vs s: %d)", given_size, size());
@@ -446,7 +446,7 @@ namespace np
 
 		g_fxo->need<named_thread<signaling_handler>>();
 
-		is_connected  = (g_cfg.net.net_active == np_internet_status::enabled);
+		is_connected = (g_cfg.net.net_active == np_internet_status::enabled);
 		is_psn_active = (g_cfg.net.psn_status >= np_psn_status::psn_fake) && is_connected;
 
 		if (get_net_status() == CELL_NET_CTL_STATE_IPObtained)
@@ -455,7 +455,7 @@ namespace np
 			if (!discover_ether_address() || !discover_ip_address())
 			{
 				nph_log.error("Failed to discover ethernet or ip address!");
-				is_connected  = false;
+				is_connected = false;
 				is_psn_active = false;
 				return;
 			}
@@ -476,8 +476,8 @@ namespace np
 			// Convert bind address
 			bind_ip = resolve_binding_ip();
 
-			if (bind_ip)
-				local_ip_addr = bind_ip;
+				if (bind_ip)
+					local_ip_addr = bind_ip;
 
 			if (g_cfg.net.upnp_enabled)
 				upnp.upnp_enable();
@@ -586,7 +586,7 @@ namespace np
 		addr.sin_family = AF_INET;
 		addr.sin_port = 53;
 		addr.sin_addr.s_addr = 0x08080808;
-		if (connect(sockfd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) != 0)
+		if (connect(sockfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
 		{
 			// If connect fails a route to the internet is not available
 			nph_log.error("connect to discover local ip failed: %d", get_native_error());
@@ -614,9 +614,7 @@ namespace np
 	{
 		if (g_cfg.net.derive_mac_from_psid)
 		{
-			const u64 psid_low = g_cfg.sys.console_psid_low;
-			const u64 psid_high = g_cfg.sys.console_psid_high;
-			u128 psid = u128{psid_high} << 64 | u128{psid_low};
+			const u128 psid = g_cfg.sys.console_psid;
 			memcpy(ether_address.data(), &psid, 6);
 			ether_address[0] &= 0xFE;
 			ether_address[0] |= 0x02;
@@ -671,7 +669,7 @@ namespace np
 		if (ioctl(sock, SIOCGIFCONF, &ifc) == -1)
 			return false;
 
-		ifreq* it              = ifc.ifc_req;
+		ifreq* it = ifc.ifc_req;
 		const ifreq* const end = it + (ifc.ifc_len / sizeof(ifreq));
 
 		for (; it != end; ++it)
@@ -852,7 +850,7 @@ namespace np
 				return;
 			}
 
-			local_ip_addr  = std::bit_cast<u32, be_t<u32>>(rpcn->get_addr_local());
+			local_ip_addr = std::bit_cast<u32, be_t<u32>>(rpcn->get_addr_local());
 
 			break;
 		}
@@ -1024,7 +1022,7 @@ namespace np
 		if (cur_event.event != SCE_NP_BASIC_EVENT_OFFLINE)
 		{
 			const u32 size_avail = *size;
-			const u32 res_size   = std::min(static_cast<u32>(cur_event.data.size()), size_avail);
+			const u32 res_size = std::min(static_cast<u32>(cur_event.data.size()), size_avail);
 
 			memcpy(data.get_ptr(), cur_event.data.data(), res_size);
 			*size = res_size;
@@ -1048,6 +1046,8 @@ namespace np
 
 	void np_handler::set_message_selected(SceNpBasicAttachmentDataId id, u64 msg_id)
 	{
+		std::lock_guard lock(m_mutex_selected_messages);
+
 		switch (id)
 		{
 		case SCE_NP_BASIC_SELECTED_INVITATION_DATA:
@@ -1063,6 +1063,8 @@ namespace np
 
 	std::optional<shared_ptr<std::pair<std::string, message_data>>> np_handler::get_message_selected(SceNpBasicAttachmentDataId id)
 	{
+		std::lock_guard lock(m_mutex_selected_messages);
+
 		switch (id)
 		{
 		case SCE_NP_BASIC_SELECTED_INVITATION_DATA:
@@ -1082,6 +1084,8 @@ namespace np
 
 	void np_handler::clear_message_selected(SceNpBasicAttachmentDataId id)
 	{
+		std::lock_guard lock(m_mutex_selected_messages);
+
 		switch (id)
 		{
 		case SCE_NP_BASIC_SELECTED_INVITATION_DATA:
@@ -1104,6 +1108,29 @@ namespace np
 		get_rpcn()->send_message(msg_data, npids);
 	}
 
+	bool np_handler::select_invitation(u64 msg_id)
+	{
+		const auto message = get_message(msg_id);
+
+		if (!message || message.value()->second.mainType != SCE_NP_BASIC_MESSAGE_MAIN_TYPE_INVITE)
+		{
+			rpcn_log.error("Cannot select invalid invitation: msg_id=%d", msg_id);
+			return false;
+		}
+
+		set_message_selected(SCE_NP_BASIC_SELECTED_INVITATION_DATA, msg_id);
+
+		if (sysutil_send_system_cmd(CELL_SYSUTIL_NP_INVITATION_SELECTED, 0) <= 0)
+		{
+			clear_message_selected(SCE_NP_BASIC_SELECTED_INVITATION_DATA);
+			rpcn_log.error("Failed to notify the game about selected invitation: msg_id=%d", msg_id);
+			return false;
+		}
+
+		get_rpcn()->mark_message_used(msg_id);
+		return true;
+	}
+
 	void np_handler::operator()()
 	{
 		if (g_cfg.net.psn_status != np_psn_status::psn_rpcn)
@@ -1124,7 +1151,7 @@ namespace np
 				for (auto& reply : replies)
 				{
 					const rpcn::CommandType command = static_cast<rpcn::CommandType>(reply.second.first);
-					const u32 req_id      = reply.first;
+					const u32 req_id = reply.first;
 					std::vector<u8>& data = reply.second.second;
 
 					// Every reply should at least contain a return value/error code
@@ -1242,16 +1269,16 @@ namespace np
 
 				auto messages = rpcn->get_new_messages();
 
-				for (const auto msg_id : messages)
-				{
-					const auto opt_msg = rpcn->get_message(msg_id);
-
-					if (!opt_msg)
+					for (const auto msg_id : messages)
 					{
-						continue;
-					}
+						const auto opt_msg = rpcn->get_message(msg_id);
 
-					const auto& msg = opt_msg.value();
+						if (!opt_msg)
+						{
+							continue;
+						}
+
+						const auto& msg = opt_msg.value();
 					const localized_string_id loc_id = (msg->second.mainType == SCE_NP_BASIC_MESSAGE_MAIN_TYPE_INVITE) ? localized_string_id::CELL_NP_MESSAGE_INVITE_RECEIVED : localized_string_id::CELL_NP_MESSAGE_OTHER_RECEIVED;
 					rsx::overlays::queue_message(get_localized_string(loc_id, msg->first.c_str()), 6'000'000);
 
@@ -1307,7 +1334,7 @@ namespace np
 		}
 	}
 
-	bool np_handler::error_and_disconnect(const std::string& error_msg)
+	bool np_handler::error_and_disconnect(std::string_view error_msg)
 	{
 		rpcn_log.error("%s", error_msg);
 		rpcn.reset();
@@ -1424,7 +1451,10 @@ namespace np
 
 		while (players_history.size() > MAX_HISTORY_ENTRIES)
 		{
-			auto it = std::min_element(players_history.begin(), players_history.end(), [](const auto& a, const auto& b) { return a.second.timestamp < b.second.timestamp; } );
+			auto it = std::min_element(players_history.begin(), players_history.end(), [](const auto& a, const auto& b)
+				{
+					return a.second.timestamp < b.second.timestamp;
+				});
 			players_history.erase(it);
 		}
 
@@ -1449,7 +1479,10 @@ namespace np
 
 		while (players_history.size() > MAX_HISTORY_ENTRIES)
 		{
-			auto it = std::min_element(players_history.begin(), players_history.end(), [](const auto& a, const auto& b) { return a.second.timestamp < b.second.timestamp; } );
+			auto it = std::min_element(players_history.begin(), players_history.end(), [](const auto& a, const auto& b)
+				{
+					return a.second.timestamp < b.second.timestamp;
+				});
 			players_history.erase(it);
 		}
 
@@ -1491,9 +1524,9 @@ namespace np
 
 			auto it = players_history.begin();
 			std::advance(it, index);
-			string_to_npid(it->first, *npid);
-			return true;
-		}
+				string_to_npid(it->first, *npid);
+				return true;
+			}
 		else
 		{
 			const std::string communication_id_str = std::string(basic_handler.context.data);
@@ -1653,7 +1686,7 @@ namespace np
 		}
 
 		std::lock_guard lock(mutex_rpcn);
-		
+
 		if (!rpcn)
 		{
 			return SCE_NP_BASIC_ERROR_NOT_CONNECTED;

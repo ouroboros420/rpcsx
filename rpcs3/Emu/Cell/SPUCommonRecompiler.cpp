@@ -39,26 +39,9 @@ constexpr u32 s_reg_max = spu_recompiler_base::s_reg_max;
 template <typename T>
 struct span_less
 {
-	static int compare(const std::span<T>& lhs, const std::span<T>& rhs) noexcept
+	static auto compare(const std::span<T>& lhs, const std::span<T>& rhs) noexcept
 	{
-		// TODO: Replace with std::lexicographical_compare_three_way when it becomes available to all compilers
-		for (usz i = 0, last = std::min(lhs.size(), rhs.size()); i != last; i++)
-		{
-			const T vl = lhs[i];
-			const T vr = rhs[i];
-
-			if (vl != vr)
-			{
-				return vl < vr ? -1 : 1;
-			}
-		}
-
-		if (lhs.size() != rhs.size())
-		{
-			return lhs.size() < rhs.size() ? -1 : 1;
-		}
-
-		return 0;
+		return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 	}
 
 	bool operator()(const std::span<T>& lhs, const std::span<T>& rhs) const noexcept
@@ -136,17 +119,7 @@ static spu_function_t compile_spu_llvm_with_retry(std::unique_ptr<spu_recompiler
 	spu_llvm_compile_context context;
 
 	{
-		// Compile without TBL2/TBX2. The aarch64_neon_tbl2/tbx2 intrinsics read a register PAIR
-		// that must be adjacent in the file. LLVM lowers them through REG_SEQUENCE into the QQ
-		// consecutive-pair class, so the RESULT is always correct - this is NOT a runtime
-		// miscompile. The real hazard is at codegen: under SPU register pressure the allocator
-		// may be unable to free an adjacent pair and aborts the whole module with "Cannot
-		// scavenge register without an emergency spill slot" (the string the retry below keys on).
-		// Forcing the split tbl1/tbx1 lowering sidesteps that abort entirely - it needs no
-		// adjacent pair and is provably equivalent. The working ARM reference (aps3e) likewise
-		// never emits these intrinsics. (The separate SHUFB/ROTQBY shuffle-lowering corruption
-		// class is unrelated to tbl2 - do not conflate them.)
-		spu_llvm_compile_scope scope(context, false);
+		spu_llvm_compile_scope scope(context, true);
 
 		if (const auto result = compiler->compile(spu_program{program}))
 		{
@@ -197,37 +170,32 @@ static spu_function_t compile_spu_llvm_with_retry(std::unique_ptr<spu_recompiler
 	return result;
 }
 
-// Background SPU compile worker for the ARM64 interpret-first async path.
+// Background SPU compile worker for the ARM64 interpret-first async path (theirs 270dfed4,
+// fixed by 05b8b40a).
 //
-// ARM64 has no fast first-tier (spu_fast is x86-only), so the synchronous llvm decoder
-// compiles every block inline on the SPU thread - a multi-second stall storm on
-// SPURS-heavy games. Instead, on a block miss dispatch() hands the freshly analysed
-// spu_program to this thread and interprets the block via spu_interpreter_rt while the
-// compile runs in the background. compile_spu_llvm_with_retry installs the block as a
-// side effect (compile() does add_empty + compiled.store + rebuild_ubertrampoline, both
-// cross-core-published by the icache flush in MemoryManager2::finalizeMemory /
-// rebuild_ubertrampoline), and the SPU thread atomically picks up the native function on
-// its next dispatch through g_dispatcher.
+// ARM64 has no fast first tier (spu_fast is x86-only), so the llvm decoder compiles every block
+// synchronously on the SPU thread - a multi-second stall storm on SPURS-heavy games. Instead, on
+// a dispatch() miss the freshly analysed block is handed to this thread and interpreted via
+// spu_interpreter_rt while the compile runs in the background. compile_spu_llvm_with_retry
+// installs the block as a side effect (compile() does add_empty + compiled.store +
+// rebuild_ubertrampoline, both cross-core-published by the icache flushes above), and the SPU
+// thread atomically picks up the native function on its next dispatch through g_dispatcher.
 //
-// One worker only (Snapdragon has ~5 fast cores already saturated by the SPURS groups;
-// more compile threads would contend for them and risk OOM from N LLVM contexts). The
-// worker owns its own recompiler instance, never shared with SPU threads (verified
-// condition C1).
+// One worker only: the phone's few big cores are already saturated by the SPURS groups, and more
+// LLVM contexts risk OOM. The worker owns its own recompiler instance, never shared with an SPU
+// thread.
 //
-// Lifecycle/teardown safety: g_fxo (fixed_typemap) constructs every referenced type
-// EAGERLY at Emu init - this worker is NOT lazily created, and its construction order
-// relative to spu_runtime/spu_cache is not guaranteed. Safety instead comes from g_fxo
-// teardown: fixed_typemap::clear() runs a semi-destructor pass that aborts AND JOINS every
-// named_thread (thread_op) BEFORE it destroys any object. spu_runtime/spu_cache hold no
-// thread, so this worker is fully joined while they are still alive - it can never touch a
-// torn-down m_spurt (= &g_fxo->get<spu_runtime>()) regardless of construction order.
+// Lifecycle: g_fxo constructs referenced types eagerly and fixed_typemap::clear() aborts AND
+// JOINS every named_thread before destroying any object, so this worker is fully joined while
+// spu_runtime/spu_cache (which hold no thread) are still alive - it can never touch a torn-down
+// m_spurt regardless of construction order.
 struct spu_async_compiler
 {
 	lf_queue<spu_program> registered;
 
 	void operator()()
 	{
-		// Postponed: own LLVM recompiler instance (never shared with SPU threads).
+		// Own LLVM recompiler instance (never shared with SPU threads), created lazily.
 		std::unique_ptr<spu_recompiler_base> compiler;
 
 		for (auto slice = registered.pop_all();; [&]
@@ -265,34 +233,32 @@ struct spu_async_compiler
 			}
 
 			// Re-analyse on THIS worker's compiler before compiling. compile() consumes
-			// per-instance analysis side-state (m_bbs and friends) that analyse() populates;
-			// the synchronous dispatch path analyses on spu.jit immediately before compiling
-			// on that same instance. The program copy handed to this worker carries only the
-			// analysed byte-stream, NOT that side-state, so without re-analysing here compile()
-			// indexes an empty m_bbs and aborts ("Range check failed, container_size 0") - the
-			// exact crash observed in Mafia II. This mirrors what the TBL2/TBX2 retry inside
-			// compile_spu_llvm_with_retry already does on its fresh compiler.
+			// per-instance analysis side-state (m_bbs and friends) that analyse() populates; the
+			// synchronous dispatch path analyses on spu.jit immediately before compiling on that
+			// same instance. The program copy handed here carries only the analysed byte-stream,
+			// NOT that side-state, so without re-analysing compile() indexes an empty m_bbs and
+			// aborts with "Range check failed, container_size 0". Mirrors what the TBL2/TBX2 retry
+			// in compile_spu_llvm_with_retry already does on its fresh compiler.
 			const spu_program analysed = analyse_spu_llvm_program(*compiler, *prog);
 
 			if (analysed != *prog)
 			{
-				// Synthetic-LS re-analysis disagreed with the dispatch-time analysis. Should
-				// not happen for safe-size blocks (the async path is gated to safe), but if it
-				// does, skip rather than compile a program whose m_bbs does not match: the block
-				// stays interpreted (queued stays 1) and is never re-enqueued, same as a genuine
-				// compile failure. Same guard the TBL2 retry uses.
+				// Synthetic-LS re-analysis disagreed with the dispatch-time analysis. Should not
+				// happen for safe-size blocks (the async path is gated to safe), but if it does,
+				// skip rather than compile a program whose m_bbs does not match: the block stays
+				// interpreted (queued stays 1) and is never re-enqueued, same as a genuine compile
+				// failure. Same guard the TBL2 retry uses.
 				spu_log.error("[0x%05x] SPU async re-analysis mismatch (%u vs %u), skipping", prog->entry_point, analysed.data.size(), prog->data.size());
 				continue;
 			}
 
-			// Installs the block as a side effect. Routed through the TBL2/TBX2
-			// reg-scavenge retry wrapper exactly like the synchronous dispatch path
-			// (verified condition C3). Return value is intentionally unused: on a genuine
-			// failure (both TBL2 and the no-TBL2 retry failed) compiled stays nullptr and
-			// item->queued stays 1, so the block is interpreted for the rest of the session
-			// and never re-enqueued. That is deliberate - re-enqueuing an uncompilable block
-			// would spin the worker forever - and it is strictly better than the synchronous
-			// path, which re-logs a fatal and re-dispatches the same failing block in a loop.
+			// Installs the block as a side effect. Routed through the TBL2/TBX2 reg-scavenge retry
+			// wrapper exactly like the synchronous dispatch path. Return value is intentionally
+			// unused: on a genuine failure (both TBL2 and the no-TBL2 retry failed) compiled stays
+			// nullptr and item->queued stays 1, so the block is interpreted for the rest of the
+			// session and never re-enqueued - re-enqueuing an uncompilable block would spin the
+			// worker forever, and this is strictly better than the synchronous path, which re-logs
+			// a fatal and re-dispatches the same failing block in a loop.
 			compile_spu_llvm_with_retry(compiler, analysed);
 		}
 	}
@@ -340,9 +306,7 @@ static void ghc_cpp_trampoline(u64 fn_target, native_asm& c, auto& args)
 
 DECLARE(spu_runtime::tr_dispatch) = []
 {
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(false);
-#endif
+	jit_write_guard jit_guard;
 #if defined(ARCH_X64)
 	// Generate a special trampoline to spu_recompiler_base::dispatch with pause instruction
 	u8* const trptr = jit_runtime::alloc(32, 16);
@@ -370,6 +334,7 @@ DECLARE(spu_runtime::tr_dispatch) = []
 
 DECLARE(spu_runtime::tr_branch) = []
 {
+	jit_write_guard jit_guard;
 #if defined(ARCH_X64)
 	// Generate a trampoline to spu_recompiler_base::branch
 	u8* const trptr = jit_runtime::alloc(32, 16);
@@ -395,6 +360,7 @@ DECLARE(spu_runtime::tr_branch) = []
 
 DECLARE(spu_runtime::tr_interpreter) = []
 {
+	jit_write_guard jit_guard;
 #if defined(ARCH_X64)
 	u8* const trptr = jit_runtime::alloc(32, 16);
 	u8* raw = move_args_ghc_to_native(trptr);
@@ -416,6 +382,8 @@ DECLARE(spu_runtime::tr_interpreter) = []
 
 DECLARE(spu_runtime::g_dispatcher) = []
 {
+	jit_write_guard jit_guard;
+
 	// Allocate 2^20 positions in data area
 	const auto ptr = reinterpret_cast<std::remove_const_t<decltype(spu_runtime::g_dispatcher)>>(jit_runtime::alloc(sizeof(*g_dispatcher), 64, false));
 
@@ -429,6 +397,8 @@ DECLARE(spu_runtime::g_dispatcher) = []
 
 DECLARE(spu_runtime::tr_all) = []
 {
+	jit_write_guard jit_guard;
+
 #if defined(ARCH_X64)
 	u8* const trptr = jit_runtime::alloc(32, 16);
 	u8* raw = trptr;
@@ -437,7 +407,7 @@ DECLARE(spu_runtime::tr_all) = []
 	*raw++ = 0x41;
 	*raw++ = 0x8b;
 	*raw++ = 0x45;
-	*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, pc)));
+	*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, pc));
 
 	// Get LS address starting from PC: lea rcx, [rbp + rax]
 	*raw++ = 0x48;
@@ -467,7 +437,7 @@ DECLARE(spu_runtime::tr_all) = []
 	*raw++ = 0x49;
 	*raw++ = 0xc7;
 	*raw++ = 0x45;
-	*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, block_hash)));
+	*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, block_hash));
 	*raw++ = 0x00;
 	*raw++ = 0x00;
 	*raw++ = 0x00;
@@ -539,17 +509,17 @@ DECLARE(spu_runtime::g_gateway) = build_function_asm<spu_function_t>("spu_gatewa
 		c.push(x86::rdi);
 		c.push(x86::rbp);
 		c.push(x86::rbx);
-		c.sub(x86::rsp, 0xa8);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x90), x86::xmm15);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x80), x86::xmm14);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x70), x86::xmm13);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x60), x86::xmm12);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x50), x86::xmm11);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x40), x86::xmm10);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x30), x86::xmm9);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x20), x86::xmm8);
-		c.movaps(x86::oword_ptr(x86::rsp, 0x10), x86::xmm7);
-		c.movaps(x86::oword_ptr(x86::rsp, 0), x86::xmm6);
+	c.sub(x86::rsp, 0xc8);
+	c.movaps(x86::oword_ptr(x86::rsp, 0xb0), x86::xmm15);
+	c.movaps(x86::oword_ptr(x86::rsp, 0xa0), x86::xmm14);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x90), x86::xmm13);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x80), x86::xmm12);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x70), x86::xmm11);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x60), x86::xmm10);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x50), x86::xmm9);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x40), x86::xmm8);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x30), x86::xmm7);
+	c.movaps(x86::oword_ptr(x86::rsp, 0x20), x86::xmm6);
 #else
 		c.push(x86::rbp);
 		c.push(x86::r15);
@@ -582,17 +552,17 @@ DECLARE(spu_runtime::g_gateway) = build_function_asm<spu_function_t>("spu_gatewa
 		}
 
 #ifdef _WIN32
-		c.movaps(x86::xmm6, x86::oword_ptr(x86::rsp, 0));
-		c.movaps(x86::xmm7, x86::oword_ptr(x86::rsp, 0x10));
-		c.movaps(x86::xmm8, x86::oword_ptr(x86::rsp, 0x20));
-		c.movaps(x86::xmm9, x86::oword_ptr(x86::rsp, 0x30));
-		c.movaps(x86::xmm10, x86::oword_ptr(x86::rsp, 0x40));
-		c.movaps(x86::xmm11, x86::oword_ptr(x86::rsp, 0x50));
-		c.movaps(x86::xmm12, x86::oword_ptr(x86::rsp, 0x60));
-		c.movaps(x86::xmm13, x86::oword_ptr(x86::rsp, 0x70));
-		c.movaps(x86::xmm14, x86::oword_ptr(x86::rsp, 0x80));
-		c.movaps(x86::xmm15, x86::oword_ptr(x86::rsp, 0x90));
-		c.add(x86::rsp, 0xa8);
+	c.movaps(x86::xmm6, x86::oword_ptr(x86::rsp, 0x20));
+	c.movaps(x86::xmm7, x86::oword_ptr(x86::rsp, 0x30));
+	c.movaps(x86::xmm8, x86::oword_ptr(x86::rsp, 0x40));
+	c.movaps(x86::xmm9, x86::oword_ptr(x86::rsp, 0x50));
+	c.movaps(x86::xmm10, x86::oword_ptr(x86::rsp, 0x60));
+	c.movaps(x86::xmm11, x86::oword_ptr(x86::rsp, 0x70));
+	c.movaps(x86::xmm12, x86::oword_ptr(x86::rsp, 0x80));
+	c.movaps(x86::xmm13, x86::oword_ptr(x86::rsp, 0x90));
+	c.movaps(x86::xmm14, x86::oword_ptr(x86::rsp, 0xa0));
+	c.movaps(x86::xmm15, x86::oword_ptr(x86::rsp, 0xb0));
+	c.add(x86::rsp, 0xc8);
 		c.pop(x86::rbx);
 		c.pop(x86::rbp);
 		c.pop(x86::rdi);
@@ -965,6 +935,8 @@ void spu_cache::add(const spu_program& func)
 
 void spu_cache::initialize(bool build_existing_cache)
 {
+	jit_write_guard jit_guard;
+
 	spu_runtime::g_interpreter = spu_runtime::g_gateway;
 
 	if (g_cfg.core.spu_decoder == spu_decoder_type::_static || g_cfg.core.spu_decoder == spu_decoder_type::dynamic)
@@ -983,9 +955,19 @@ void spu_cache::initialize(bool build_existing_cache)
 	}
 
 	// SPU cache file (version + block size type)
-	const std::string loc = ppu_cache + "spu-" + fmt::to_lower(g_cfg.core.spu_block_size.to_string()) + "-v1-tane.dat";
+	const std::string filename = "spu-" + fmt::to_lower(g_cfg.core.spu_block_size.to_string()) + "-v1-tane.dat";
+	const std::string loc = ppu_cache + filename;
+	const std::string loc_debug = fs::get_cache_dir() + "DEBUG/" + filename;
 
-	spu_cache cache(loc);
+	bool is_debug = false;
+
+	if (fs::is_file(loc_debug))
+	{
+		spu_log.success("SPU Cache override applied!");
+		is_debug = true;
+	}
+
+	spu_cache cache(is_debug ? loc_debug : loc);
 
 	if (!cache)
 	{
@@ -1078,38 +1060,30 @@ void spu_cache::initialize(bool build_existing_cache)
 	}
 
 	named_thread_group workers("SPU Worker ", worker_count, [&]() -> uint
-	{
+		{
 #ifdef __APPLE__
 		// Apple Silicon W^X: enable JIT write mode for this worker and
 		// pair it with an RAII guard so execute mode is restored on
 		// every exit path (return, exception, etc.). Leaving a worker
 		// in write mode at teardown can leave per-thread state
 		// inconsistent on AArch64.
-		pthread_jit_write_protect_np(false);
-
-		struct jit_write_guard
-		{
-			~jit_write_guard()
-			{
-				pthread_jit_write_protect_np(true);
-			}
-		} _jit_guard;
+		jit_write_guard jit_guard;
 #endif
-		// Set low priority
-		thread_ctrl::scoped_priority low_prio(-1);
+			// Set low priority
+			thread_ctrl::scoped_priority low_prio(-1);
 
-		// Initialize compiler instances for parallel compilation
-		std::unique_ptr<spu_recompiler_base> compiler;
+			// Initialize compiler instances for parallel compilation
+			std::unique_ptr<spu_recompiler_base> compiler;
 
 #if defined(ARCH_X64)
-		if (g_cfg.core.spu_decoder == spu_decoder_type::asmjit)
-		{
-			compiler = spu_recompiler_base::make_asmjit_recompiler();
-		}
-		else if (g_cfg.core.spu_decoder == spu_decoder_type::llvm)
-		{
-			compiler = spu_recompiler_base::make_llvm_recompiler();
-		}
+			if (g_cfg.core.spu_decoder == spu_decoder_type::asmjit)
+			{
+				compiler = spu_recompiler_base::make_asmjit_recompiler();
+			}
+			else if (g_cfg.core.spu_decoder == spu_decoder_type::llvm)
+			{
+				compiler = spu_recompiler_base::make_llvm_recompiler();
+			}
 		else
 		{
 			fmt::throw_exception("Unsupported spu decoder '%s'", g_cfg.core.spu_decoder);
@@ -1127,7 +1101,7 @@ void spu_cache::initialize(bool build_existing_cache)
 #error "Unimplemented"
 #endif
 
-		compiler->init();
+			compiler->init();
 
 		auto compile_program = [&](spu_program&& program) -> spu_function_t
 		{
@@ -1138,292 +1112,291 @@ void spu_cache::initialize(bool build_existing_cache)
 #endif
 		};
 
-		// Counter for error reporting
-		u32 logged_error = 0;
+			// Counter for error reporting
+			u32 logged_error = 0;
 
-		// How much every thread compiled
-		uint result = 0;
+			// How much every thread compiled
+			uint result = 0;
 
-		// Fake LS
-		std::vector<be_t<u32>> ls(0x10000);
+			// Fake LS
+			std::vector<be_t<u32>> ls(0x10000);
 
-		usz func_i = fnext++;
+			usz func_i = fnext++;
 
-		// Ensure some actions are performed on a single thread
-		const bool is_first_thread = func_i == 0;
+			// Ensure some actions are performed on a single thread
+			const bool is_first_thread = func_i == 0;
 
-		// Build functions
-		for (; func_i < func_list.size(); func_i = fnext++, (showing_progress ? g_progr_pdone : pending_progress) += build_existing_cache ? 1 : 0)
-		{
-			const spu_program& func = std::as_const(func_list)[func_i];
-
-			if (Emu.IsStopped() || fail_flag)
+			// Build functions
+			for (; func_i < func_list.size(); func_i = fnext++, (showing_progress ? g_progr_pdone : pending_progress) += build_existing_cache ? 1 : 0)
 			{
-				continue;
-			}
+				const spu_program& func = std::as_const(func_list)[func_i];
 
-			// Get data start
-			const u32 start = func.lower_bound;
-			const u32 size0 = ::size32(func.data);
-
-			be_t<u64> hash_start;
-			{
-				sha1_context ctx;
-				u8 output[20];
-
-				sha1_starts(&ctx);
-				sha1_update(&ctx, reinterpret_cast<const u8*>(func.data.data()), func.data.size() * 4);
-				sha1_finish(&ctx, output);
-				std::memcpy(&hash_start, output, sizeof(hash_start));
-			}
-
-			// Check hash against allowed bounds
-			const bool inverse_bounds = g_cfg.core.spu_llvm_lower_bound > g_cfg.core.spu_llvm_upper_bound;
-
-			if ((!inverse_bounds && (hash_start < g_cfg.core.spu_llvm_lower_bound || hash_start > g_cfg.core.spu_llvm_upper_bound)) ||
-				(inverse_bounds && (hash_start < g_cfg.core.spu_llvm_lower_bound && hash_start > g_cfg.core.spu_llvm_upper_bound)))
-			{
-				spu_log.error("[Debug] Skipped function %s", fmt::base57(hash_start));
-				result++;
-				continue;
-			}
-
-			// Initialize LS with function data only
-			for (u32 i = 0, pos = start; i < size0; i++, pos += 4)
-			{
-				ls[pos / 4] = std::bit_cast<be_t<u32>>(func.data[i]);
-			}
-
-			// Call analyser
-			spu_program func2 = compiler->analyse(ls.data(), func.entry_point);
-
-			if (func2 != func)
-			{
-				spu_log.error("[0x%05x] SPU Analyser failed, %u vs %u", func2.entry_point, func2.data.size(), size0);
-
-				if (logged_error < 2)
+				if (Emu.IsStopped() || fail_flag)
 				{
-					std::string log;
-					compiler->dump(func, log);
-					spu_log.notice("[0x%05x] Function: %s", func.entry_point, log);
-					logged_error++;
+					continue;
 				}
-			}
+
+				// Get data start
+				const u32 start = func.lower_bound;
+				const u32 size0 = ::size32(func.data);
+
+				be_t<u64> hash_start;
+				{
+					sha1_context ctx;
+					u8 output[20];
+
+					sha1_starts(&ctx);
+					sha1_update(&ctx, reinterpret_cast<const u8*>(func.data.data()), func.data.size() * 4);
+					sha1_finish(&ctx, output);
+					std::memcpy(&hash_start, output, sizeof(hash_start));
+				}
+
+				// Check hash against allowed bounds
+				const bool inverse_bounds = g_cfg.core.spu_llvm_lower_bound > g_cfg.core.spu_llvm_upper_bound;
+
+				if ((!inverse_bounds && (hash_start < g_cfg.core.spu_llvm_lower_bound || hash_start > g_cfg.core.spu_llvm_upper_bound)) ||
+					(inverse_bounds && (hash_start < g_cfg.core.spu_llvm_lower_bound && hash_start > g_cfg.core.spu_llvm_upper_bound)))
+				{
+					spu_log.error("[Debug] Skipped function %s", fmt::base57(hash_start));
+					result++;
+					continue;
+				}
+
+				// Initialize LS with function data only
+				for (u32 i = 0, pos = start; i < size0; i++, pos += 4)
+				{
+					ls[pos / 4] = std::bit_cast<be_t<u32>>(func.data[i]);
+				}
+
+				// Call analyser
+				spu_program func2 = compiler->analyse(ls.data(), func.entry_point);
+
+				if (func2 != func)
+				{
+					spu_log.error("[0x%05x] SPU Analyser failed, %u vs %u", func2.entry_point, func2.data.size(), size0);
+
+					if (logged_error < 2)
+					{
+						std::string log;
+						compiler->dump(func, log);
+						spu_log.notice("[0x%05x] Function: %s", func.entry_point, log);
+						logged_error++;
+					}
+				}
 			else if (!compile_program(std::move(func2)))
-			{
-				// Likely, out of JIT memory. Signal to prevent further building.
-				fail_flag |= 1;
-				continue;
-			}
-
-			// Clear fake LS
-			std::memset(ls.data() + start / 4, 0, 4 * (size0 - 1));
-
-			result++;
-
-			if (is_first_thread && !showing_progress)
-			{
-				if (!g_progr_text && !g_progr_ptotal && !g_progr_ftotal)
-				{
-					showing_progress = true;
-					g_progr_pdone += pending_progress.exchange(0);
-					g_progr_ptotal += total_funcs;
-					progress_dialog.emplace(get_localized_string(localized_string_id::PROGRESS_DIALOG_BUILDING_SPU_CACHE));
-				}
-			}
-			else if (showing_progress && pending_progress)
-			{
-				// Cover missing progress due to a race
-				g_progr_pdone += pending_progress.exchange(0);
-			}
-		}
-
-		u32 last_sec_idx = umax;
-
-		for (func_i = data_indexer++;; func_i = data_indexer++, (showing_progress ? g_progr_pdone : pending_progress) += build_existing_cache ? 1 : 0)
-		{
-			usz passed_count = 0;
-			u32 func_addr = 0;
-			u32 next_func = 0;
-			u32 sec_addr = umax;
-			u32 sec_idx = 0;
-			std::span<const u32> inst_data;
-
-			// Try to get the data this index points to
-			for (auto& sec : data_list)
-			{
-				if (func_i < passed_count + sec.funcs.size())
-				{
-					const usz func_idx = func_i - passed_count;
-					sec_addr = sec.vaddr;
-					func_addr = ::at32(sec.funcs, func_idx);
-					inst_data = { sec.inst_data.data(), sec.inst_data.size() };
-					next_func = sec.funcs.size() >= func_idx ? ::narrow<u32>(sec_addr + inst_data.size() * 4) : sec.funcs[func_idx];
-					break;
-				}
-
-				passed_count += sec.funcs.size();
-				sec_idx++;
-			}
-
-			if (sec_addr == umax)
-			{
-				// End of compilation for thread
-				break;
-			}
-
-			if (Emu.IsStopped() || fail_flag)
-			{
-				continue;
-			}
-
-			if (last_sec_idx != sec_idx)
-			{
-				if (last_sec_idx != umax)
-				{
-					// Clear fake LS of previous section
-					auto& sec = data_list[last_sec_idx];
-					std::memset(ls.data() + sec.vaddr / 4, 0, sec.inst_data.size() * 4);
-				}
-
-				// Initialize LS with the entire section data
-				for (u32 i = 0, pos = sec_addr; i < inst_data.size(); i++, pos += 4)
-				{
-					ls[pos / 4] =  std::bit_cast<be_t<u32>>(inst_data[i]);
-				}
-
-				last_sec_idx = sec_idx;
-			}
-
-			u32 block_addr = func_addr;
-
-			std::map<u32, std::vector<u32>> targets;
-
-			// Call analyser
-			spu_program func2 = compiler->analyse(ls.data(), block_addr, &targets);
-
-			while (!func2.data.empty())
-			{
-				const u32 last_inst = std::bit_cast<be_t<u32>>(func2.data.back());
-				const u32 prog_size = ::size32(func2.data);
-
-				if (!compile_program(std::move(func2)))
 				{
 					// Likely, out of JIT memory. Signal to prevent further building.
 					fail_flag |= 1;
-					break;
+					continue;
 				}
+
+				// Clear fake LS
+				std::memset(ls.data() + start / 4, 0, 4 * (size0 - 1));
 
 				result++;
 
-				const u32 start_new = block_addr + prog_size * 4;
-
-				if (start_new >= next_func || (start_new == next_func - 4 && ls[start_new / 4] == 0x200000u))
+				if (is_first_thread && !showing_progress)
 				{
-					// Completed
+					if (!g_progr_text && !g_progr_ptotal && !g_progr_ftotal)
+					{
+						showing_progress = true;
+						g_progr_pdone += pending_progress.exchange(0);
+						g_progr_ptotal += total_funcs;
+						progress_dialog.emplace(get_localized_string(localized_string_id::PROGRESS_DIALOG_BUILDING_SPU_CACHE));
+					}
+				}
+				else if (showing_progress && pending_progress)
+				{
+					// Cover missing progress due to a race
+					g_progr_pdone += pending_progress.exchange(0);
+				}
+			}
+
+			u32 last_sec_idx = umax;
+
+			for (func_i = data_indexer++;; func_i = data_indexer++, (showing_progress ? g_progr_pdone : pending_progress) += build_existing_cache ? 1 : 0)
+			{
+				usz passed_count = 0;
+				u32 func_addr = 0;
+				u32 next_func = 0;
+				u32 sec_addr = umax;
+				u32 sec_idx = 0;
+				std::span<const u32> inst_data;
+
+				// Try to get the data this index points to
+				for (auto& sec : data_list)
+				{
+					if (func_i < passed_count + sec.funcs.size())
+					{
+						const usz func_idx = func_i - passed_count;
+						sec_addr = sec.vaddr;
+						func_addr = ::at32(sec.funcs, func_idx);
+						inst_data = {sec.inst_data.data(), sec.inst_data.size()};
+						next_func = sec.funcs.size() >= func_idx ? ::narrow<u32>(sec_addr + inst_data.size() * 4) : sec.funcs[func_idx];
+						break;
+					}
+
+					passed_count += sec.funcs.size();
+					sec_idx++;
+				}
+
+				if (sec_addr == umax)
+				{
+					// End of compilation for thread
 					break;
 				}
 
-				if (auto type = g_spu_itype.decode(last_inst);
-					type == spu_itype::BRSL || type == spu_itype::BRASL || type == spu_itype::BISL || type == spu_itype::SYNC)
+				if (Emu.IsStopped() || fail_flag)
 				{
-					if (ls[start_new / 4] && g_spu_itype.decode(ls[start_new / 4]) != spu_itype::UNK)
+					continue;
+				}
+
+				if (last_sec_idx != sec_idx)
+				{
+					if (last_sec_idx != umax)
 					{
-						spu_log.notice("Precompiling fallthrough to 0x%05x", start_new);
-						func2 = compiler->analyse(ls.data(), start_new, &targets);
-						block_addr = start_new;
-						continue;
-					}
-				}
-
-				if (targets.empty())
-				{
-					break;
-				}
-
-				const auto upper = targets.upper_bound(func_addr);
-
-				if (upper == targets.begin())
-				{
-					break;
-				}
-
-				u32 new_entry = umax;
-
-				// Find the lowest target in the space in-between
-				for (auto it = std::prev(upper); it != targets.end() && it->first < start_new && new_entry > start_new; it++)
-				{
-					for (u32 target : it->second)
-					{
-						if (target >= start_new && target < next_func)
-						{
-							if (target < new_entry)
-							{
-								new_entry = target;
-
-								if (new_entry == start_new)
-								{
-									// Cannot go lower
-									break;
-								}
-							}
-						}
-					}
-				}
-
-				if (new_entry != umax && !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE }, 0, true))
-				{
-					new_entry = umax;
-				}
-
-				if (new_entry == umax)
-				{
-					new_entry = start_new;
-
-					while (new_entry < next_func && (ls[start_new / 4] < 0x3fffc || !spu_thread::is_exec_code(new_entry, { reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE }, 0, true)))
-					{
-						new_entry += 4;
+						// Clear fake LS of previous section
+						auto& sec = data_list[last_sec_idx];
+						std::memset(ls.data() + sec.vaddr / 4, 0, sec.inst_data.size() * 4);
 					}
 
-					if (new_entry >= next_func || (new_entry == next_func - 4 && ls[new_entry / 4] == 0x200000u))
+					// Initialize LS with the entire section data
+					for (u32 i = 0, pos = sec_addr; i < inst_data.size(); i++, pos += 4)
+					{
+						ls[pos / 4] = std::bit_cast<be_t<u32>>(inst_data[i]);
+					}
+
+					last_sec_idx = sec_idx;
+				}
+
+				u32 block_addr = func_addr;
+
+				std::map<u32, std::vector<u32>> targets;
+
+				// Call analyser
+				spu_program func2 = compiler->analyse(ls.data(), block_addr, &targets);
+
+				while (!func2.data.empty())
+				{
+					const u32 last_inst = std::bit_cast<be_t<u32>>(func2.data.back());
+					const u32 prog_size = ::size32(func2.data);
+
+				if (!compile_program(std::move(func2)))
+					{
+						// Likely, out of JIT memory. Signal to prevent further building.
+						fail_flag |= 1;
+						break;
+					}
+
+					result++;
+
+					const u32 start_new = block_addr + prog_size * 4;
+
+					if (start_new >= next_func || (start_new == next_func - 4 && ls[start_new / 4] == 0x200000u))
 					{
 						// Completed
 						break;
 					}
+
+					if (auto type = g_spu_itype.decode(last_inst);
+						type == spu_itype::BRSL || type == spu_itype::BRASL || type == spu_itype::BISL || type == spu_itype::SYNC)
+					{
+						if (ls[start_new / 4] && g_spu_itype.decode(ls[start_new / 4]) != spu_itype::UNK)
+						{
+							spu_log.notice("Precompiling fallthrough to 0x%05x", start_new);
+							func2 = compiler->analyse(ls.data(), start_new, &targets);
+							block_addr = start_new;
+							continue;
+						}
+					}
+
+					if (targets.empty())
+					{
+						break;
+					}
+
+					const auto upper = targets.upper_bound(func_addr);
+
+					if (upper == targets.begin())
+					{
+						break;
+					}
+
+					u32 new_entry = umax;
+
+					// Find the lowest target in the space in-between
+					for (auto it = std::prev(upper); it != targets.end() && it->first < start_new && new_entry > start_new; it++)
+					{
+						for (u32 target : it->second)
+						{
+							if (target >= start_new && target < next_func)
+							{
+								if (target < new_entry)
+								{
+									new_entry = target;
+
+									if (new_entry == start_new)
+									{
+										// Cannot go lower
+										break;
+									}
+								}
+							}
+						}
+					}
+
+					if (new_entry != umax && !spu_thread::is_exec_code(new_entry, {reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE}, 0, true))
+					{
+						new_entry = umax;
+					}
+
+					if (new_entry == umax)
+					{
+						new_entry = start_new;
+
+						while (new_entry < next_func && (ls[start_new / 4] < 0x3fffc || !spu_thread::is_exec_code(new_entry, {reinterpret_cast<const u8*>(ls.data()), SPU_LS_SIZE}, 0, true)))
+						{
+							new_entry += 4;
+						}
+
+						if (new_entry >= next_func || (new_entry == next_func - 4 && ls[new_entry / 4] == 0x200000u))
+						{
+							// Completed
+							break;
+						}
+					}
+
+					spu_log.notice("Precompiling filler space at 0x%05x (next=0x%05x)", new_entry, next_func);
+					func2 = compiler->analyse(ls.data(), new_entry, &targets);
+					block_addr = new_entry;
 				}
 
-
-				spu_log.notice("Precompiling filler space at 0x%05x (next=0x%05x)", new_entry, next_func);
-				func2 = compiler->analyse(ls.data(), new_entry, &targets);
-				block_addr = new_entry;
-			}
-
-			if (is_first_thread && !showing_progress)
-			{
-				if (!g_progr_text && !g_progr_ptotal && !g_progr_ftotal)
+				if (is_first_thread && !showing_progress)
 				{
-					showing_progress = true;
-					g_progr_pdone += pending_progress.exchange(0);
-					g_progr_ptotal += total_funcs;
+					if (!g_progr_text && !g_progr_ptotal && !g_progr_ftotal)
+					{
+						showing_progress = true;
+						g_progr_pdone += pending_progress.exchange(0);
+						g_progr_ptotal += total_funcs;
 
-					progress_dialog.emplace(get_localized_string(localized_string_id::PROGRESS_DIALOG_BUILDING_SPU_CACHE));
+						progress_dialog.emplace(get_localized_string(localized_string_id::PROGRESS_DIALOG_BUILDING_SPU_CACHE));
+					}
+				}
+				else if (showing_progress && pending_progress)
+				{
+					// Cover missing progress due to a race
+					g_progr_pdone += pending_progress.exchange(0);
 				}
 			}
-			else if (showing_progress && pending_progress)
+
+			if (showing_progress && pending_progress)
 			{
 				// Cover missing progress due to a race
 				g_progr_pdone += pending_progress.exchange(0);
 			}
-		}
 
-		if (showing_progress && pending_progress)
-		{
-			// Cover missing progress due to a race
-			g_progr_pdone += pending_progress.exchange(0);
-		}
-
-		return result;
-	});
+			return result;
+		});
 
 	u32 built_total = 0;
 
@@ -1451,108 +1424,6 @@ void spu_cache::initialize(bool build_existing_cache)
 	if ((g_cfg.core.spu_decoder == spu_decoder_type::asmjit || g_cfg.core.spu_decoder == spu_decoder_type::llvm) && !func_list.empty())
 	{
 		spu_log.success("SPU Runtime: Built %u functions.", func_list.size());
-
-		if (g_cfg.core.spu_debug)
-		{
-			std::string dump;
-			dump.reserve(10'000'000);
-
-			std::map<std::span<u8>, spu_program*, span_less<u8>> sorted;
-
-			for (auto&& f : func_list)
-			{
-				// Interpret as a byte string
-				std::span<u8> data = {reinterpret_cast<u8*>(f.data.data()), f.data.size() * sizeof(u32)};
-
-				sorted[data] = &f;
-			}
-
-			std::unordered_set<u32> depth_n;
-
-			u32 n_max = 0;
-
-			for (auto&& [bytes, f] : sorted)
-			{
-				{
-					sha1_context ctx;
-					u8 output[20];
-
-					sha1_starts(&ctx);
-					sha1_update(&ctx, bytes.data(), bytes.size());
-					sha1_finish(&ctx, output);
-					fmt::append(dump, "\n\t[%s] ", fmt::base57(output));
-				}
-
-				u32 depth_m = 0;
-
-				for (auto&& [data, f2] : sorted)
-				{
-					u32 depth = 0;
-
-					if (f2 == f)
-					{
-						continue;
-					}
-
-					for (u32 i = 0; i < bytes.size(); i++)
-					{
-						if (i < data.size() && data[i] == bytes[i])
-						{
-							depth++;
-						}
-						else
-						{
-							break;
-						}
-					}
-
-					depth_n.emplace(depth);
-					depth_m = std::max(depth, depth_m);
-				}
-
-				fmt::append(dump, "c=%06d,d=%06d ", depth_n.size(), depth_m);
-
-				bool sk = false;
-
-				for (u32 i = 0; i < std::min<usz>(bytes.size(), std::max<usz>(256, depth_m)); i++)
-				{
-					if (depth_m == i)
-					{
-						dump += '|';
-						sk = true;
-					}
-
-					fmt::append(dump, "%02x", bytes[i]);
-
-					if (i % 4 == 3)
-					{
-						if (sk)
-						{
-							sk = false;
-						}
-						else
-						{
-							dump += ' ';
-						}
-
-						dump += ' ';
-					}
-				}
-
-				fmt::append(dump, "\n\t%49s", "");
-
-				for (u32 i = 0; i < std::min<usz>(f->data.size(), std::max<usz>(64, rx::aligned_div<u32>(depth_m, 4))); i++)
-				{
-					fmt::append(dump, "%-10s", g_spu_iname.decode(std::bit_cast<be_t<u32>>(f->data[i])));
-				}
-
-				n_max = std::max(n_max, ::size32(depth_n));
-
-				depth_n.clear();
-			}
-
-			spu_log.notice("SPU Cache Dump (max_c=%d): %s", n_max, dump);
-		}
 	}
 
 	// Initialize global cache instance
@@ -1577,7 +1448,7 @@ bool spu_program::operator<(const spu_program& rhs) const noexcept
 	std::span<const u32> lhs_data(data.data() + lhs_offs, data.size() - lhs_offs);
 	std::span<const u32> rhs_data(rhs.data.data() + rhs_offs, rhs.data.size() - rhs_offs);
 
-	const int cmp0 = span_less<const u32>::compare(lhs_data, rhs_data);
+	const auto cmp0 = span_less<const u32>::compare(lhs_data, rhs_data);
 
 	if (cmp0 < 0)
 		return true;
@@ -1588,7 +1459,7 @@ bool spu_program::operator<(const spu_program& rhs) const noexcept
 	lhs_data = {data.data(), lhs_offs};
 	rhs_data = {rhs.data.data(), rhs_offs};
 
-	const int cmp1 = span_less<const u32>::compare(lhs_data, rhs_data);
+	const auto cmp1 = span_less<const u32>::compare(lhs_data, rhs_data);
 
 	if (cmp1 < 0)
 		return true;
@@ -1599,27 +1470,30 @@ bool spu_program::operator<(const spu_program& rhs) const noexcept
 	return lhs_offs < rhs_offs;
 }
 
-// SPU LLVM object-cache version. BUMP on ANY change that affects SPU codegen or the LLVM
-// toolchain (mirrors the PPU "v9-kusa" discipline): the ObjectCache loads purely by the
-// per-block module name (the SPU program hash) with NO IR/CPU/settings validation, so a
-// stale object would otherwise silently keep old codegen alive (the lr=0/SP-corruption
-// miscompile class). The per-config inputs (xfloat/block-size/dfma/reservations/dma/i8mm/
-// dotprod/cpu) are folded into the cache directory name in the ctor below; this version
-// covers everything else (the analyser, the IR emission, the LLVM build itself).
-// v3: ARM USHL for inf_shl/inf_lshr masked infinite shifts (CPUTranslator.h, upstream 18fe6eeb7)
-// changes emitted SPU shift codegen; bump so devices rebuild off the select-pattern objects that
-// LLVM can miscompile into poison for large shifts (llvm-project#200698).
-// v4: FMA/AVX default-on for all ARM64 prime cores (not just Cortex) - upstream eaebd3426; changes
-// SPU FMA/verification codegen on non-Cortex cores (e.g. Oryon). Also covers the ARM checksum/
-// cmp_rdata multiply-accumulate cluster (ed145540a/35f65c224/fa5b89941/3f27cb8ff/03647fdb4) which
-// changes the SPU block self-verification codegen. Covers any other ARM SPU codegen this build.
-static constexpr u32 SPU_OBJ_CACHE_VERSION = 4;
+#ifdef ARCH_ARM64
+// SPU LLVM object-cache version (theirs 8430a655, bumped by 5288a433/5fa7c373/64844c97).
+// BUMP on ANY change that affects SPU codegen or the LLVM toolchain (mirrors the PPU "v9-kusa"
+// discipline): the ObjectCache loads purely by the per-block module name (the SPU program hash)
+// with NO IR/CPU/settings validation, so a stale object would otherwise silently keep old codegen
+// alive (the lr=0/SP-corruption miscompile class). The per-config inputs (xfloat/block-size/dfma/
+// reservations/dma/i8mm/dotprod/cpu) are folded into the cache directory name in the ctor below;
+// this version covers everything else (the analyser, the IR emission, the LLVM build itself).
+// v2: g_timebase_offs is bound through an external symbol instead of a baked host address, so
+// cached objects no longer carry an absolute pointer into a differently-based .so.
+// v3: ARM USHL for inf_shl/inf_lshr masked infinite shifts changes emitted SPU shift codegen.
+// v4: FMA/AVX default-on for all ARM64 prime cores (not just Cortex) changes SPU FMA/verification
+// codegen on non-Cortex cores (e.g. Oryon), and the ARM checksum/cmp_rdata multiply-accumulate
+// cluster changes the SPU block self-verification codegen.
+// v5: our merged upstream v0.0.38..v0.0.42 SPU analyser/IR changes and the LLVM 22 toolchain bump
+// postdate everything above; force one rebuild off any object produced by an older tree.
+static constexpr u32 SPU_OBJ_CACHE_VERSION = 5;
 
-// Per keyed-dir file cap. A heavy game writes ~5700 .obj.gz per config in one session (Mafia
-// II ~6462); 12000 leaves headroom so normal play does not re-clear. Above this we clear the
-// whole keyed dir and let it rebuild (simplest race-free policy - the multi-threaded
-// ObjectCache writers share no index and never evict).
+// Per keyed-dir file cap. A heavy game writes ~5700 .obj.gz per config in one session (Mafia II
+// ~6462); 12000 leaves headroom so normal play does not re-clear. Above this we clear the whole
+// keyed dir and let it rebuild (simplest race-free policy - the multi-threaded ObjectCache writers
+// share no index and never evict).
 static constexpr usz SPU_OBJ_CACHE_MAX_FILES = 12000;
+#endif
 
 spu_runtime::spu_runtime()
 {
@@ -1631,29 +1505,20 @@ spu_runtime::spu_runtime()
 		return;
 	}
 
-	// Drop pre-v2 compiled objs (built before the ARM64 codegen fixes). They must
-	// not be reused - LLVM's obj cache keys only on content hash, so stale objs
-	// would silently keep the old codegen alive - and they only waste storage.
-	fs::remove_all(m_cache_path + "llvm/", true);
-
-	// Persistent SPU LLVM object cache (ARM64). Unlike upstream - which writes SPU objects
-	// only under spu_debug - we persist them on the default path because ARM64 has no
-	// spu_fast first tier, so without a cache every launch re-JITs thousands of SPU blocks
-	// (the synchronous-compile freeze storm). The ObjectCache keys ONLY on the per-block
-	// module name (the SPU program hash) with no load-time validation, so correctness
-	// depends ENTIRELY on folding every codegen input into the cache DIRECTORY name, exactly
-	// like the PPU "v9-kusa" scheme - miss one and a stale object resurrects old codegen.
+#ifdef ARCH_ARM64
+	// Persistent SPU LLVM object cache (theirs 8430a655). Unlike upstream - which writes SPU
+	// objects only under spu_debug - we persist them on the default path because ARM64 has no
+	// spu_fast first tier, so without a cache every launch re-JITs thousands of SPU blocks (the
+	// synchronous-compile freeze storm). The ObjectCache keys ONLY on the per-block module name
+	// (the SPU program hash) with no load-time validation, so correctness depends ENTIRELY on
+	// folding every codegen input into the cache DIRECTORY name, exactly like the PPU "v9-kusa"
+	// scheme - miss one and a stale object resurrects old codegen.
 	{
-		// Fold EVERY input that affects ARM64 SPU LLVM codegen into the cache-dir key. The
-		// ObjectCache loads purely by module name (the per-block program hash) with no
-		// IR/CPU/settings validation, so ANY unfolded input that changes emitted IR would
-		// silently load a stale object (the lr=0/SP-corruption miscompile class). Each entry
-		// below was confirmed by reading its use to change emitted code on the default
-		// (spu_debug=off) path that uses this cache. If a new SPU codegen input is added, fold
-		// it here AND bump SPU_OBJ_CACHE_VERSION. NOTE: rsx_fifo_accuracy/strict_rendering_mode
-		// are deliberately NOT folded - their only codegen use (the MFC PUT path) is gated
-		// behind !g_use_rtm, which is constant-true on ARM64 (no RTM/TSX), so they do not
-		// affect our codegen; folding them would only churn the cache on unrelated changes.
+		// Each entry below was confirmed by reading its use to change emitted code on the default
+		// (spu_debug=off) path that uses this cache. If a new SPU codegen input is added, fold it
+		// here AND bump SPU_OBJ_CACHE_VERSION. NOTE: rsx_fifo_accuracy/strict_rendering_mode are
+		// deliberately NOT folded - their only codegen use (the MFC PUT path) is gated behind
+		// !g_use_rtm, constant-true on ARM64, so they cannot affect our codegen.
 		sha1_context ctx;
 		u8 key[20];
 		sha1_starts(&ctx);
@@ -1669,7 +1534,7 @@ spu_runtime::spu_runtime()
 		// Multi-value config baked into / gating emitted IR.
 		const u32 xfloat = static_cast<u32>(g_cfg.core.spu_xfloat_accuracy.get()); // f64 vs approx xfloat path
 		const u32 block_size = static_cast<u32>(g_cfg.core.spu_block_size.get());  // chunk/loop structure
-		const u32 clocks_scale = static_cast<u32>(g_cfg.core.clocks_scale.get());  // SPU_RdDec fast-path (==100) gate
+		const u32 clocks_scale = static_cast<u32>(g_cfg.core.clocks_scale.get());  // SPU_RdDec fast-path (== 100) gate
 		fold(xfloat);
 		fold(block_size);
 		fold(clocks_scale);
@@ -1692,33 +1557,71 @@ spu_runtime::spu_runtime()
 			(static_cast<u32>(g_cfg.savestate.compatible_mode.get())      << 9);
 		fold(flags);
 
-		// use_tbl2 is currently pinned false on both the first attempt and the reg-scavenge
-		// retry; if that ever changes for first-attempt compiles, bump SPU_OBJ_CACHE_VERSION.
+		// NOTE (differs from theirs): we keep TBL2/TBX2 enabled on the first compile attempt and
+		// fall back to the split tbl1/tbx1 lowering only on the reg-scavenge retry, so a given
+		// block can be cached in either lowering. Both are semantically equivalent and each is a
+		// complete, self-consistent object, so this is nondeterminism, not a correctness input -
+		// it is deliberately NOT folded. If use_tbl2 ever becomes a user-visible setting, fold it.
 
-		// Device-variable codegen target, folded so a cache built on one device's HWCAP can
-		// never serve wrong-ISA objects to another (cross-device / forward-safety): the three
-		// variable ARM64 HWCAP features advertised to the SPU JIT engine's setMAttrs
-		// (JITLLVM.cpp ~812-844). sha3 is the critical one - unlike i8mm/dotprod (emitted only
-		// via gated intrinsics) +sha3 lets the AArch64 backend AUTO-SELECT eor3/bcax/xar from
-		// the plain XOR/rotate IR the SPU recompiler emits everywhere, so it changes object
-		// bytes outright (and a -sha3 core would SIGILL on them). sve/sve2 are force-pinned OFF
-		// there, so they are constant and not folded. Plus the timebase frequency baked as the
-		// RdDec divisor and the resolved LLVM CPU.
+		// Device-variable codegen target, folded so a cache built on one device's HWCAP can never
+		// serve wrong-ISA objects to another: every variable ARM64 HWCAP feature advertised to
+		// the SPU JIT engine's setMAttrs. sha3 is the critical one - unlike i8mm/dotprod/sve2
+		// (emitted only via gated intrinsics) +sha3 lets the AArch64 backend AUTO-SELECT
+		// eor3/bcax/xar from the plain XOR/rotate IR the SPU recompiler emits everywhere, so it
+		// changes object bytes outright (and a -sha3 core would SIGILL on them). sve/sve2 must be
+		// folded too: cpu_translator::initialize() gates m_use_sve_128/m_use_sve2_128 on the same
+		// HWCAP and this recompiler then emits llvm.aarch64.sve.{smullb,smullt,umullb,umullt,
+		// smlalt,umlalt,xar,fnmls} - an object built on an SVE2 core would SIGILL on one without.
+		// Plus the timebase frequency baked as the RdDec divisor and the resolved LLVM CPU.
 		const u32 hw =
 			(static_cast<u32>(utils::has_i8mm())    << 0) |
 			(static_cast<u32>(utils::has_dotprod()) << 1) |
-			(static_cast<u32>(utils::has_sha3())    << 2);
+			(static_cast<u32>(utils::has_sha3())    << 2) |
+			(static_cast<u32>(utils::has_sve())     << 3) |
+			(static_cast<u32>(utils::has_sve2())    << 4) |
+			// sve_length() is compiled with __attribute__((target("+sve"))) and executes svcntb,
+			// so it must never be evaluated on a core without SVE - short-circuit on has_sve().
+			(static_cast<u32>(utils::has_sve() ? utils::sve_length() : 0) << 5);
 		const u64 tsc_freq = utils::get_tsc_freq();
 		fold(hw);
 		fold(tsc_freq);
 
-		const std::string cpu = jit_compiler::cpu(g_cfg.core.llvm_cpu);
+		const std::string cpu = jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string());
 		sha1_update(&ctx, reinterpret_cast<const u8*>(cpu.data()), cpu.size());
 
 		sha1_finish(&ctx, key);
 
 		// Under the per-game cache dir (m_cache_path = ppu-<sha1>-<name>/) -> automatically per-game.
 		m_obj_cache_path = m_cache_path + fmt::format("spuobj-v%u-%s/", SPU_OBJ_CACHE_VERSION, fmt::base57(key, 16));
+	}
+
+	// Drop object caches left behind by an older SPU_OBJ_CACHE_VERSION. Bumping the version only
+	// stops old objects from being LOADED (they live under a differently-named keyed dir); it does
+	// not delete them. Without this, every bump orphans up to SPU_OBJ_CACHE_MAX_FILES objects per
+	// game permanently and SPU_OBJ_CACHE_MAX_FILES stops being a real storage bound - it only caps
+	// the dir currently in use. Only OTHER-version dirs are removed: same-version dirs belonging to
+	// a different config key are kept, so toggling a setting and toggling it back does not throw
+	// away a still-valid cache.
+	{
+		const std::string keep_prefix = fmt::format("spuobj-v%u-", SPU_OBJ_CACHE_VERSION);
+
+		// Collect first, delete after: fs::dir reads the directory lazily (one readdir per
+		// iteration step), so removing entries while the handle is still open is unspecified.
+		std::vector<std::string> stale;
+
+		for (auto&& entry : fs::dir(m_cache_path))
+		{
+			if (entry.is_directory && entry.name.starts_with("spuobj-v") && !entry.name.starts_with(keep_prefix))
+			{
+				stale.emplace_back(entry.name);
+			}
+		}
+
+		for (const std::string& name : stale)
+		{
+			spu_log.notice("Removing stale SPU object cache '%s'", name);
+			fs::remove_all(m_cache_path + name, true);
+		}
 	}
 
 	if (!fs::create_path(m_obj_cache_path))
@@ -1728,9 +1631,9 @@ spu_runtime::spu_runtime()
 	}
 	else
 	{
-		// Storage cap (single-threaded boot-time scan; the multi-threaded ObjectCache writers
-		// share no index and never evict). If this keyed dir exceeds the cap, clear it whole
-		// and let it rebuild - the simplest race-free bound.
+		// Storage cap (single-threaded boot-time scan; the multi-threaded ObjectCache writers share
+		// no index and never evict). If this keyed dir exceeds the cap, clear it whole and let it
+		// rebuild - the simplest race-free bound.
 		usz file_count = 0;
 
 		for (auto&& entry : fs::dir(m_obj_cache_path))
@@ -1747,12 +1650,13 @@ spu_runtime::spu_runtime()
 			fs::create_path(m_obj_cache_path);
 		}
 	}
+#endif
 
 	if (g_cfg.core.spu_debug && g_cfg.core.spu_decoder != spu_decoder_type::dynamic && g_cfg.core.spu_decoder != spu_decoder_type::_static)
 	{
-		if (!fs::create_dir(m_cache_path + "llvm-v2/"))
+		if (!fs::create_dir(m_cache_path + "llvm/"))
 		{
-			fs::remove_all(m_cache_path + "llvm-v2/", false);
+			fs::remove_all(m_cache_path + "llvm/", false);
 		}
 
 		fs::write_file(m_cache_path + "spu.log", fs::rewrite);
@@ -2340,19 +2244,17 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 
 #ifdef ARCH_ARM64
 		// Publish the freshly emitted ubertrampoline for CROSS-CORE execution before its pointer
-		// is installed into g_dispatcher below. This block has no barrier of its own and in the
-		// synchronous path is covered only incidentally by the trailing same-core ISB+DSB ISH at
-		// the compile site - which disappears once rebuild_ubertrampoline runs on the async
-		// background compile thread. dc cvau + ic ivau + dsb ish (via __clear_cache) makes the
-		// bytes visible to the SPU core's instruction fetch; the install below is a release CAS,
-		// so the code is coherent before the pointer becomes observable.
+		// is installed into g_dispatcher below (theirs 04f96830). This block emits no barrier of
+		// its own and is covered only incidentally by the trailing same-core ISB+DSB ISH at the
+		// synchronous compile site - which is gone once rebuild_ubertrampoline runs on the async
+		// background compile worker or a boot-precompile thread. dc cvau + ic ivau + dsb ish (via
+		// __clear_cache) makes the bytes visible to another core's instruction fetch; the install
+		// below is a release CAS, so the code is coherent before the pointer becomes observable.
 		//
 		// The SPU consumer reads this pointer with a plain ldr in tr_all and br's to it with NO
-		// consumer-side ISB. That is correct ONLY because jit_runtime::alloc (JITASM.cpp
-		// add_jit_memory) is a monotonic bump allocator that never reuses an executable address
-		// within an emulation run: the SPU core has never fetched wxptr, so it holds no stale
-		// instruction/BTB state to discard, and the producer's ic ivau (inner-shareable) +
-		// dsb ish ordered before the SEQ_CST dispatcher store is sufficient. If a future change
+		// consumer-side ISB. That is correct ONLY because jit_runtime::alloc is a monotonic bump
+		// allocator that never reuses an executable address within a run: the SPU core has never
+		// fetched wxptr, so it holds no stale instruction/BTB state to discard. If a future change
 		// ever recycles JIT code addresses mid-run, this would need a consumer-side ISB.
 		__builtin___clear_cache(reinterpret_cast<char*>(wxptr), reinterpret_cast<char*>(raw));
 #endif
@@ -2515,19 +2417,17 @@ spu_recompiler_base::~spu_recompiler_base()
 }
 
 #ifdef ARCH_ARM64
-// Interpret one linear run of SPU code from spu.pc with the reference C++ interpreter,
-// used by the async dispatch path to make progress while the background worker compiles
-// this block. Mirrors old_interpreter's loop (verified condition A: spu_interpreter_rt is
-// complete and already driven per-instruction in llvm mode by interp_check), but returns
-// after a single linear run instead of looping the whole thread:
+// Interpret one linear run of SPU code from spu.pc with the reference C++ interpreter, used by the
+// async dispatch path to make progress while the background worker compiles this block (theirs
+// 270dfed4). Mirrors old_interpreter's loop but returns after a single linear run instead of
+// looping the whole thread:
 //   - decode() == true  => sequential instruction completed, advance pc and continue.
-//   - decode() == false => the instruction set spu.pc itself (branch/STOP/RDCH/WRCH) - this
-//     is a real SPU boundary, the only safe place to hand back so a now-compiled successor
-//     block can take over (verified condition B: switch only at branch boundaries).
+//   - decode() == false => the instruction set spu.pc itself (branch/STOP/RDCH/WRCH) - a real SPU
+//     boundary, the only safe place to hand back so a now-compiled successor block can take over.
 //   - spu.state set     => honor check_state() exactly like the interpreter loop; final
-//     stop/interrupt disposition is left to the gateway loop (verified condition E).
-// The 0x10000 cap bounds a pathological branch-free run (a linear run cannot legitimately
-// exceed LS/4 instructions).
+//     stop/interrupt disposition is left to the gateway loop.
+// The 0x10000 cap bounds a pathological branch-free run (a linear run cannot legitimately exceed
+// LS/4 instructions).
 static void spu_interpret_linear_run(spu_thread& spu)
 {
 	const auto& table = g_fxo->get<spu_interpreter_rt>();
@@ -2629,14 +2529,17 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 		return;
 	}
 
+#if defined(__APPLE__)
+	pthread_jit_write_protect_np(false);
+#endif
 	auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
 
 #ifdef ARCH_ARM64
-	// ARM64 interpret-first async path (opt-in; default safe block size only). Hand the
-	// block to the background compile worker and interpret it now, instead of stalling the
-	// SPU thread on synchronous LLVM codegen. Gated to safe block size because mega/giga keep
-	// cross-block state (stack_mirror return cache, giga real-function registers) that the
-	// interpreter does not maintain (verified condition B).
+	// ARM64 interpret-first async path (theirs 270dfed4; opt-in, default off). Hand the block to
+	// the background compile worker and interpret it now, instead of stalling the SPU thread on
+	// synchronous LLVM codegen. Gated to safe block size because mega/giga keep cross-block state
+	// (stack_mirror return cache, giga real-function registers) that the interpreter does not
+	// maintain.
 	if (g_cfg.core.spu_async_compile && g_cfg.core.spu_block_size == spu_block_size_type::safe)
 	{
 		// Enqueue exactly once per block (dedup via spu_item::queued). add_empty creates/returns
@@ -2649,8 +2552,13 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 			g_fxo->get<spu_async_compiler_thread>().registered.push(spu_program{item->data});
 		}
 
+#if defined(__APPLE__)
+		// Nothing below this point emits code; restore W^X before running the interpreter.
+		pthread_jit_write_protect_np(true);
+#endif
+
 		// Make progress now by interpreting one linear run, then hand back to the gateway loop
-		// (verified condition E: g_escape returns cleanly, exactly like the op==0 path above).
+		// (g_escape returns cleanly, exactly like the op == 0 path above).
 		spu_interpret_linear_run(spu);
 		spu_runtime::g_escape(&spu);
 		return;
@@ -2837,7 +2745,7 @@ std::vector<u32> spu_thread::discover_functions(u32 base_addr, std::span<const u
 		}
 		else
 		{
-			inst_be = read_from_ptr<be_t<v128>>(ls.data(), i - base_addr);
+			inst_be = read_from_ptr<be_t<v128>>(ls, i - base_addr);
 		}
 
 		const v128 inst = inst_be;
@@ -3661,7 +3569,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 					limit = std::min<u32>(limit, target);
 				}
 
-				if (sl && g_cfg.core.spu_block_size != spu_block_size_type::safe)
+				if (!is_no_return && sl && g_cfg.core.spu_block_size != spu_block_size_type::safe)
 				{
 					m_ret_info.set(pos / 4 + 1, true);
 					m_entry_info.set(pos / 4 + 1, true);
@@ -3678,7 +3586,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 				u64 dabs = 0;
 				u64 drel = 0;
 
-				for (u32 i = start; i < limit; i += 4)
+				for (u32 i = start, abs_fail = 0, rel_fail = 0; i < limit; i += 4)
 				{
 					const u32 target = ls[i / 4];
 
@@ -3688,16 +3596,39 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 						break;
 					}
 
+					if (target >= SPU_LS_SIZE && target <= 0u - SPU_LS_SIZE)
+					{
+						if (g_spu_itype.decode(target) != spu_itype::UNK)
+						{
+							// End of jumptable: valid instruction
+							break;
+						}
+					}
+
 					if (target >= lsa && target < SPU_LS_SIZE)
 					{
 						// Possible jump table entry (absolute)
-						jt_abs.push_back(target);
+						if (!abs_fail)
+						{
+							jt_abs.push_back(target);
+						}
+					}
+					else
+					{
+						abs_fail++;
 					}
 
 					if (target + start >= lsa && target + start < SPU_LS_SIZE)
 					{
 						// Possible jump table entry (relative)
-						jt_rel.push_back(target + start);
+						if (!rel_fail)
+						{
+							jt_rel.push_back(target + start);
+						}
+					}
+					else
+					{
+						rel_fail++;
 					}
 
 					if (std::max(jt_abs.size(), jt_rel.size()) * 4 + start <= i)
@@ -3705,6 +3636,35 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 						// Neither type of jump table completes
 						jt_abs.clear();
 						jt_rel.clear();
+						break;
+					}
+				}
+
+				for (usz i = 0; i < jt_abs.size(); i++)
+				{
+					if (jt_abs[i] == start + jt_abs.size() * 4)
+					{
+						// If jumptable contains absolute address of code start after the jumptable itself
+						// It is likely an absolute-type jumptable
+
+						bool is_good_conclusion = true;
+
+						// For verification: make sure there is none like this in relative table
+
+						for (u32 target : jt_rel)
+						{
+							if (target == start + jt_rel.size() * 4)
+							{
+								is_good_conclusion = false;
+								break;
+							}
+						}
+						
+						if (is_good_conclusion)
+						{
+							jt_rel.clear();
+						}
+
 						break;
 					}
 				}
@@ -3819,9 +3779,9 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 				m_targets[pos].emplace_back(SPU_LS_SIZE);
 			}
 
-			if (type == spu_itype::BI || sl)
+			if (type == spu_itype::BI || sl || is_no_return)
 			{
-				if (type == spu_itype::BI || g_cfg.core.spu_block_size == spu_block_size_type::safe)
+				if (type == spu_itype::BI || g_cfg.core.spu_block_size == spu_block_size_type::safe || is_no_return)
 				{
 					m_targets[pos];
 				}
@@ -3893,7 +3853,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 			m_targets[pos].push_back(target);
 
-			if (g_cfg.core.spu_block_size != spu_block_size_type::safe)
+			if (!is_no_return && g_cfg.core.spu_block_size != spu_block_size_type::safe)
 			{
 				m_ret_info.set(pos / 4 + 1, true);
 				m_entry_info.set(pos / 4 + 1, true);
@@ -3901,7 +3861,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 				add_block(pos + 4);
 			}
 
-			if (g_cfg.core.spu_block_size == spu_block_size_type::giga && !sync)
+			if (!is_no_return && g_cfg.core.spu_block_size == spu_block_size_type::giga && !sync)
 			{
 				m_entry_info.set(target / 4, true);
 				add_block(target);
@@ -4178,6 +4138,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 		default:
 		{
+			if (type & spu_itype::zregmod)
+			{
+				break;
+			}
+
 			// Unconst
 			const u32 op_rt = type & spu_itype::_quadrop ? +op.rt4 : +op.rt;
 			m_regmod[pos / 4] = op_rt;
@@ -4404,10 +4369,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		for (auto it2 = it->second.begin(); it2 != it->second.end();)
 		{
 			// Drop targets out of range, OR pointing at a block that cleanup
-			// removed above (m_block_info cleared) - the dead in-range edges that
-			// otherwise leave dangling targets and abort the register-state walk
-			// with "Range check failed". Pruning them here keeps m_targets
-			// self-consistent.
+			// removed above (m_block_info cleared) - the dead in-range edges
+			// that otherwise leave dangling targets in m_bbs. Pruning them here
+			// keeps m_targets self-consistent. The pre-existing get_block_targets
+			// / get_block_preds guards are retained, plus a belt-and-suspenders
+			// initiate_patterns guard added below - all defense in depth.
 			if (*it2 < lsa || *it2 >= limit || !m_block_info[*it2 / 4])
 			{
 				it2 = it->second.erase(it2);
@@ -4427,9 +4393,9 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		it++;
 	}
 
-	// Export the now-pruned, self-consistent target map AFTER the prune above, so
-	// callers don't see the dead in-range edges (or stale out-of-range keys) we
-	// just removed from m_targets.
+	// Export the now-pruned, self-consistent target map AFTER the prune above,
+	// so callers don't see the dead in-range edges (or stale out-of-range keys)
+	// we just removed from m_targets.
 	if (out_target_list)
 	{
 		out_target_list->insert(m_targets.begin(), m_targets.end());
@@ -5489,6 +5455,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		u32 lsa_last_pc = SPU_LS_SIZE;                    // PC of first LSA write
 		u32 get_pc = SPU_LS_SIZE;                         // PC of GETLLAR
 		u32 put_pc = SPU_LS_SIZE;                         // PC of PUTLLC
+		u32 rdatomic_pc = SPU_LS_SIZE; // PC of last RdAtomcStat read
 		reg_state_t ls{};                                 // state of LS load/store address register
 		reg_state_t ls_offs = reg_state_t::from_value(0); // Added value to ls
 		reg_state_t lsa{};                                // state of LSA register on GETLLAR
@@ -5504,20 +5471,27 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		bool select_16_or_0_at_runtime = false;
 		bool put_active = false;   // PUTLLC happened
 		bool get_rdatomic = false; // True if MFC_RdAtomicStat was read after GETLLAR
+		u32 required_pc = SPU_LS_SIZE; // Require program to be location specific for this optimization (SPU_LS_SIZE - no requirement)
 		u32 mem_count = 0;
+		u32 break_cause = 100;
+		u32 break_pc = SPU_LS_SIZE;
 
 		// Return old state for error reporting
 		atomic16_t discard()
 		{
 			const u32 pc = lsa_pc;
 			const u32 last_pc = lsa_last_pc;
+			const u32 cause = break_cause;
+			const u32 break_pos = break_pc;
 
 			const atomic16_t old = *this;
 			*this = atomic16_t{};
 
 			// Keep some members
-			lsa_pc = pc;
-			lsa_last_pc = last_pc;
+			this->lsa_pc = pc;
+			this->lsa_last_pc = last_pc;
+			this->break_cause = cause;
+			this->break_pc = break_pos;
 			return old;
 		}
 
@@ -5527,7 +5501,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			ls_invalid = true;
 			ls_write |= write;
 
-			if (write)
+			if (ls_write)
 			{
 				return discard();
 			}
@@ -5594,7 +5568,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 	std::map<u32, atomic16_t> atomic16_all;       // RdAtomicStat location -> atomic loop optimization state
 	std::map<u32, rchcnt_loop_t> rchcnt_loop_all; // RDCH/RCHCNT location -> channel read loop optimization state
 	std::map<u32, reduced_loop_t> reduced_loop_all;
-	std::map<u32, bool> getllar_starts; // True for failed loops
+	std::map<u32, bool> getllar_starts;           // True for failed loops
 	std::map<u32, bool> run_on_block;
 	std::map<u32, bool> logged_block;
 
@@ -5673,7 +5647,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 	{
 		// Defense in depth: cleanup now prunes dead in-range edges from m_targets,
 		// but still skip a bpc whose block was removed (matches get_block_targets)
-		// so no consumer can deref a stale target (e.g. a stop-trap return).
+		// so no consumer can ever deref a stale target (e.g. a stop-trap return).
 		if (!m_block_info[bpc / 4] || !m_bbs.count(bpc))
 		{
 			return;
@@ -5741,10 +5715,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		{
 			targets_count = 0;
 
-			// Belt-and-suspenders: block_pc is a live m_bbs key only because the
-			// m_targets prune keeps dead edges out of block.targets; if that ever
-			// regressed, the ::at32 below would abort with the same "Range check
-			// failed" - bail cleanly instead of dereferencing a non-block.
+			// Belt-and-suspenders (PR #18935): block_pc is the previous block's
+			// fall-through (cond_next), a live m_bbs key only because the m_targets
+			// prune keeps dead edges out of block.targets. If that ever regressed,
+			// the ::at32 below would abort with the same "Range check failed" as
+			// the bug we fixed - bail cleanly instead of dereferencing a non-block.
 			const auto block_it = m_bbs.find(block_pc);
 			if (block_it == m_bbs.end() || !m_block_info[block_pc / 4])
 			{
@@ -5935,15 +5910,17 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		{
 			if (previous.active && likely_putllc_loop && getllar_starts.contains(previous.lsa_pc))
 			{
-				const bool is_first = !std::exchange(getllar_starts[previous.lsa_pc], true);
+				had_putllc_evaluation = true;
 
-				if (!is_first)
+				if (cause != 24)
 				{
+					atomic16->break_cause = cause; 
+					atomic16->break_pc = pos; 
 					return;
 				}
 
-				had_putllc_evaluation = true;
-
+				cause = atomic16->break_cause;
+				getllar_starts[previous.lsa_pc] = true;
 				g_fxo->get<putllc16_statistics_t>().breaking_reason[cause]++;
 
 				if (!spu_log.notice)
@@ -5951,7 +5928,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 					return;
 				}
 
-				std::string break_error = fmt::format("PUTLLC pattern breakage [%x mem=%d lsa_const=%d cause=%u] (lsa_pc=0x%x)", pos, previous.mem_count, u32{!previous.ls_offs.is_const()} * 2 + previous.lsa.is_const(), cause, previous.lsa_pc);
+				std::string break_error = fmt::format("PUTLLC pattern breakage [%x mem=%d lsa_const=%d cause=%u] (lsa_pc=0x%x)", atomic16->break_pc, previous.mem_count, u32{!previous.ls_offs.is_const()} * 2 + previous.lsa.is_const(), cause, previous.lsa_pc);
 
 				const auto values = sort_breakig_reasons(g_fxo->get<putllc16_statistics_t>().breaking_reason);
 
@@ -6053,11 +6030,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			{
 				g_fxo->get<reduced_statistics_t>().breaking_reason[cause]++;
 
-				// The dedup below feeds reduced_loop_all, which the recompiler READS to decide
-				// which loops get the reduced-loop treatment - so gating it on the log level made
-				// codegen log-dependent. Hoist it ABOVE the log gate so lowering the heavy
-				// SHA1 + full-disasm dump to trace keeps codegen byte-identical to the notice-on
-				// path the device already runs; only the (purely diagnostic) dump is skipped.
+				// The dedup write below feeds reduced_loop_all, which the recompiler READS to decide
+				// which loops get the reduced-loop treatment - gating it on the log level made
+				// codegen log-level-dependent. Hoist it ABOVE the log gate (theirs bb840a55) so
+				// lowering the heavy SHA1 + full-disasm dump to trace keeps codegen byte-identical
+				// to the notice-on path; only the purely diagnostic dump is skipped.
 				previous.active = false;
 				previous.failed = true;
 
@@ -6103,11 +6080,15 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 				}
 
 				fmt::append(tracing, " of %d failures", fail_count);
-				spu_log.notice("%s\n%s", break_error, tracing);
+
+				// trace, not notice: the enclosing gate above is `if (!spu_log.trace) return;`, so
+				// emitting this at notice level meant a notice-channel message that could only ever
+				// appear when trace was enabled. Match the gate (and the block dump below).
+				spu_log.trace("%s\n%s", break_error, tracing);
 
 				std::string block_dump;
 				this->dump(result, block_dump, previous.loop_pc, previous.loop_end + 1);
-	
+
 				spu_log.trace("SPU Block Dump:\n%s", block_dump);
 			}
 		};
@@ -6470,7 +6451,6 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 					if (!infos.empty())
 					{
 						reg_state_it.emplace_back(::at32(infos, entry_point)->pc).iterator_id = iterator_id_alloc++;
-
 						initiate_patterns(reg_state_it.back(), ::at32(infos, entry_point)->pc, true);
 					}
 				}
@@ -6781,8 +6761,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 			std::string consts;
 
-			for (auto _use : std::initializer_list<std::pair<u32, bool>>{{op.ra, m_use_ra.test(pos / 4)}
-				, {op.rb, m_use_rb.test(pos / 4)}, {op.rc, m_use_rc.test(pos / 4)}})
+			for (auto _use : std::initializer_list<std::pair<u32, bool>>{{op.ra, m_use_ra.test(pos / 4)}, {op.rb, m_use_rb.test(pos / 4)}, {op.rc, m_use_rc.test(pos / 4)}})
 			{
 				if (!_use.second)
 				{
@@ -7004,10 +6983,10 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 					rchcnt_loop->conditioned = true;
 					rchcnt_loop->branch_pc = pos;
 					rchcnt_loop->branch_target = rchcnt_loop->product_test_negate != (type == spu_itype::BRZ) ? target : next_pc;
-				}
-
-				break;
 			}
+
+			break;
+		}
 
 			[[fallthrough]];
 		}
@@ -7730,7 +7709,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			// Do nothing
 			break;
 		}
-		
+
 		case spu_itype::MTSPR:
 		{
 			break_all_patterns(99);
@@ -8084,6 +8063,8 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 							break;
 						}
 
+						atomic16->rdatomic_pc = pos;
+
 						const auto it = atomic16_all.find(pos);
 
 						if (it == atomic16_all.end())
@@ -8146,6 +8127,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 							existing.ls_invalid |= atomic16->ls_invalid;
 							existing.ls_access |= atomic16->ls_access;
 							existing.mem_count = std::max<u32>(existing.mem_count, atomic16->mem_count);
+							existing.required_pc = std::min<u32>(existing.required_pc, atomic16->required_pc);
 							existing.select_16_or_0_at_runtime |= atomic16->select_16_or_0_at_runtime;
 						}
 
@@ -8159,6 +8141,24 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 						set_const_value(op.rt, MFC_GETLLAR_SUCCESS);
 						invalidate = false;
 					}
+				}
+				else if (atomic16->break_cause != 100 && atomic16->lsa_pc != SPU_LS_SIZE)
+				{
+					const auto it = atomic16_all.find(pos);
+
+					if (it == atomic16_all.end())
+					{
+						// Ensure future failure
+						atomic16_all.emplace(pos, *atomic16);
+						break_putllc16(24, FN(x.active = true, x)(as_rvalue(*atomic16)));
+					}
+					else if (it->second.active && atomic16->break_cause != 100)
+					{
+						it->second = *atomic16;
+						break_putllc16(24, FN(x.active = true, x)(as_rvalue(*atomic16)));
+					}
+
+					atomic16->break_cause = 100;
 				}
 
 				break;
@@ -8230,6 +8230,10 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 				// Do not clear lower 16 bytes addressing because the program can move on 4-byte basis
 				const u32 offs = spu_branch_target(pos - result.lower_bound, op.si16);
+				const u32 true_offs = spu_branch_target(pos, op.si16);
+
+				// Make this optimization depend on the location of the program
+				atomic16->required_pc = result.lower_bound;
 
 				if (atomic16->lsa.is_const() && [&]()
 					{
@@ -8253,6 +8257,10 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 					}())
 				{
 					// Ignore memory access in this case
+				}
+				else if (atomic16->lsa.is_const() && !atomic16->lsa.compare_with_mask_indifference(true_offs, SPU_LS_MASK_128))
+				{
+					// Same
 				}
 				else if (atomic16->ls_invalid && is_store)
 				{
@@ -9000,7 +9008,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 	for (const auto& [pc_commited, pattern] : atomic16_all)
 	{
-		if (!pattern.active)
+		if (!pattern.active || pattern.lsa_pc >= pattern.rdatomic_pc)
 		{
 			continue;
 		}
@@ -9010,26 +9018,43 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			continue;
 		}
 
+		std::string pattern_hash;
+		{
+			sha1_context ctx;
+			u8 output[20]{};
+
+			sha1_starts(&ctx);
+			sha1_update(&ctx, reinterpret_cast<const u8*>(result.data.data()) + (pattern.lsa_pc - result.lower_bound), pattern.rdatomic_pc - pattern.lsa_pc);
+			sha1_finish(&ctx, output);
+			fmt::append(pattern_hash, "%s", fmt::base57(output));
+		}
+
+		union putllc16_or_0_info
+		{
+			u64 data;
+			bf_t<u64, 32, 18> required_pc;
+			bf_t<u64, 30, 2> type;
+			bf_t<u64, 29, 1> runtime16_select;
+			bf_t<u64, 28, 1> no_notify;
+			bf_t<u64, 18, 8> reg;
+			bf_t<u64, 0, 18> off18;
+			bf_t<u64, 0, 8> reg2;
+		} value{};
+
 		auto& stats = g_fxo->get<putllc16_statistics_t>();
 		had_putllc_evaluation = true;
 
 		if (!pattern.ls_write)
 		{
-			spu_log.success("PUTLLC0 Pattern Detected! (put_pc=0x%x, %s) (putllc0=%d, putllc16+0=%d, all=%d)", pattern.put_pc, func_hash, ++stats.nowrite, ++stats.single, +stats.all);
-			add_pattern(false, inst_attr::putllc0, pattern.put_pc - lsa);
+			if (pattern.required_pc != SPU_LS_SIZE)
+			{
+				value.required_pc = pattern.required_pc;
+			}
+
+			// spu_log.success("PUTLLC0 Pattern Detected! (put_pc=0x%x, %s) (putllc0=%d, putllc16+0=%d, all=%d)", pattern.put_pc, func_hash, ++stats.nowrite, ++stats.single, +stats.all);
+			// add_pattern(inst_attr::putllc0, pattern.put_pc - lsa, value.data);
 			continue;
 		}
-
-		union putllc16_info
-		{
-			u32 data;
-			bf_t<u32, 30, 2> type;
-			bf_t<u32, 29, 1> runtime16_select;
-			bf_t<u32, 28, 1> no_notify;
-			bf_t<u32, 18, 8> reg;
-			bf_t<u32, 0, 18> off18;
-			bf_t<u32, 0, 8> reg2;
-		} value{};
 
 		enum : u32
 		{
@@ -9061,6 +9086,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		value.runtime16_select = pattern.select_16_or_0_at_runtime;
 		value.reg = s_reg_max;
 
+		if (pattern.required_pc != SPU_LS_SIZE)
+		{
+			value.required_pc = pattern.required_pc;
+		}
+
 		if (pattern.ls.is_const())
 		{
 			ensure(pattern.reg == s_reg_max && pattern.reg2 == s_reg_max && pattern.ls_offs.is_const(), "Unexpected register usage");
@@ -9089,15 +9119,34 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			value.reg2 = pattern.reg2;
 		}
 
+		bool allow_pattern = true;
+
 		if (g_cfg.core.spu_accurate_reservations)
 		{
-			// Because enabling it is a hack, as it turns out
-			continue;
+			// The problem with PUTLLC16 optimization, that it is in theory correct at the bounds of the spu function.
+			// But if the SPU code reuses the cache line data observed, it is not truly atomic.
+			// So we may enable it only for known cases where SPU atomic data is not used after the function leaves.
+
+			// So the two options are:
+
+			// 1. Atomic compare exchange 16 bytes operation. (rest of data is not read) -> good for RPCS3 to optimize.
+			// 2. Fetch 128 bytes (read them later), modify only 16 bytes. -> Bad for RPCS3 to optimize.
+
+			// This difference cannot be known at analyzer time but from observing callers.
+			static constexpr std::initializer_list<std::string_view> allowed_patterns =
+			{
+				"disabled_620oYSe8uQqq9eTkhWfMqoEXX0us"sv, // CellSpurs JobChain acquire pattern (disabled for now)
+			};
+
+			allow_pattern = std::any_of(allowed_patterns.begin(), allowed_patterns.end(), FN(pattern_hash == x));
 		}
 
-		add_pattern(false, inst_attr::putllc16, pattern.put_pc - result.entry_point, value.data);
+		if (allow_pattern)
+		{
+			add_pattern(inst_attr::putllc16, pattern.put_pc - result.entry_point, value.data);
+		}
 
-		spu_log.success("PUTLLC16 Pattern Detected! (mem_count=%d, put_pc=0x%x, pc_rel=%d, offset=0x%x, const=%u, two_regs=%d, reg=%u, runtime=%d, 0x%x-%s) (putllc0=%d, putllc16+0=%d, all=%d)", pattern.mem_count, pattern.put_pc, value.type == v_relative, value.off18, value.type == v_const, value.type == v_reg2, value.reg, value.runtime16_select, entry_point, func_hash, +stats.nowrite, ++stats.single, +stats.all);
+		spu_log.success("PUTLLC16 Pattern Detected! (mem_count=%d, put_pc=0x%x, pc_rel=%d, offset=0x%x, const=%u, two_regs=%d, reg=%u, runtime=%d, 0x%x-%s, pattern-hash=%s) (putllc0=%d, putllc16+0=%d, all=%d)", pattern.mem_count, pattern.put_pc, value.type == v_relative, value.off18, value.type == v_const, value.type == v_reg2, value.reg, value.runtime16_select, entry_point, func_hash, pattern_hash, +stats.nowrite, ++stats.single, +stats.all);
 	}
 
 	for (const auto& [read_pc, pattern] : rchcnt_loop_all)
@@ -9115,7 +9164,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 		if (inst_attr attr = m_inst_attrs[(read_pc - entry_point) / 4]; attr == inst_attr::none)
 		{
-			add_pattern(false, inst_attr::rchcnt_loop, read_pc - result.entry_point);
+			add_pattern(inst_attr::rchcnt_loop, read_pc - result.entry_point, 0);
 
 			spu_log.error("Channel Loop Pattern Detected! Report to developers! (read_pc=0x%x, branch_pc=0x%x, branch_target=0x%x, 0x%x-%s)", read_pc, pattern.branch_pc, pattern.branch_target, entry_point, func_hash);
 		}
@@ -9135,6 +9184,11 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 		if (inst_attr attr = m_inst_attrs[(loop_pc - entry_point) / 4]; attr == inst_attr::none)
 		{
 			stats.single++;
+
+			if (true)
+			{
+				continue;
+			}
 
 			add_pattern(inst_attr::reduced_loop, loop_pc - result.entry_point, 0, std::make_shared<reduced_loop_t>(pattern));
 
@@ -9235,6 +9289,7 @@ void spu_recompiler_base::dump(const spu_program& result, std::string& out, u32 
 	SPUDisAsm dis_asm(cpu_disasm_mode::dump, reinterpret_cast<const u8*>(result.data.data()), result.lower_bound);
 
 	std::string hash;
+	be_t<u64> hash_start{};
 
 	if (!result.data.empty())
 	{
@@ -9245,6 +9300,7 @@ void spu_recompiler_base::dump(const spu_program& result, std::string& out, u32 
 		sha1_update(&ctx, reinterpret_cast<const u8*>(result.data.data()), result.data.size() * 4);
 		sha1_finish(&ctx, output);
 		fmt::append(hash, "%s", fmt::base57(output));
+		std::memcpy(&hash_start, output, sizeof(hash_start));
 	}
 	else
 	{
@@ -9253,7 +9309,7 @@ void spu_recompiler_base::dump(const spu_program& result, std::string& out, u32 
 
 	if (block_min == 0)
 	{
-		fmt::append(out, "========== SPU BLOCK 0x%05x (size %u, %s) ==========\n\n", result.entry_point, result.data.size(), hash);
+	fmt::append(out, "========== SPU BLOCK 0x%05x (size %u, %s) ==========\n\n", result.entry_point, result.data.size(), hash);
 	}
 
 	for (auto& bb : m_bbs)
@@ -9265,7 +9321,7 @@ void spu_recompiler_base::dump(const spu_program& result, std::string& out, u32 
 
 		if (m_block_info[bb.first / 4])
 		{
-			fmt::append(out, "A: [0x%05x] %s\n", bb.first, m_entry_info[bb.first / 4] ? (m_ret_info[bb.first / 4] ? "Chunk" : "Entry") : "Block");
+			fmt::append(out, "A: [0x%05x] %s  [%s]\n", bb.first, m_entry_info[bb.first / 4] ? (m_ret_info[bb.first / 4] ? "Chunk" : "Entry") : "Block", spu_block_hash{(hash_start & -65536) + bb.first / 4});
 
 			fmt::append(out, "\t F: 0x%05x\n", bb.second.func);
 
@@ -9353,7 +9409,7 @@ struct spu_llvm_worker
 					set_relax_flag = false;
 				}
 
-				thread_ctrl::wait_on(registered.get_wait_atomic(), 0);
+			thread_ctrl::wait_on(registered.get_wait_atomic(), 0);
 				slice = registered.pop_all();
 			}())
 		{
@@ -9761,13 +9817,13 @@ struct spu_fast : public spu_recompiler_base
 		*raw++ = 0x49;
 		*raw++ = 0x89;
 		*raw++ = 0x45;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, block_hash)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, block_hash));
 
 		// Load PC: mov eax, [r13 + spu_thread::pc]
 		*raw++ = 0x41;
 		*raw++ = 0x8b;
 		*raw++ = 0x45;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, pc)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, pc));
 
 		// Get LS address starting from PC: lea rcx, [rbp + rax]
 		*raw++ = 0x48;
@@ -9831,12 +9887,12 @@ struct spu_fast : public spu_recompiler_base
 		*raw++ = 0x48;
 		*raw++ = 0x8d;
 		*raw++ = 0x7d;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, gpr)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, gpr));
 
 		// Save base pc: mov [rbp + spu_thread::base_pc], eax
 		*raw++ = 0x89;
 		*raw++ = 0x45;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, base_pc)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, base_pc));
 
 		// inc block_counter
 		*raw++ = 0x48;
@@ -9865,7 +9921,7 @@ struct spu_fast : public spu_recompiler_base
 				*raw++ = 0x44;
 				*raw++ = 0x89;
 				*raw++ = 0x65;
-				*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, pc)));
+				*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, pc));
 
 				// Epilogue: add rsp,0x28
 				*raw++ = 0x48;
@@ -9964,7 +10020,7 @@ struct spu_fast : public spu_recompiler_base
 		// sub eax, [rbp + spu_thread::base_pc]
 		*raw++ = 0x2b;
 		*raw++ = 0x45;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, base_pc)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, base_pc));
 
 		// cmp eax, (0 - size)
 		*raw++ = 0x3d;
@@ -9999,7 +10055,7 @@ struct spu_fast : public spu_recompiler_base
 		*raw++ = 0x44;
 		*raw++ = 0x89;
 		*raw++ = 0x65;
-		*raw++ = ::narrow<s8>(static_cast<s32>(OFFSET_OF(spu_thread, pc)));
+		*raw++ = ::narrow<s8>(OFFSET_OF(spu_thread, pc));
 
 		// Epilogue: add rsp,0x28 ; ret
 		*raw++ = 0x48;
@@ -10254,8 +10310,9 @@ std::array<reg_state_t, s_reg_max>& block_reg_info::evaluate_start_state(const s
 				{
 					// TODO: The true maximum occurence count need to depend on the amount of branching-outs passed through
 					// Currently allow 2 for short-term code and 1 for long-term code
+					// Ignore large jumptables as well
 					const bool loop_terminator_detected = std::count(been_there.begin(), been_there.end(), prev_pc) >= (qi < 20 ? 2u : 1u);
-					const bool avoid_extensive_analysis = qi >= (extensive_evaluation ? 22 : 16);
+					const bool avoid_extensive_analysis = qi >= (extensive_evaluation ? 22 : 16) || it->state_prev.size() >= 8;
 
 					if (!loop_terminator_detected && !avoid_extensive_analysis)
 					{
@@ -10294,24 +10351,14 @@ std::array<reg_state_t, s_reg_max>& block_reg_info::evaluate_start_state(const s
 	return walkby_state;
 }
 
-void spu_recompiler_base::add_pattern(bool fill_all, inst_attr attr, u32 start, u32 end)
-{
-	if (end == umax)
-	{
-		end = start;
-	}
-
-	m_patterns[start] = pattern_info{utils::address_range32::start_end(start, end)};
-
-	for (u32 i = start; i <= (fill_all ? end : start); i += 4)
-	{
-		m_inst_attrs[i / 4] = attr;
-	}
-}
-
 void spu_recompiler_base::add_pattern(inst_attr attr, u32 start, u64 info, std::shared_ptr<void> info_ptr)
 {
-	m_patterns[start] = pattern_info{{}, info, info_ptr};
+	if (m_inst_attrs[start / 4] != inst_attr::none)
+	{
+		fmt::throw_exception("SPU Pattern is occupied! (start=0x%x)", start);
+	}
+
+	m_patterns[start] = pattern_info{info, info_ptr};
 	m_inst_attrs[start / 4] = attr;
 }
 

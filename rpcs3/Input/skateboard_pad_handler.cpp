@@ -112,7 +112,7 @@ void skateboard_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, skateboard_key_codes::none);
 	cfg->start.def = ::at32(button_list, skateboard_key_codes::start);
 	cfg->select.def = ::at32(button_list, skateboard_key_codes::select);
-	cfg->ps.def = ::at32(button_list, skateboard_key_codes::ps);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{skateboard_key_codes::ps}, {skateboard_key_codes::start, skateboard_key_codes::select}});
 	cfg->square.def = ::at32(button_list, skateboard_key_codes::square);
 	cfg->cross.def = ::at32(button_list, skateboard_key_codes::cross);
 	cfg->circle.def = ::at32(button_list, skateboard_key_codes::circle);
@@ -177,7 +177,7 @@ void skateboard_pad_handler::check_add_device(hid_device* hidDevice, hid_enumera
 	if (hid_set_nonblocking(hidDevice, 1) == -1)
 	{
 		skateboard_log.error("check_add_device: hid_set_nonblocking failed! Reason: %s", hid_error(hidDevice));
-		hid_close(hidDevice);
+		HidDevice::close(hidDevice);
 		return;
 	}
 
@@ -239,22 +239,16 @@ PadHandlerBase::connection skateboard_pad_handler::update_connection(const std::
 	if (dev->hidDevice == nullptr)
 	{
 		// try to reconnect
-#ifdef ANDROID
-		if (hid_device* hid_dev = hid_libusb_wrap_sys_device(dev->path, -1))
-#else
-		if (hid_device* hid_dev = hid_open_path(dev->path.c_str()))
-#endif
+		if (hid_device* hid_dev = dev->open())
 		{
 			if (hid_set_nonblocking(hid_dev, 1) == -1)
 			{
 				skateboard_log.error("Reconnecting Device %s: hid_set_nonblocking failed with error %s", dev->path, hid_error(hid_dev));
 			}
-			dev->hidDevice = hid_dev;
 		}
 		else
 		{
 			// nope, not there
-			skateboard_log.error("Device %s: disconnected", dev->path);
 			return connection::disconnected;
 		}
 	}
@@ -278,9 +272,9 @@ PadHandlerBase::connection skateboard_pad_handler::update_connection(const std::
 	return connection::connected;
 }
 
-std::unordered_map<u64, u16> skateboard_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> skateboard_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	std::unordered_map<u64, u16> key_buf;
+	std::unordered_map<u32, u16> key_buf;
 	skateboard_device* dev = static_cast<skateboard_device*>(device.get());
 	if (!dev)
 		return key_buf;
@@ -334,7 +328,7 @@ void skateboard_pad_handler::get_extended_info(const pad_ensemble& binding)
 	set_raw_orientation(*pad);
 }
 
-pad_preview_values skateboard_pad_handler::get_preview_values(const std::unordered_map<u64, u16>& /*data*/)
+pad_preview_values skateboard_pad_handler::get_preview_values(const std::unordered_map<u32, u16>& /*data*/, const std::vector<std::string>& /*buttons*/)
 {
 	// There is no proper user interface for skateboard values yet
 	return {};

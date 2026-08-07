@@ -67,7 +67,7 @@ public:
 			error = true;
 			return static_cast<T>(0);
 		}
-		T res = read_from_ptr<le_t<T>>(&vec[i]);
+		T res = read_from_ptr<le_t<T>>(vec, i);
 		i += sizeof(T);
 		return res;
 	}
@@ -166,7 +166,7 @@ public:
 			vec.push_back(*(reinterpret_cast<u8*>(&value) + index));
 		}
 	}
-	void insert_string(const std::string& str) const
+	void insert_string(std::string_view str) const
 	{
 		std::copy(str.begin(), str.end(), std::back_inserter(vec));
 		vec.push_back(0);
@@ -174,13 +174,13 @@ public:
 
 protected:
 	std::vector<u8>& vec;
-	usz i      = 0;
+	usz i = 0;
 	bool error = false;
 };
 
 namespace rpcn
 {
-	using friend_cb_func  = void (*)(void* param, NotificationType ntype, const std::string& username, bool status);
+	using friend_cb_func = void (*)(void* param, NotificationType ntype, const std::string& username, bool status);
 	using message_cb_func = void (*)(void* param, const shared_ptr<std::pair<std::string, message_data>> new_msg, u64 msg_id);
 
 	struct friend_online_data
@@ -214,7 +214,8 @@ namespace rpcn
 	std::string rpcn_state_to_string(rpcn::rpcn_state state);
 	void print_error(rpcn::CommandType command, rpcn::ErrorType error);
 
-	// Client-side credential helpers (the Android fork has no Qt settings dialog).
+	// Client-side credential helpers (the Android build has no Qt settings dialog, which is
+	// where upstream derives the password before it ever reaches the server).
 	std::string derive_password(std::string_view user_password);
 	bool validate_token(std::string_view token);
 
@@ -224,10 +225,10 @@ namespace rpcn
 		static inline std::weak_ptr<rpcn_client> instance;
 		static inline shared_mutex inst_mutex;
 
-		atomic_t<bool> connected    = false;
+		atomic_t<bool> connected = false;
 		atomic_t<bool> authentified = false;
-		atomic_t<bool> want_conn    = false;
-		atomic_t<bool> want_auth    = false;
+		atomic_t<bool> want_conn = false;
+		atomic_t<bool> want_auth = false;
 		u32 binding_address = 0;
 		std::binary_semaphore sem_connected, sem_authentified;
 		std::mutex mutex_connected, mutex_authentified;
@@ -281,13 +282,13 @@ namespace rpcn
 		bool send_packet(const std::vector<u8>& packet);
 
 	private:
-		bool connect(const std::string& host);
-		bool login(const std::string& npid, const std::string& password, const std::string& token);
+		bool connect(std::string_view host);
+		bool login(std::string_view npid, std::string_view password, std::string_view token);
 		void disconnect();
 
 	public:
 		~rpcn_client();
-		rpcn_client(rpcn_client& other)    = delete;
+		rpcn_client(rpcn_client& other) = delete;
 		void operator=(const rpcn_client&) = delete;
 		static std::shared_ptr<rpcn_client> get_instance(u32 binding_address, bool check_config = false);
 		// Get-only accessor: returns the live singleton if one exists, or nullptr. Unlike
@@ -308,12 +309,12 @@ namespace rpcn
 		void remove_friend_cb(friend_cb_func, void* cb_param);
 
 		ErrorType create_user(std::string_view npid, std::string_view password, std::string_view online_name, std::string_view avatar_url, std::string_view email);
-		ErrorType resend_token(const std::string& npid, const std::string& password);
+		ErrorType resend_token(std::string_view npid, std::string_view password);
 		ErrorType send_reset_token(std::string_view npid, std::string_view email);
 		ErrorType reset_password(std::string_view npid, std::string_view token, std::string_view password);
 		ErrorType delete_account();
-		std::optional<ErrorType> add_friend(const std::string& friend_username);
-		bool remove_friend(const std::string& friend_username);
+		std::optional<ErrorType> add_friend(std::string_view friend_username);
+		bool remove_friend(std::string_view friend_username);
 
 		u32 get_num_friends() const;
 		u32 get_num_blocks() const;
@@ -360,15 +361,15 @@ namespace rpcn
 		bool set_userinfo(u32 req_id, const SceNpCommunicationId& communication_id, const SceNpMatching2SetUserInfoRequest* req);
 		bool ping_room_owner(u32 req_id, const SceNpCommunicationId& communication_id, u64 room_id);
 		bool send_room_message(u32 req_id, const SceNpCommunicationId& communication_id, const SceNpMatching2SendRoomMessageRequest* req);
-		bool req_sign_infos(u32 req_id, const std::string& npid);
-		bool req_ticket(u32 req_id, const std::string& service_id, const std::vector<u8>& cookie);
+		bool req_sign_infos(u32 req_id, std::string_view npid);
+		bool req_ticket(u32 req_id, std::string_view service_id, const std::vector<u8>& cookie);
 		bool send_message(const message_data& msg_data, const std::set<std::string>& npids);
 		bool get_board_infos(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScoreBoardId board_id);
 		bool record_score(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScoreBoardId board_id, SceNpScorePcId char_id, SceNpScoreValue score, const std::optional<std::string> comment, const std::optional<std::vector<u8>> score_data);
 		bool get_score_range(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScoreBoardId board_id, u32 start_rank, u32 num_rank, bool with_comment, bool with_gameinfo);
 		bool get_score_npid(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScoreBoardId board_id, const std::vector<std::pair<SceNpId, s32>>& npids, bool with_comment, bool with_gameinfo);
 		bool get_score_friend(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScoreBoardId board_id, bool include_self, bool with_comment, bool with_gameinfo, u32 max_entries);
-		bool record_score_data(u32 req_id, const SceNpCommunicationId& communication_id,  SceNpScorePcId pc_id, SceNpScoreBoardId board_id, s64 score, const std::vector<u8>& score_data);
+		bool record_score_data(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScorePcId pc_id, SceNpScoreBoardId board_id, s64 score, const std::vector<u8>& score_data);
 		bool get_score_data(u32 req_id, const SceNpCommunicationId& communication_id, SceNpScorePcId pc_id, SceNpScoreBoardId board_id, const SceNpId& npid);
 		bool tus_set_multislot_variable(u32 req_id, const SceNpCommunicationId& communication_id, const SceNpOnlineId& targetNpId, vm::cptr<SceNpTusSlotId> slotIdArray, vm::cptr<s64> variableArray, s32 arrayNum, bool vuser);
 		bool tus_get_multislot_variable(u32 req_id, const SceNpCommunicationId& communication_id, const SceNpOnlineId& targetNpId, vm::cptr<SceNpTusSlotId> slotIdArray, s32 arrayNum, bool vuser);
@@ -410,22 +411,22 @@ namespace rpcn
 
 		std::vector<u8> forge_request(rpcn::CommandType command, u64 packet_id, const std::vector<u8>& data) const;
 		bool forge_send(rpcn::CommandType command, u64 packet_id, const std::vector<u8>& data);
-		bool forge_request_with_com_id(const std::string& serialized_data, const SceNpCommunicationId& com_id, CommandType command, u64 packet_id);
-		bool forge_request_with_data(const std::string& serialized_data, CommandType command, u64 packet_id);
+		bool forge_request_with_com_id(std::string_view serialized_data, const SceNpCommunicationId& com_id, CommandType command, u64 packet_id);
+		bool forge_request_with_data(std::string_view serialized_data, CommandType command, u64 packet_id);
 		bool forge_send_reply(rpcn::CommandType command, u64 packet_id, const std::vector<u8>& data, std::vector<u8>& reply_data);
 
-		bool error_and_disconnect(const std::string& error_mgs);
-		bool error_and_disconnect_notice(const std::string& error_msg);
+		bool error_and_disconnect(std::string_view error_mgs);
+		bool error_and_disconnect_notice(std::string_view error_msg);
 
 		std::string get_wolfssl_error(WOLFSSL* wssl, int error) const;
 
 	private:
 		WOLFSSL_CTX* wssl_ctx = nullptr;
-		WOLFSSL* read_wssl    = nullptr;
-		WOLFSSL* write_wssl   = nullptr;
+		WOLFSSL* read_wssl = nullptr;
+		WOLFSSL* write_wssl = nullptr;
 
 		atomic_t<bool> server_info_received = false;
-		u32 received_version                = 0;
+		u32 received_version = 0;
 
 		sockaddr_in addr_rpcn{};
 		sockaddr_in addr_rpcn_udp_ipv4{};
@@ -454,7 +455,7 @@ namespace rpcn
 
 			bool operator<(const message_cb_t& other) const
 			{
-				const void* void_cb_func       = reinterpret_cast<const void*>(cb_func);
+				const void* void_cb_func = reinterpret_cast<const void*>(cb_func);
 				const void* void_other_cb_func = reinterpret_cast<const void*>(other.cb_func);
 				return (void_cb_func < void_other_cb_func) || ((!(void_other_cb_func < void_cb_func)) && (cb_param < other.cb_param));
 			}
@@ -462,9 +463,9 @@ namespace rpcn
 		mutable shared_mutex mutex_messages;
 		std::set<message_cb_t> message_cbs;
 		std::unordered_map<u64, shared_ptr<std::pair<std::string, message_data>>> messages; // msg id / (sender / message)
-		std::set<u64> active_messages;                                                           // msg id of messages that have not been discarded
-		std::vector<u64> new_messages;                                                           // list of msg_id used to inform np_handler of new messages
-		u64 message_counter = 3;                                                                 // id counter
+		std::set<u64> active_messages;                                                      // msg id of messages that have not been discarded
+		std::vector<u64> new_messages;                                                      // list of msg_id used to inform np_handler of new messages
+		u64 message_counter = 3;                                                            // id counter
 
 		std::string online_name{};
 		std::string avatar_url{};

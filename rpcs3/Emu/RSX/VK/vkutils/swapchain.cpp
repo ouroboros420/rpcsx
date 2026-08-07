@@ -272,55 +272,62 @@ namespace vk
 
 		u32 nb_available_modes = 0;
 		{
-			const VkResult _pm_res = VK_GET_SYMBOL(vkGetPhysicalDeviceSurfacePresentModesKHR)(gpu, m_surface, &nb_available_modes, nullptr);
+			const VkResult present_mode_result = VK_GET_SYMBOL(vkGetPhysicalDeviceSurfacePresentModesKHR)(gpu, m_surface, &nb_available_modes, nullptr);
 #ifdef ANDROID
 			// A surface bounce (app backgrounded during the boot/compile splash) makes this query
 			// return SURFACE_LOST; treat it as recoverable (mirrors the capabilities guard above) -
-			// bail so the per-frame reinitialize_swapchain() path can recreate the surface.
-			if (_pm_res == VK_ERROR_SURFACE_LOST_KHR)
+			// bail so the per-frame reinitialize_swapchain() path can recreate the surface. 40b4b5f60682.
+			if (present_mode_result == VK_ERROR_SURFACE_LOST_KHR)
 			{
 				rsx_log.warning("Swapchain: surface lost while querying present mode count; will recreate.");
 				return false;
 			}
 #endif
-			CHECK_RESULT(_pm_res);
+			CHECK_RESULT(present_mode_result);
 		}
 
 		std::vector<VkPresentModeKHR> present_modes(nb_available_modes);
 		{
-			const VkResult _pm_res = VK_GET_SYMBOL(vkGetPhysicalDeviceSurfacePresentModesKHR)(gpu, m_surface, &nb_available_modes, present_modes.data());
+			const VkResult present_mode_result = VK_GET_SYMBOL(vkGetPhysicalDeviceSurfacePresentModesKHR)(gpu, m_surface, &nb_available_modes, present_modes.data());
 #ifdef ANDROID
-			if (_pm_res == VK_ERROR_SURFACE_LOST_KHR)
+			if (present_mode_result == VK_ERROR_SURFACE_LOST_KHR)
 			{
 				rsx_log.warning("Swapchain: surface lost while querying present modes; will recreate.");
 				return false;
 			}
 #endif
-			CHECK_RESULT(_pm_res);
+			CHECK_RESULT(present_mode_result);
 		}
 
 		VkPresentModeKHR swapchain_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 		std::vector<VkPresentModeKHR> preferred_modes;
 
-		// Android battery-saver forces FIFO (cap the GPU to the display refresh)
-		// regardless of the saved config.
-		if (!g_cfg.video.vk.force_fifo && !rpcs3::utils::get_power_save_mode())
+		if (rpcs3::utils::get_power_save_mode())
 		{
-			// List of preferred modes in decreasing desirability
-			// NOTE: Always picks "triple-buffered vsync" types if possible
-			if (!g_cfg.video.vsync)
-			{
-				preferred_modes = {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR};
-			}
-		}
-		else if (rpcs3::utils::get_power_save_mode())
-		{
-			// Battery-saver still vsyncs (caps the GPU to the display refresh) but
-			// prefers FIFO_RELAXED: a frame that finishes slightly late tears
-			// instead of slipping a whole refresh interval, which smooths the
-			// 30fps-on-60/90/120Hz judder felt as "stutter here and there". Falls
-			// back to plain FIFO if the driver does not support relaxed.
+			// Battery-saver overrides the saved vsync config and caps the GPU to the
+			// display refresh (101810385680). It prefers FIFO_RELAXED: a frame that
+			// finishes slightly late tears instead of slipping a whole refresh
+			// interval, which smooths the 30fps-on-60/90/120Hz judder felt as
+			// "stutter here and there". Falls back to plain FIFO if the driver does
+			// not support relaxed.
 			preferred_modes = {VK_PRESENT_MODE_FIFO_RELAXED_KHR};
+		}
+		else
+		{
+			switch (g_cfg.video.vsync)
+			{
+			case vsync_mode::off:
+				preferred_modes = {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR};
+				break;
+			case vsync_mode::adaptive:
+				preferred_modes = { VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR };
+				break;
+			case vsync_mode::full:
+			default:
+				// FIFO is guaranteed to be supported, no need to go through a preference chain
+				preferred_modes = {};
+				break;
+			}
 		}
 
 		bool mode_found = false;
@@ -402,16 +409,16 @@ namespace vk
 		// during the boot/compile splash) is recoverable. Bail BEFORE destroying old_swapchain or
 		// calling init_swapchain_images (which would throw on zero images); keep old_swapchain as
 		// the live handle so create()'s unconditional destroy reclaims it on the recovery pass. Any
-		// other create failure stays fatal.
+		// other create failure stays fatal. 40b4b5f60682.
 		{
-			const VkResult _sc_res = _vkCreateSwapchainKHR(dev, &swap_info, nullptr, &m_vk_swapchain);
-			if (_sc_res == VK_ERROR_SURFACE_LOST_KHR)
+			const VkResult create_result = _vkCreateSwapchainKHR(dev, &swap_info, nullptr, &m_vk_swapchain);
+			if (create_result == VK_ERROR_SURFACE_LOST_KHR)
 			{
 				rsx_log.warning("Swapchain: surface lost during vkCreateSwapchainKHR; will recreate.");
 				m_vk_swapchain = old_swapchain;
 				return false;
 			}
-			CHECK_RESULT(_sc_res);
+			CHECK_RESULT(create_result);
 		}
 #else
 		_vkCreateSwapchainKHR(dev, &swap_info, nullptr, &m_vk_swapchain);

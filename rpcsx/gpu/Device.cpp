@@ -26,6 +26,7 @@
 #include <stop_token>
 #include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -559,8 +560,8 @@ void Device::mapProcess(std::uint32_t pid, int vmId) {
     rx::dieIf(
         errc != orbis::ErrorCode{},
         "failed to map process {} memory, address {}-{}, type {}, vmId {}",
-        (int)pid, memory.getPointer(slot.beginAddress()),
-        memory.getPointer(slot.endAddress()), slot->memoryType, vmId);
+          (int)pid, memory.getPointer(slot.beginAddress()),
+          memory.getPointer(slot.endAddress()), slot->memoryType, vmId);
 
     std::println(stderr, "map process {} memory, address {}-{}, vmId {}",
                  (int)pid, memory.getVirtualAddress(slot.beginAddress()),

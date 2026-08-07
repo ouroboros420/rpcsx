@@ -134,15 +134,15 @@ public:
 	}
 	KbData& GetData(const u32 keyboard)
 	{
-		return m_keyboards[keyboard].m_data;
+		return ::at32(m_keyboards, keyboard).m_data;
 	}
 	KbExtraData& GetExtraData(const u32 keyboard)
 	{
-		return m_keyboards[keyboard].m_extra_data;
+		return ::at32(m_keyboards, keyboard).m_extra_data;
 	}
 	KbConfig& GetConfig(const u32 keyboard)
 	{
-		return m_keyboards[keyboard].m_config;
+		return ::at32(m_keyboards, keyboard).m_config;
 	}
 	identifier id() const
 	{

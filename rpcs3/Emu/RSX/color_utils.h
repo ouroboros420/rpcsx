@@ -85,6 +85,34 @@ namespace rsx
 			return remapped;
 		}
 
+
+		/**
+		 * Remap color channel bits based on a remap vector. The output is a normalized selector of each color channel with spread.
+		 * The input bits are an action selector. e.g a mask of channels that need to be interpreted as SNORM or BX2
+		 * The output is a final mask on which post-sampling channels the operation applies to.
+		 * Examples:
+		 * - If we have remap as [ 1 R R R ] and mask of R (0010) then we get 1110. Remapper spreads 'R' action to all channels where it should apply.
+		 */
+		u32 shuffle_mask_bits(u32 bits) const
+		{
+			if (!bits || encoded == RSX_TEXTURE_REMAP_IDENTITY) [[likely]]
+			{
+				return bits;
+			}
+
+			u32 result = 0;
+			for (u8 channel = 0; channel < 4; ++channel)
+			{
+				if (control_map[channel] != CELL_GCM_TEXTURE_REMAP_REMAP ||    // Channel not read from input
+					(bits & (1u << channel_map[channel])) == 0)                // Input channel is not enabled in the mask
+				{
+					continue;
+				}
+				result |= (1u << channel);
+			}
+			return result;
+		}
+
 		template <typename T>
 			requires std::is_integral_v<T> || std::is_floating_point_v<T>
 		std::array<T, 4> remap(const std::array<T, 4>& components) const
@@ -98,28 +126,6 @@ namespace rsx
 			const std::array<T, 4> values = {components.a, components.r, components.g, components.b};
 			const auto shuffled = remap(values, T{0}, T{1});
 			return color4_base<T>(shuffled[1], shuffled[2], shuffled[3], shuffled[0]);
-		}
-
-		// Remap an action mask (a per-channel selector of channels needing an operation,
-		// e.g. SNORM/BX2) through the channel remap, producing the final post-sampling mask.
-		u32 shuffle_mask_bits(u32 bits) const
-		{
-			if (!bits || encoded == RSX_TEXTURE_REMAP_IDENTITY) [[likely]]
-			{
-				return bits;
-			}
-
-			u32 result = 0;
-			for (u8 channel = 0; channel < 4; ++channel)
-			{
-				if (control_map[channel] != CELL_GCM_TEXTURE_REMAP_REMAP ||
-					(bits & (1u << channel_map[channel])) == 0)
-				{
-					continue;
-				}
-				result |= (1u << channel);
-			}
-			return result;
 		}
 
 		template <typename T>

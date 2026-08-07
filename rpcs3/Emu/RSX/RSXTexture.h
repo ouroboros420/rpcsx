@@ -4,7 +4,8 @@
 
 namespace rsx
 {
-	struct texture_format_ex; // defined in Common/TextureUtils.h
+	struct texture_format_ex;
+	struct image_section_attributes_t;
 
 	class fragment_texture
 	{
@@ -79,11 +80,13 @@ namespace rsx
 		u16 height() const;
 
 		// Border Color
-		u32 border_color() const;
-		color4f remapped_border_color() const;
+		u32 border_color(bool apply_colorspace_remapping = false) const;
+		color4f remapped_border_color(bool apply_colorspace_remapping = false) const;
 
 		u16 depth() const;
 		u32 pitch() const;
+
+		image_section_attributes_t attributes() const;
 	};
 
 	class vertex_texture
@@ -134,8 +137,8 @@ namespace rsx
 		u16 height() const;
 
 		// Border Color
-		u32 border_color() const;
-		color4f remapped_border_color() const;
+		u32 border_color(bool = false) const;
+		color4f remapped_border_color(bool = false) const;
 
 		u16 depth() const;
 		u32 pitch() const;

@@ -197,7 +197,7 @@ namespace rsx
 
 		case CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_MAIN:
 		{
-			if (const u32 ea = offset < 0x1000000 ? render->iomap_table.get_addr(0x0e000000 + offset) : -1; ea + 1)
+			if (const u32 ea = offset < 0x1000000 ? render->iomap_table.get_addr(0x0e000000 + offset) : -1; ea != umax)
 			{
 				if (!size_to_check || vm::check_addr(ea, 0, size_to_check))
 				{
@@ -400,13 +400,13 @@ namespace rsx
 
 			_max_index = 0;
 
-			auto re_evaluate = [&]<typename T>(const std::byte* ptr, T)
+			const auto re_evaluate = [&] <typename T> (const std::byte* ptr, T)
 			{
 				const u64 restart = rsx::method_registers.restart_index_enabled() ? rsx::method_registers.restart_index() : u64{umax};
 
 				for (u32 _index = first; _index < first + count; _index++)
 				{
-					const auto value = read_from_ptr<be_t<T>>(ptr, _index * sizeof(T));
+					const auto value = read_from_ptr_unsafe<be_t<T>>(ptr, _index * sizeof(T));
 
 					if (value == restart)
 					{
@@ -687,7 +687,7 @@ namespace rsx
 				ar(u32{0});
 			}
 		}
-		else if (u32 count = ar)
+		else if (u32 count{ar})
 		{
 			restore_fifo_count = count;
 			ar(restore_fifo_cmd);
@@ -718,6 +718,14 @@ namespace rsx
 		if (g_cfg.misc.use_native_interface && (g_cfg.video.renderer == video_renderer::opengl || g_cfg.video.renderer == video_renderer::vulkan))
 		{
 			m_overlay_manager = g_fxo->init<rsx::overlays::display_manager>(0);
+
+			if (g_cfg.misc.play_music_during_boot)
+			{
+				if (const std::string audio_path = Emu.GetSfoDir(true) + "/SND0.AT3"; fs::is_file(audio_path))
+				{
+					m_overlay_manager->start_audio(audio_path);
+				}
+			}
 		}
 
 		if (!_ar)
@@ -761,10 +769,10 @@ namespace rsx
 			return;
 		}
 
-		ar(stereo_mode, format, aspect, resolution_id, scanline_pitch, gamma, resolution_x, resolution_y, state, scan_mode);
+		ar(stereo_enabled, format, aspect, resolution_id, scanline_pitch, gamma, resolution_x, resolution_y, state, scan_mode);
 	}
 
-	void thread::capture_frame(const std::string& name)
+	void thread::capture_frame(const std::string& name) const
 	{
 		frame_trace_data::draw_state draw_state{};
 
@@ -842,7 +850,7 @@ namespace rsx
 
 		if (capture_current_frame)
 		{
-			u32 element_count = rsx::method_registers.current_draw_clause.get_elements_count();
+			const u32 element_count = rsx::method_registers.current_draw_clause.get_elements_count();
 			capture_frame(fmt::format("Draw %s %d", rsx::method_registers.current_draw_clause.primitive, element_count));
 		}
 	}
@@ -860,7 +868,7 @@ namespace rsx
 	{
 		while (Emu.IsReady())
 		{
-			thread_ctrl::wait_for(1000);
+			Emu.WaitReady();
 		}
 
 		do
@@ -891,33 +899,6 @@ namespace rsx
 			on_semaphore_acquire_wait();
 			std::this_thread::yield();
 		}
-	}
-
-	void thread::cpu_wait_on(const u32* watch, u32 keep)
-	{
-#if defined(ARCH_ARM64)
-		// Low-power path: keep cpu_wait's flush + pause/exit handling, but park the
-		// core on the watched line instead of spinning via yield(). Gated on the
-		// explicit WFE toggle (default off) so it stays opt-in - the park adds a
-		// little wake latency, so the smooth default does not use it.
-		if (rx::wfe_enabled() && !external_interrupt_lock
-			&& (state & (cpu_flag::dbg_global_pause + cpu_flag::exit)) != cpu_flag::dbg_global_pause)
-		{
-			on_semaphore_acquire_wait();
-			// Short hot spin first: most semaphore releases land within a few
-			// microseconds; catch them hot to avoid WFE wake latency (per-frame
-			// jitter), then park only if the wait is genuinely longer.
-			for (int i = 0; i < 8; i++)
-			{
-				if (*watch != keep)
-					return;
-				rx::busy_wait();
-			}
-			rx::wfe_park(watch, keep);
-			return;
-		}
-#endif
-		cpu_wait({});
 	}
 
 	void thread::post_vblank_event(u64 post_event_time)
@@ -1132,9 +1113,16 @@ namespace rsx
 		// Raise priority above other threads
 		thread_ctrl::scoped_priority high_prio(+1);
 
+		// Android big-cluster affinity (opt-in) also needs the mask applied even when the
+		// scheduler mode is "os" - matches the CPUThread/RSXOffload gates (their 54abf07bd).
 		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os || thread_ctrl::android_affinity_enabled())
 		{
 			thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
+		}
+
+		if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
+		{
+			manager->stop_audio();
 		}
 
 		while (!test_stopped())
@@ -1265,7 +1253,7 @@ namespace rsx
 				if (const u64 get_put = new_get_put.exchange(u64{umax});
 					get_put != umax)
 				{
-					vm::_ref<atomic_be_t<u64>>(dma_address + OFFSET_OF(RsxDmaControl, put)).release(get_put);
+					vm::_ptr<atomic_be_t<u64>>(dma_address + OFFSET_OF(RsxDmaControl, put))->release(get_put);
 					fifo_ctrl->set_get(static_cast<u32>(get_put));
 					fifo_ctrl->abort();
 					fifo_ret_addr = RSX_CALL_STACK_EMPTY;
@@ -1602,6 +1590,15 @@ namespace rsx
 
 				m_graphics_state.set(rsx::rtt_config_contested);
 
+				if (g_cfg.video.fb_aliasing_bias == framebuffer_aliasing_bias::prefer_color
+					&& layout.color_write_enabled[index]
+					&& !layout.zeta_write_enabled)
+				{
+					// Use address for color data
+					layout.zeta_address = 0;
+				}
+				else
+				{
 				// TODO: Research clearing both depth AND color
 				// TODO: If context is creation_draw, deal with possibility of a lost buffer clear
 				if (depth_test_enabled || stencil_test_enabled || (!layout.color_write_enabled[index] && layout.zeta_write_enabled))
@@ -1615,6 +1612,7 @@ namespace rsx
 					// Use address for color data
 					layout.zeta_address = 0;
 				}
+			}
 			}
 
 			ensure(layout.color_addresses[index]);
@@ -1733,10 +1731,24 @@ namespace rsx
 			return;
 		}
 
+		auto set_zeta_write_enabled = [&](bool state)
+		{
+			if (state == m_framebuffer_layout.zeta_write_enabled)
+			{
+				return;
+			}
+
+			if (m_graphics_state & rsx::zeta_address_is_cyclic)
+			{
+				m_graphics_state |= rsx::fragment_program_state_dirty;
+			}
+			m_framebuffer_layout.zeta_write_enabled = state;
+		};
+
 		auto evaluate_depth_buffer_state = [&]()
 		{
-			m_framebuffer_layout.zeta_write_enabled =
-				(rsx::method_registers.depth_test_enabled() && rsx::method_registers.depth_write_enabled());
+			const bool zeta_write_en = (rsx::method_registers.depth_test_enabled() && rsx::method_registers.depth_write_enabled());
+			set_zeta_write_enabled(zeta_write_en);
 		};
 
 		auto evaluate_stencil_buffer_state = [&]()
@@ -1759,7 +1771,7 @@ namespace rsx
 										rsx::method_registers.back_stencil_op_zfail() != rsx::stencil_op::keep);
 				}
 
-				m_framebuffer_layout.zeta_write_enabled = (mask && active_write_op);
+				set_zeta_write_enabled(mask && active_write_op);
 			}
 		};
 
@@ -1778,14 +1790,7 @@ namespace rsx
 				}
 			}
 
-			if (::size32(mrt_buffers) != current_fragment_program.mrt_buffers_count &&
-				!m_graphics_state.test(rsx::pipeline_state::fragment_program_dirty) &&
-				!is_current_program_interpreted())
-			{
-				// Notify that we should recompile the FS
-				m_graphics_state |= rsx::pipeline_state::fragment_program_state_dirty;
-			}
-
+			on_framebuffer_layout_updated();
 			return any_found;
 		};
 
@@ -1881,7 +1886,24 @@ namespace rsx
 		}
 		default:
 			rsx_log.fatal("Unhandled framebuffer option changed 0x%x", opt);
+			break;
 		}
+	}
+
+	void thread::on_framebuffer_layout_updated()
+	{
+		if (m_graphics_state.test(rsx::fragment_program_state_dirty))
+		{
+			return;
+		}
+
+		const auto target = m_ctx->register_state->surface_color_target();
+		if (rsx::utility::get_mrt_buffers_count(target) == current_fragment_program.mrt_buffers_count)
+		{
+			return;
+		}
+
+		m_graphics_state |= rsx::fragment_program_state_dirty;
 	}
 
 	bool thread::get_scissor(areau& region, bool clip_viewport)
@@ -1943,10 +1965,40 @@ namespace rsx
 			m_graphics_state.set(rsx::rtt_config_valid);
 		}
 
-		std::tie(region.x1, region.y1) = rsx::apply_resolution_scale<false>(x1, y1, m_framebuffer_layout.width, m_framebuffer_layout.height);
-		std::tie(region.x2, region.y2) = rsx::apply_resolution_scale<true>(x2, y2, m_framebuffer_layout.width, m_framebuffer_layout.height);
+		std::tie(region.x1, region.y1) = rsx::apply_resolution_scale<false>(resolution_scaling_config, x1, y1, m_framebuffer_layout.width, m_framebuffer_layout.height);
+		std::tie(region.x2, region.y2) = rsx::apply_resolution_scale<true>(resolution_scaling_config, x2, y2, m_framebuffer_layout.width, m_framebuffer_layout.height);
 
 		return true;
+	}
+
+	rsx::flags32_t thread::get_fragment_program_export_config()
+	{
+		if (!g_cfg.video.emulate_depth_compare) [[ likely ]]
+		{
+			return 0;
+		}
+
+		if (m_ctx->register_state->current_draw_clause.classify_mode() != primitive_class::polygon)
+		{
+			return 0;
+		}
+
+		u32 expected_ctrl = 0;
+
+		if (m_framebuffer_layout.zeta_address &&
+			m_ctx->register_state->depth_test_enabled() &&
+			m_ctx->register_state->depth_func() == rsx::comparison_function::equal)
+		{
+			expected_ctrl |= RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE;
+
+			if (backend_config.supports_hw_msaa &&
+				m_ctx->register_state->surface_antialias() != rsx::surface_antialiasing::center_1_sample)
+			{
+				expected_ctrl |= RSX_SHADER_CONTROL_MULTISAMPLED_ZBUFFER;
+			}
+		}
+
+		return expected_ctrl;
 	}
 
 	void thread::prefetch_fragment_program()
@@ -2044,6 +2096,18 @@ namespace rsx
 	{
 		m_program_cache_hint.invalidate(m_graphics_state.load());
 
+		constexpr u32 fs_export_config_mask = (RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE | RSX_SHADER_CONTROL_MULTISAMPLED_ZBUFFER);
+		if (u32 export_ctrl = get_fragment_program_export_config();
+			(current_fragment_program.ctrl & fs_export_config_mask) != export_ctrl)
+		{
+			// Update control bits for immediate consumers
+			current_fragment_program.ctrl &= ~fs_export_config_mask;
+			current_fragment_program.ctrl |= export_ctrl;
+
+			// Signal backend to reload pipeline
+			m_graphics_state.set(rsx::pipeline_state::fragment_program_state_dirty);
+		}
+
 		prefetch_vertex_program();
 		prefetch_fragment_program();
 	}
@@ -2112,7 +2176,7 @@ namespace rsx
 		current_fragment_program.two_sided_lighting = m_ctx->register_state->two_side_light_en();
 		current_fragment_program.mrt_buffers_count = rsx::utility::get_mrt_buffers_count(m_ctx->register_state->surface_color_target());
 
-		if (method_registers.current_draw_clause.classify_mode() == primitive_class::polygon)
+		if (m_ctx->register_state->current_draw_clause.classify_mode() == primitive_class::polygon)
 		{
 			if (!backend_config.supports_normalized_barycentrics)
 			{
@@ -2138,12 +2202,14 @@ namespace rsx
 					current_fragment_program.ctrl |= RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE;
 				}
 			}
+
+			current_fragment_program.ctrl |= get_fragment_program_export_config();
 		}
-		else if (method_registers.point_sprite_enabled() &&
-				 method_registers.current_draw_clause.primitive == primitive_type::points)
+		else if (m_ctx->register_state->point_sprite_enabled() &&
+			m_ctx->register_state->current_draw_clause.primitive == primitive_type::points)
 		{
 			// Set high word of the control mask to store point sprite control
-			current_fragment_program.texcoord_control_mask |= u32(method_registers.point_sprite_control_mask()) << 16;
+			current_fragment_program.texcoord_control_mask |= u32(m_ctx->register_state->point_sprite_control_mask()) << 16;
 		}
 
 #ifdef __ANDROID__
@@ -2152,12 +2218,20 @@ namespace rsx
 		// (mrt_buffers_count == 0) in our fragment pipeline, so the test discards shadow-caster
 		// geometry that should have written depth - dropping the cast shadow of alpha-tested
 		// character parts (arms, weapon, shield, head/legs) while the opaque torso, which never
-		// alpha-tests, casts normally. The 0.0.41 ROP rework that enabled alpha-tested vegetation
-		// is what started running this test in depth-only passes. Suppressing it here lets the
-		// full character cast its shadow; the only trade-off is that alpha-tested geometry casts
-		// a solid (rather than cut-out) shadow, which is minor. Color passes are untouched, so
-		// vegetation and all alpha-tested color rendering are unaffected. Validated on-device
-		// (Adreno/Turnip); gated to Android since desktop is unaffected.
+		// alpha-tests, casts normally. The ROP rework that enabled alpha-tested vegetation is
+		// what started running this test in depth-only passes. Trade-off: alpha-tested geometry
+		// casts a solid (rather than cut-out) shadow. Color passes are untouched, so vegetation
+		// and all alpha-tested color rendering are unaffected. Validated on-device by the fork
+		// (Adreno/Turnip, their c1d86e9e4); gated to Android since desktop is unaffected.
+		//
+		// Premise re-verified against OUR base (real v0.0.42 Assembler decompiler), not just theirs:
+		// get_fragment_program_output_set(ctrl, mrt_count) in FragmentProgramDecompiler.cpp returns an
+		// EMPTY set when mrt_count == 0 and there is no depth export, so the ROP block gets no col0
+		// entry in its input_list and RegisterDependencyPass inserts no dependency barrier for r0/h0 -
+		// yet RSXROPEpilogue.glsl still reads col0.a under _ENABLE_ALPHA_TEST and
+		// _ENABLE_ALPHA_TO_COVERAGE_TEST. col0 really is unresolved here on this base too.
+		// Proper fix (NOT done here, wants on-device validation): seed that output set with col0 when
+		// ctrl carries the alpha-test / a2c bits, which would keep cut-out shadows instead of solid.
 		if (current_fragment_program.mrt_buffers_count == 0)
 		{
 			current_fragment_program.ctrl &= ~(RSX_SHADER_CONTROL_ALPHA_TEST | RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE);
@@ -2183,17 +2257,27 @@ namespace rsx
 			break;
 		}
 
+		const bool zeta_was_cyclic = m_graphics_state & rsx::zeta_address_is_cyclic;
+		m_graphics_state.clear(rsx::zeta_address_is_cyclic);
+
 		for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
 			if (!(textures_ref & 1))
 				continue;
 
-			auto& tex = rsx::method_registers.fragment_textures[i];
+			auto &tex = m_ctx->register_state->fragment_textures[i];
 			current_fp_texture_state.clear(i);
 
-			if (tex.enabled() && sampler_descriptors[i]->format_class != RSX_FORMAT_CLASS_UNDEFINED)
+			if (!tex.enabled() || sampler_descriptors[i]->format_class == RSX_FORMAT_CLASS_UNDEFINED)
 			{
-				std::memcpy(current_fragment_program.texture_params[i].scale, sampler_descriptors[i]->texcoord_xform.scale, 6 * sizeof(f32));
+				continue;
+			}
+
+			std::memcpy(
+				current_fragment_program.texture_params[i].scale,
+				sampler_descriptors[i]->texcoord_xform.scale,
+				sizeof(sampler_descriptors[i]->texcoord_xform.scale) * 2); // Copy scale and bias together
+
 				current_fragment_program.texture_params[i].remap = tex.remap();
 
 				m_graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
@@ -2203,7 +2287,11 @@ namespace rsx
 
 				if (sampler_descriptors[i]->texcoord_xform.clamp)
 				{
-					std::memcpy(current_fragment_program.texture_params[i].clamp_min, sampler_descriptors[i]->texcoord_xform.clamp_min, 4 * sizeof(f32));
+				std::memcpy(
+					current_fragment_program.texture_params[i].clamp_min,
+					sampler_descriptors[i]->texcoord_xform.clamp_min,
+					sizeof(sampler_descriptors[i]->texcoord_xform.clamp_min) * 2); // Copy clamp_min and clamp_max together
+
 					texture_control |= (1 << rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT);
 				}
 
@@ -2211,7 +2299,7 @@ namespace rsx
 				{
 					// alphakill can be ignored unless a valid comparison function is set
 					texture_control |= (1 << texture_control_bits::ALPHAKILL);
-					current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_ALPHA_KILL;
+				current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_ALPHA_KILL;
 				}
 
 				// const u32 texaddr = rsx::get_address(tex.offset(), tex.location());
@@ -2303,6 +2391,20 @@ namespace rsx
 					default:
 						rsx_log.error("Depth texture bound to pipeline with unexpected format 0x%X", format);
 					}
+
+				if (sampler_descriptors[i]->is_cyclic_reference &&
+					m_framebuffer_layout.zeta_address != 0 &&
+					!g_cfg.video.strict_rendering_mode &&
+					g_cfg.video.shader_precision != gpu_preset_level::low)
+				{
+					m_graphics_state |= rsx::zeta_address_is_cyclic;
+
+					if (!(current_fragment_program.ctrl & (CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_META_USES_DISCARD | RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)) &&
+						m_framebuffer_layout.zeta_write_enabled)
+					{
+						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_DISABLE_EARLY_Z;
+					}
+				}
 				}
 				else if (!backend_config.supports_hw_renormalization /* &&
 				    tex.min_filter() == rsx::texture_minify_filter::nearest &&
@@ -2322,12 +2424,6 @@ namespace rsx
 					case CELL_GCM_TEXTURE_R5G6B5:
 					case CELL_GCM_TEXTURE_R6G5B5:
 						texture_control |= (1 << texture_control_bits::RENORMALIZE);
-						// 0.0.41 specialization gates the texel format-conversion code
-						// (renormalize/sext/gamma/BX2) behind RSX_SHADER_CONTROL_TEXTURE_
-						// FORMAT_CONVERT. Our producer lacks upstream's format_ex object, so
-						// we must raise the bit here whenever a conversion is actually needed,
-						// or _process_texel collapses to passthrough and textures sample raw
-						// (BX2 normal maps -> garbage normals -> models render black/invisible).
 						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_FORMAT_CONVERT;
 						break;
 					default:
@@ -2335,28 +2431,28 @@ namespace rsx
 					}
 				}
 
-				// Unified texel-conversion producer (upstream format_ex), replacing the fork's
-				// narrower is_int8_remapped_format inline path. format_ex() computes the SNORM/
-				// GAMMA/BX2 remap_control via the proper channel-remap shuffle AND sets the
-				// FORMAT_FEATURE bits that the shader's _process_texel expects (it early-outs on
-				// feature-only control words and only varies the SEXT path by 16-bit-channels).
-				// The common 8-bit + identity-remap case is behaviourally identical to the old
-				// inline path; 16-bit-channel formats and non-identity remaps are now correct.
-				if (const auto fmt_ex = tex.format_ex(); fmt_ex.features != 0)
+				if (const auto& format_ex = sampler_descriptors[i]->format_ex; format_ex.features != 0)
 				{
-					texture_control |= fmt_ex.texel_remap_control;
-					texture_control |= fmt_ex.features << texture_control_bits::FORMAT_FEATURES_OFFSET;
+					texture_control |= format_ex.texel_remap_control;
+					texture_control |= format_ex.features << texture_control_bits::FORMAT_FEATURES_OFFSET;
 
-					if (fmt_ex.texel_remap_control)
+					if (format_ex.texel_remap_control)
 					{
-						// Gate the sext/gamma/BX2 texel conversion (see the RENORMALIZE note above).
 						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_FORMAT_CONVERT;
+					}
+
+					if (current_fp_metadata.bx2_texture_reads_mask)
+					{
+						current_fragment_program.ctrl |= RSX_SHADER_CONTROL_TEXTURE_FORMAT_CONVERT;
+
+						const u32 remap_hi = tex.decoded_remap().shuffle_mask_bits(0xFu);
+						current_fragment_program.texture_params[i].remap &= ~(0xFu << 16u);
+						current_fragment_program.texture_params[i].remap |= (remap_hi << 16u);
 					}
 				}
 
 				current_fragment_program.texture_params[i].control = texture_control;
 			}
-		}
 
 		// Update texture configuration
 		current_fragment_program.texture_state.import(current_fp_texture_state, current_fp_metadata.referenced_textures_mask);
@@ -2365,13 +2461,20 @@ namespace rsx
 		if (current_fragment_program.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
 		{
 			// Check that the depth stage is not disabled
-			if (!rsx::method_registers.depth_test_enabled())
+			if (!m_ctx->register_state->depth_test_enabled())
 			{
 				rsx_log.trace("FS exports depth component but depth test is disabled (INVALID_OPERATION)");
 			}
 		}
 
 		m_program_cache_hint.invalidate_fragment_program(current_fragment_program);
+
+		if (zeta_was_cyclic && zeta_was_cyclic != m_graphics_state.test(rsx::zeta_address_is_cyclic))
+		{
+			// Forced "fall-out" barrier. This is a special case for Z buffers because they can be cyclic without writes.
+			// That condition can cause early-Z in a later call to introduce data hazard in previous cyclic draws.
+			m_graphics_state |= rsx::zeta_address_cyclic_barrier;
+		}
 	}
 
 	bool thread::invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size)
@@ -2389,8 +2492,8 @@ namespace rsx
 			return false;
 		}
 
-		const auto current_fragment_shader_range = address_range::start_length(shader_offset, current_fragment_program.total_length);
-		if (!current_fragment_shader_range.overlaps(address_range::start_length(dst_offset, size)))
+		const auto current_fragment_shader_range = address_range32::start_length(shader_offset, current_fragment_program.total_length);
+		if (!current_fragment_shader_range.overlaps(address_range32::start_length(dst_offset, size)))
 		{
 			// No range overlap
 			return false;
@@ -2547,7 +2650,7 @@ namespace rsx
 		}
 
 		rsx::reservation_lock<true> lock(sink, 16);
-		vm::_ref<atomic_t<CellGcmReportData>>(sink).store({timestamp(), value, 0});
+		vm::_ptr<atomic_t<CellGcmReportData>>(sink)->store({timestamp(), value, 0});
 	}
 
 	u32 thread::copy_zcull_stats(u32 memory_range_start, u32 memory_range, u32 destination)
@@ -2921,7 +3024,7 @@ namespace rsx
 
 		reader_lock lock(m_mtx_task);
 
-		const auto map_range = address_range::start_length(address, size);
+		const auto map_range = address_range32::start_length(address, size);
 
 		if (!m_invalidated_memory_range.valid())
 			return;
@@ -2945,7 +3048,7 @@ namespace rsx
 
 			for (u32 ea = address >> 20, end = ea + (size >> 20); ea < end; ea++)
 			{
-				const u32 io = rx::rol32(iomap_table.io[ea], 32 - 20);
+				const u32 io = std::rotl<u32>(iomap_table.io[ea], 32 - 20);
 
 				if (io + 1)
 				{
@@ -2957,7 +3060,7 @@ namespace rsx
 
 			auto& cfg = g_fxo->get<gcm_config>();
 
-			std::unique_lock<shared_mutex> hle_lock;
+			std::optional<std::unique_lock<shared_mutex>> hle_lock;
 
 			for (u32 i = 0; i < std::size(unmap_status); i++)
 			{
@@ -2975,7 +3078,7 @@ namespace rsx
 
 						while (to_unmap)
 						{
-							bit = (std::countr_zero<u64>(rx::rol64(to_unmap, 0 - bit)) + bit);
+							bit = (std::countr_zero<u64>(std::rotl<u64>(to_unmap, 0 - bit)) + bit);
 							to_unmap &= ~(1ull << bit);
 
 							constexpr u16 null_entry = 0xFFFF;
@@ -2998,7 +3101,7 @@ namespace rsx
 
 			if (hle_lock)
 			{
-				hle_lock.unlock();
+				hle_lock->unlock();
 			}
 
 			// Pause RSX thread momentarily to handle unmapping
@@ -3007,7 +3110,7 @@ namespace rsx
 			// Queue up memory invalidation
 			std::lock_guard lock(m_mtx_task);
 			const bool existing_range_valid = m_invalidated_memory_range.valid();
-			const auto unmap_range = address_range::start_length(address, size);
+			const auto unmap_range = address_range32::start_length(address, size);
 
 			if (existing_range_valid && m_invalidated_memory_range.touches(unmap_range))
 			{
@@ -3154,14 +3257,14 @@ namespace rsx
 			// capture first tile state with nop cmd
 			rsx::frame_capture_data::replay_command replay_cmd;
 			replay_cmd.rsx_command = std::make_pair(NV4097_NO_OPERATION, 0);
-			frame_capture.replay_commands.push_back(replay_cmd);
+			frame_capture.replay_commands.push_back(std::move(replay_cmd));
 			capture::capture_display_tile_state(this, frame_capture.replay_commands.back());
 		}
 		else if (capture_current_frame)
 		{
 			capture_current_frame = false;
 
-			std::string file_path = fs::get_config_dir() + "captures/" + Emu.GetTitleID() + "_" + date_time::current_time_narrow() + "_capture.rrc.gz";
+			const std::string file_path = fs::get_config_dir() + "captures/" + (Emu.GetTitleID().empty() ? Emu.GetTitle() : Emu.GetTitleID()) + "_" + date_time::current_time_narrow() + "_capture.rrc.gz";
 
 			fs::pending_file temp(file_path);
 
@@ -3328,13 +3431,22 @@ namespace rsx
 		}
 
 #ifdef __ANDROID__
-		// ADPF feed: publish this frame's actual CPU work (wall interval minus the
-		// idle/limiter sleep) and the presenting thread's OS tid so the app can drive
-		// Android's PerformanceHintManager. Measured at a fixed per-iteration point,
-		// so the previous iteration's frame-limiter sleep is captured in the idle
-		// delta and excluded. Advisory only - stored to atomics nobody in the core
-		// reads back, so this changes no rendering behavior. Cost is a subtraction
-		// plus a relaxed store per flip.
+		// ADPF feed (their 3d4ba6060): publish this frame's actual CPU work (wall interval
+		// minus the idle/limiter sleep), the flip-to-flip period and the presenting thread's
+		// OS tid so the app can drive Android's PerformanceHintManager. Measured at a fixed
+		// per-iteration point, so the previous iteration's frame-limiter sleep is captured in
+		// the idle delta and excluded.
+		//
+		// NOT purely advisory in this tree - do not delete as dead code. Consumers:
+		//   * rpcs3::utils::get_rsx_thread_tid / get_frame_work_ns - read over JNI by the app
+		//     (android/src/rpcsx-android.cpp) to size the PerformanceHintManager session.
+		//   * rpcs3::utils::get_frame_period_ns - read IN-CORE by the Android VK swapchain
+		//     (Emu/RSX/VK/vkutils/swapchain.cpp, the ANativeWindow_setFrameRate hint). That
+		//     path is gated on period_ns != 0, so before this producer existed it was inert;
+		//     with it live, a sustained cadence is pushed to SurfaceFlinger and can change the
+		//     negotiated panel refresh rate. Presentation-side behaviour change, Android only.
+		// The upstream fork's "publish only, reads nothing back" description predates that
+		// swapchain consumer - it does not hold here.
 		{
 			static thread_local u64 s_adpf_last_now = 0;
 			static thread_local u64 s_adpf_last_idle = 0;
@@ -3343,27 +3455,25 @@ namespace rsx
 			{
 				s_adpf_tid = static_cast<int>(::gettid());
 			}
-			// Republish every flip (cheap relaxed store) so a recreated RSX thread
-			// overwrites a stale tid instead of leaving the app's hint session
-			// pointed at a dead thread after a restart.
+			// Republish every flip (cheap relaxed store) so a recreated RSX thread overwrites a
+			// stale tid instead of leaving the app's hint session pointed at a dead thread.
 			rpcs3::utils::set_rsx_thread_tid(s_adpf_tid);
 			const u64 now_us = get_system_time();
 			const u64 idle_us = performance_counters.idle_time.load();
 			if (s_adpf_last_now != 0 && now_us > s_adpf_last_now)
 			{
 				const u64 wall = now_us - s_adpf_last_now;
-				// period = the flip-to-flip deadline (e.g. ~33.3ms when 30fps-locked). The
-				// app uses it as the ADPF target so a 30fps game is not judged against a fixed
-				// 60fps target (which would over-boost = more heat). Always valid.
+				// period = the flip-to-flip deadline (e.g. ~33.3ms when 30fps-locked). The app uses
+				// it as the ADPF target so a 30fps game is not judged against a fixed 60fps target
+				// (which would over-boost = more heat). Always valid.
 				rpcs3::utils::report_frame_period_ns(wall * 1000);
 
 				// work = the CPU busy time (wall minus idle) the scheduler must finish in time.
-				// performance_counters.idle_time is reset to 0 every ~30 frames by get_load(),
-				// so an idle delta that went backwards (idle_us < last) is a reset, not a real
-				// frame - skip it. Also skip when idle >= wall (idle accrues from FIFO/semaphore
-				// paths that can exceed the wall window). Reporting work=wall in those cases would
-				// feed a bogus "fully busy" sample and over-boost the scheduler (opposite of the
-				// heat-saver goal); skipping just leaves the app's last good sample in place.
+				// performance_counters.idle_time is reset to 0 every ~30 frames by get_load(), so an
+				// idle delta that went backwards is a reset, not a real frame - skip it. Also skip
+				// when idle >= wall (idle accrues from FIFO/semaphore paths that can exceed the wall
+				// window). Reporting work=wall there would feed a bogus "fully busy" sample and
+				// over-boost the scheduler; skipping leaves the app's last good sample in place.
 				if (idle_us >= s_adpf_last_idle)
 				{
 					if (const u64 idle = idle_us - s_adpf_last_idle; idle < wall)
@@ -3401,8 +3511,8 @@ namespace rsx
 			limit = limit2;
 		}
 
-		// Android thermal throttle: when the SoC is hot, cap the frame rate so the
-		// pipeline does less work and the device can cool (less fan / hard-throttle).
+		// Android thermal throttle (their ad937b86e): when the SoC is hot, cap the frame rate
+		// so the pipeline does less work and the device can cool. 0 = no cap (default).
 		if (const double tcap = static_cast<double>(rpcs3::utils::get_thermal_frame_cap()); tcap >= 1.0 && (tcap < limit || !limit))
 		{
 			limit = tcap;
@@ -3457,7 +3567,7 @@ namespace rsx
 		current_display_buffer = buffer;
 		m_queued_flip.emu_flip = true;
 		m_queued_flip.in_progress = true;
-		m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.perf_overlay_enabled;
+		m_queued_flip.skip_frame |= g_cfg.video.disable_video_output && !g_cfg.video.perf_overlay.enabled;
 
 		flip(m_queued_flip);
 

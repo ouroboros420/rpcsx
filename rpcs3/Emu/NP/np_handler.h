@@ -22,7 +22,7 @@ namespace np
 {
 	constexpr usz MAX_SceNpMatchingAttr_list_SIZE = ((SCE_NP_MATCHING_ATTR_ID_MAX * 2) * sizeof(SceNpMatchingAttr))
 		+ (SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_BIG) +
-		+ ((SCE_NP_MATCHING_ATTR_ID_MAX - SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX) * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_SMALL);
+	                                                +((SCE_NP_MATCHING_ATTR_ID_MAX - SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX) * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_SMALL);
 	constexpr usz MAX_MEMBERS_PER_ROOM = 64;
 	constexpr usz MAX_ROOMS_PER_GET_ROOM_LIST = 20;
 	constexpr usz MAX_SceNpMatchingRoomStatus_SIZE = sizeof(SceNpMatchingRoomStatus) + (MAX_MEMBERS_PER_ROOM * sizeof(SceNpMatchingRoomMember)) + sizeof(SceNpId);
@@ -65,7 +65,7 @@ namespace np
 		ticket() = default;
 		ticket(std::vector<u8>&& raw_data);
 
-		std::size_t size() const;
+		usz size() const;
 		const u8* data() const;
 		bool empty() const;
 
@@ -73,11 +73,11 @@ namespace np
 		std::string get_service_id() const;
 
 	private:
-		std::optional<ticket_data> parse_node(std::size_t index) const;
+		std::optional<ticket_data> parse_node(usz index) const;
 		void parse();
 
 	private:
-		static constexpr std::size_t MIN_TICKET_DATA_SIZE = 4;
+		static constexpr usz MIN_TICKET_DATA_SIZE = 4;
 
 		std::vector<u8> raw_data;
 
@@ -126,15 +126,15 @@ namespace np
 		void init_NP(u32 poolsize, vm::ptr<void> poolptr);
 		void terminate_NP();
 
-		atomic_t<bool> is_netctl_init     = false;
-		atomic_t<bool> is_NP_init         = false;
-		atomic_t<bool> is_NP_Lookup_init  = false;
-		atomic_t<bool> is_NP_Score_init   = false;
-		atomic_t<bool> is_NP2_init        = false;
+		atomic_t<bool> is_netctl_init = false;
+		atomic_t<bool> is_NP_init = false;
+		atomic_t<bool> is_NP_Lookup_init = false;
+		atomic_t<bool> is_NP_Score_init = false;
+		atomic_t<bool> is_NP2_init = false;
 		atomic_t<bool> is_NP2_Match2_init = false;
-		atomic_t<bool> is_NP_Auth_init    = false;
-		atomic_t<bool> is_NP_TUS_init     = false; // TODO: savestate
-		atomic_t<bool> is_NP_Com2_init    = false; // TODO: savestate
+		atomic_t<bool> is_NP_Auth_init = false;
+		atomic_t<bool> is_NP_TUS_init = false;  // TODO: savestate
+		atomic_t<bool> is_NP_Com2_init = false; // TODO: savestate
 
 		// NP Handlers/Callbacks
 		// Seems to be global
@@ -155,6 +155,7 @@ namespace np
 		std::optional<shared_ptr<std::pair<std::string, message_data>>> get_message_selected(SceNpBasicAttachmentDataId id);
 		void clear_message_selected(SceNpBasicAttachmentDataId id);
 		void send_message(const message_data& msg_data, const std::set<std::string>& npids);
+		bool select_invitation(u64 msg_id);
 
 		// Those should probably be under match2 ctx
 		vm::ptr<SceNpMatching2RoomEventCallback> room_event_cb{}; // Room events
@@ -220,7 +221,7 @@ namespace np
 		void tus_set_multislot_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, const SceNpOnlineId& targetNpId, vm::cptr<SceNpTusSlotId> slotIdArray, vm::cptr<s64> variableArray, s32 arrayNum, bool vuser, bool async);
 		void tus_get_multislot_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, const SceNpOnlineId& targetNpId, vm::cptr<SceNpTusSlotId> slotIdArray, vm::ptr<SceNpTusVariable> variableArray, s32 arrayNum, bool vuser, bool async);
 		void tus_get_multiuser_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, std::vector<SceNpOnlineId> targetNpIdArray, SceNpTusSlotId slotId, vm::ptr<SceNpTusVariable> variableArray, s32 arrayNum, bool vuser, bool async);
-		void tus_get_friends_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, SceNpTusSlotId slotId, s32 includeSelf, s32 sortType, vm::ptr<SceNpTusVariable> variableArray,s32 arrayNum, bool async);
+		void tus_get_friends_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, SceNpTusSlotId slotId, s32 includeSelf, s32 sortType, vm::ptr<SceNpTusVariable> variableArray, s32 arrayNum, bool async);
 		void tus_add_and_get_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, const SceNpOnlineId& targetNpId, SceNpTusSlotId slotId, s64 inVariable, vm::ptr<SceNpTusVariable> outVariable, vm::ptr<SceNpTusAddAndGetVariableOptParam> option, bool vuser, bool async);
 		void tus_try_and_set_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, const SceNpOnlineId& targetNpId, SceNpTusSlotId slotId, s32 opeType, s64 variable, vm::ptr<SceNpTusVariable> resultVariable, vm::ptr<SceNpTusTryAndSetVariableOptParam> option, bool vuser, bool async);
 		void tus_delete_multislot_variable(shared_ptr<tus_transaction_ctx>& trans_ctx, const SceNpOnlineId& targetNpId, vm::cptr<SceNpTusSlotId> slotIdArray, s32 arrayNum, bool vuser, bool async);
@@ -267,7 +268,7 @@ namespace np
 		error_code abort_request(u32 req_id);
 
 		// For signaling
-		void req_sign_infos(const std::string& npid, u32 conn_id);
+		void req_sign_infos(std::string_view npid, u32 conn_id);
 
 		// For UPNP
 		void upnp_add_port_mapping(u16 internal_port, std::string_view protocol);
@@ -276,7 +277,7 @@ namespace np
 		// For custom menu
 		struct custom_menu_action
 		{
-			s32 id   = 0;
+			s32 id = 0;
 			u32 mask = SCE_NP_CUSTOM_MENU_ACTION_MASK_ME;
 			std::string name;
 		};
@@ -297,7 +298,7 @@ namespace np
 		// Various generic helpers
 		bool discover_ip_address();
 		bool discover_ether_address();
-		bool error_and_disconnect(const std::string& error_msg);
+		bool error_and_disconnect(std::string_view error_msg);
 
 		// Notification handlers
 		void notif_user_joined_room(vec_stream& noti);
@@ -409,7 +410,7 @@ namespace np
 			bool context_sensitive = false;
 		} basic_handler;
 
-		bool is_connected  = false;
+		bool is_connected = false;
 		bool is_psn_active = false;
 
 		ticket current_ticket;
@@ -440,6 +441,7 @@ namespace np
 		gui_cache_manager gui_cache;
 
 		// Messages related
+		shared_mutex m_mutex_selected_messages;
 		std::optional<u64> selected_invite_id{};
 		std::optional<u64> selected_message_id{};
 
@@ -450,7 +452,7 @@ namespace np
 		shared_mutex mutex_match2_req_results;
 		std::unordered_map<u32, event_data> match2_req_results;
 		atomic_t<u16> match2_low_reqid_cnt = 1;
-		atomic_t<u32> match2_event_cnt     = 1;
+		atomic_t<u32> match2_event_cnt = 1;
 		u32 get_req_id(u16 app_req)
 		{
 			return ((app_req << 16) | match2_low_reqid_cnt.fetch_add(1));

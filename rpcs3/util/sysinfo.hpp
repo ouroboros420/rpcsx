@@ -57,16 +57,21 @@ namespace utils
 #ifdef ARCH_ARM64
 	bool has_neon();
 
-	// Runtime detection of optional AArch64 features (via HWCAP).
-	// True if the CPU supports the ARMv8.2 dot product instructions (UDOT/SDOT)
-	bool has_dotprod();
 	bool has_sha3();
-	bool has_i8mm();
-	bool has_sve();
-	bool has_sve2();
-#endif
 
+	bool has_dotprod();
+
+	bool has_i8mm();
+
+	bool has_sve();
+
+	bool has_sve2();
+
+	int sve_length();
+#endif
 	std::string get_cpu_brand();
+
+	std::string_view get_architecture();
 
 	std::string get_system_info();
 
@@ -84,7 +89,9 @@ namespace utils
 	};
 	OS_version get_OS_version();
 
-	std::string get_OS_version_string();
+	std::string get_OS_version_string(bool simple = false);
+
+	std::string get_user_agent();
 
 	int get_maxfiles();
 

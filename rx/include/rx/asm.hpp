@@ -279,6 +279,26 @@ inline void pause() {
 #endif
 }
 
+// Park the core until an event arrives, without a syscall.
+//
+// On arm64, WFE drops the core into a low-power state; Linux enables the
+// architected event stream, so a wakeup arrives on a fixed short period (tens
+// of microseconds), and timer interrupts wake it regardless - it cannot stall
+// indefinitely. SEVL sets the local event first so the first WFE consumes it
+// and the second genuinely parks, instead of returning on a stale event.
+//
+// Use instead of pause() in polling loops whose exit condition is produced by
+// another agent (GPU, kernel) on a timescale of tens of microseconds or more:
+// it pins the poll rate near zero power without involving the scheduler.
+// Elsewhere, pause() remains the right tool.
+inline void wait_for_event() {
+#if defined(ARCH_ARM64)
+  __asm__ volatile("sevl\n\twfe\n\twfe" ::: "memory");
+#else
+  pause();
+#endif
+}
+
 inline void yield() { std::this_thread::yield(); }
 
 // The hardware clock on many arm timers runs south of 100MHz, while RPCS3's

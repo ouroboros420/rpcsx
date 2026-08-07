@@ -480,7 +480,8 @@ error_code _sys_ppu_thread_create(ppu_thread &ppu, vm::ptr<u64> thread_id,
     return {CELL_ENOMEM, dct.size - dct.used};
   }
 
-  const vm::addr_t stack_base{vm::alloc(stack_size, vm::stack, 4096)};
+  const vm::addr_t stack_base{
+      vm::alloc(static_cast<u32>(stack_size), vm::stack, 4096)};
 
   if (!stack_base) {
     dct.free(stack_size);
@@ -502,7 +503,7 @@ error_code _sys_ppu_thread_create(ppu_thread &ppu, vm::ptr<u64> thread_id,
   const u32 tid = idm::import <named_thread<ppu_thread>>([&]() {
     ppu_thread_params p;
     p.stack_addr = stack_base;
-    p.stack_size = stack_size;
+    p.stack_size = static_cast<u32>(stack_size);
     p.tls_addr = tls;
     p.entry = entry;
     p.arg0 = arg;

@@ -194,8 +194,6 @@ namespace vk
 		}
 		else if (dst_access != VK_ACCESS_NONE)
 		{
-			// The scratch buffer is a single shared allocation reused within one command
-			// buffer; make prior transfer/compute work visible before the next writer.
 			insert_buffer_memory_barrier(cmd, buf->value, 0, min_required_size,
 				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage_flags,
 				VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, dst_access);

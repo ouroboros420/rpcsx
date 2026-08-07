@@ -244,7 +244,6 @@ namespace asmjit
 
 		void vec_load_unaligned(u32 esize, const Operand& v, const x86::Mem& src);
 		void vec_store_unaligned(u32 esize, const Operand& v, const x86::Mem& dst);
-		void vec_partial_move(u32 esize, const Operand& dst, const Operand& src);
 
 		void _vec_binary_op(x86::Inst::Id sse_op, x86::Inst::Id vex_op, x86::Inst::Id evex_op, const Operand& dst, const Operand& lhs, const Operand& rhs);
 
@@ -432,15 +431,37 @@ namespace asmjit
 		c.bind(next);
 	}
 #endif
-}
+} // namespace asmjit
+
+#ifdef __APPLE__
+struct jit_write_guard
+{
+	jit_write_guard() noexcept
+	{
+		pthread_jit_write_protect_np(false);
+
+		// Ensure stores are not reordered by the compiler
+		atomic_fence_acq_rel();
+	}
+
+	~jit_write_guard() noexcept
+	{
+		// Ensure stores are not reordered by the compiler
+		atomic_fence_seq_cst();
+
+		pthread_jit_write_protect_np(true);
+	}
+};
+#else
+#define jit_write_guard [[maybe_unused]] int
+#endif
 
 // Build runtime function with asmjit::X86Assembler
 template <typename FT, typename Asm = native_asm, typename F>
 inline FT build_function_asm(std::string_view name, F&& builder, ::jit_runtime* custom_runtime = nullptr, bool reduced_size = false)
 {
-#ifdef __APPLE__
-	pthread_jit_write_protect_np(false);
-#endif
+	jit_write_guard jit_guard;
+
 	using namespace asmjit;
 
 	auto& rt = custom_runtime ? *custom_runtime : get_global_runtime();
@@ -505,7 +526,7 @@ namespace llvm
 	class ExecutionEngine;
 	class Module;
 	class StringRef;
-}
+} // namespace llvm
 
 enum class thread_state : u32;
 
@@ -513,10 +534,10 @@ enum class thread_state : u32;
 class jit_compiler final
 {
 	// Local LLVM context
-	std::unique_ptr<llvm::LLVMContext> m_context{};
+	std::unique_ptr<llvm::LLVMContext, void (*)(llvm::LLVMContext*)> m_context{nullptr, [](llvm::LLVMContext*) {}};
 
 	// Execution instance
-	std::unique_ptr<llvm::ExecutionEngine> m_engine{};
+	std::unique_ptr<llvm::ExecutionEngine, void (*)(llvm::ExecutionEngine*)> m_engine{nullptr, [](llvm::ExecutionEngine*) {}};
 
 	// Arch
 	std::string m_cpu{};
@@ -525,7 +546,7 @@ class jit_compiler final
 	atomic_t<usz> m_disk_space = umax;
 
 public:
-	jit_compiler(const std::unordered_map<std::string, u64>& _link, const std::string& _cpu, u32 flags = 0, std::function<u64(const std::string&)> symbols_cement = {}) noexcept;
+	jit_compiler(const std::unordered_map<std::string, u64>& _link, std::string_view _cpu, u32 flags = 0, std::function<u64(const std::string&)> symbols_cement = {}) noexcept;
 	jit_compiler& operator=(thread_state) noexcept;
 	~jit_compiler() noexcept;
 
@@ -567,18 +588,11 @@ public:
 	// Returns false after LLVM fatal recovery. The compiler must be discarded.
 	bool try_fin(std::string& error);
 
-	// Combined codegen + finalize in a SINGLE recoverable step (one helper
-	// thread instead of two). Semantically equal to try_add followed by
-	// try_fin, but halves the per-module thread spawn/join on the ARM64 SPU
-	// recompile hot path. Returns false after LLVM fatal recovery.
-	bool try_add_fin(std::unique_ptr<llvm::Module> _module, const std::string& path, std::string& error);
-	bool try_add_fin(std::unique_ptr<llvm::Module> _module, std::string& error);
-
 	// Get compiled function address
 	u64 get(const std::string& name);
 
 	// Get CPU info
-	static std::string cpu(const std::string& _cpu);
+	static std::string cpu(std::string_view _cpu);
 
 	// Get system triple (PPU)
 	static std::string triple1();
@@ -589,6 +603,6 @@ public:
 	bool add_sub_disk_space(ssz space);
 };
 
-const char *fallback_cpu_detection();
+const char* fallback_cpu_detection();
 
 #endif // LLVM_AVAILABLE

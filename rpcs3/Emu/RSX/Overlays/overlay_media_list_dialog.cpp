@@ -4,7 +4,6 @@
 #include "overlay_media_list_dialog.h"
 
 #include "rpcsx/fw/ps3/cellMusic.h"
-#include "Emu/System.h"
 #include "Emu/VFS.h"
 #include "util/StrUtil.h"
 #include "util/Thread.h"
@@ -172,13 +171,13 @@ namespace rsx
 				return_code = m_list->get_selected_index();
 				m_stop_input_loop = true;
 				play_cursor_sound = false;
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_decide.wav");
+				play_sound(sound_effect::accept);
 				break;
 			case pad_button::circle:
 				return_code = selection_code::canceled;
 				m_stop_input_loop = true;
 				play_cursor_sound = false;
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_cancel.wav");
+				play_sound(sound_effect::cancel);
 				break;
 			case pad_button::dpad_up:
 				m_list->select_previous();
@@ -200,7 +199,7 @@ namespace rsx
 			// Play a sound unless this is a fast auto repeat which would induce a nasty noise
 			if (play_cursor_sound && (!is_auto_repeat || m_auto_repeat_ms_interval >= m_auto_repeat_ms_interval_default))
 			{
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_cursor.wav");
+				play_sound(sound_effect::cursor);
 			}
 		}
 
@@ -417,12 +416,12 @@ namespace rsx
 
 			g_fxo->get<named_thread<media_list_dialog_thread>>()([=]()
 				{
-					auto root_media_entry = std::make_shared<media_list_dialog::media_entry>();
-					root_media_entry->type = media_list_dialog::media_type::directory;
+				auto root_media_entry = std::make_shared<media_list_dialog::media_entry>();
+				root_media_entry->type = media_list_dialog::media_type::directory;
 
 					if (fs::is_dir(path))
 					{
-						parse_media_recursive(0, max_depth, path, title, type, root_media_entry);
+					parse_media_recursive(0, max_depth, path, title, type, root_media_entry);
 					}
 					else
 					{
@@ -435,7 +434,7 @@ namespace rsx
 
 					if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
 					{
-						result = manager->create<rsx::overlays::media_list_dialog>()->show(root_media_entry, media, title, focused, true);
+					result = manager->create<rsx::overlays::media_list_dialog>()->show(root_media_entry, media, title, focused, true);
 					}
 					else
 					{

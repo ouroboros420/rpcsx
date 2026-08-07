@@ -4,8 +4,11 @@
 #include "Emu/VFS.h"
 #include "Emu/system_utils.hpp"
 #include "Crypto/utils.h"
-
+// Declares utf16_to_utf8(), used by iso_read_directory_entry() for Joliet names.
+// It is NOT reachable through stdafx.h, so this include is load-bearing; the
+// deprecated <codecvt> it replaces declared nothing this TU uses.
 #include "util/StrUtil.h"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -44,10 +47,10 @@ static void* get_aligned_buf()
 #else
 			buf = std::aligned_alloc(ISO_SECTOR_SIZE * 2, ISO_SECTOR_SIZE);
 #endif
-		}
+}
 
 		~aligned_buf() noexcept
-		{
+{
 #if defined(_WIN32)
 			_aligned_free(buf);
 #else
@@ -75,7 +78,7 @@ static bool is_iso_file(iso_file& file, u64* size = nullptr)
 	if (size && ret)
 	{
 		*size = file.size();
-	}
+}
 
 	return ret;
 }
@@ -929,7 +932,7 @@ static void iso_form_hierarchy(fs::file& file, iso_fs_node& node, bool use_ucs2_
 
 	file.seek(directory_extent.start * ISO_SECTOR_SIZE);
 
-	while (file.pos() < end_pos)
+	while(file.pos() < end_pos)
 	{
 		auto entry = iso_read_directory_entry(file, use_ucs2_decoding);
 
@@ -1097,13 +1100,14 @@ iso_archive::iso_archive(fs::file file)
 		return;
 	}
 
-	// CD001 volume-descriptor sniff at sector 16, mirroring the path ctor's
-	// is_iso_file() guard. Without it the descriptor loop below (read<u8>() =
-	// throw-on-short-read) would seek past EOF and throw an UNCAUGHT exception on
-	// a garbage/truncated fd (installIso + _rpcsx_getIsoGameInfoFd build the
-	// archive with no try/catch = process crash instead of a clean failure).
+	// their a3e5c17: CD001 volume-descriptor sniff at sector 16, mirroring the
+	// path ctor's is_iso_file() guard. Without it the descriptor loop below
+	// (read<u8>() = throw-on-short-read) seeks past EOF and throws an UNCAUGHT
+	// exception on a garbage/truncated fd - the fd entry points build the archive
+	// with no try/catch, so that is a process crash instead of a clean failure.
 	{
 		char magic[5]{};
+
 		if (iso_file.read_at(0x8000 + 1, magic, sizeof(magic)) != sizeof(magic) || std::memcmp(magic, "CD001", 5) != 0)
 		{
 			iso_log.error("iso_archive: fd-backed file is not ISO9660 (no CD001)");
@@ -1181,7 +1185,7 @@ iso_fs_node* iso_archive::retrieve(const std::string& passed_path)
 			end = path.size();
 		}
 
-		const std::string_view path_component = path_sv.substr(start, end - start);
+		const std::string_view path_component = path_sv.substr(start, end-start);
 
 		bool found = false;
 
@@ -1744,28 +1748,36 @@ void load_iso(const std::string& path)
 {
 	sys_log.notice("Loading ISO '%s'", path);
 
-	// Fork: the device map is keyed by the FULL first path component, so register
-	// under the complete fixed prefix (upstream keys by the post-underscore name).
+	// The device map is keyed by the FULL first path component (see
+	// fs::device_manager::get_device: prefix = path.substr(0, find_first_of("/\\", 1))),
+	// so the registration key MUST be the complete fixed prefix
+	// "/vfsv0_virtual_iso_overlay_fs_dev" == iso_device::virtual_device_name.
+	// Registering under the bare "iso_overlay_fs_dev" makes every lookup miss and
+	// every unload a no-op. (upstream keys by the post-underscore name)
 	fs::set_virtual_device(iso_device::virtual_device_name, stx::make_shared<iso_device>(path));
 
-	vfs::mount("/dev_bdvd", iso_device::virtual_device_name + "/");
+	vfs::mount("/dev_bdvd/"sv, iso_device::virtual_device_name + "/");
 }
 
+// their 3112e31e (Android SAF): mount an ISO we only have an fd for. The rest of
+// the fd-backed plumbing (iso_archive/iso_file adopted-handle ctors, make_fd_view)
+// is already present; this is the missing top-level entry point.
 void load_iso(fs::file file, const std::string& display_path)
 {
 	sys_log.notice("Loading fd-backed ISO '%s'", display_path);
 
 	fs::set_virtual_device(iso_device::virtual_device_name, stx::make_shared<iso_device>(std::move(file), display_path));
 
-	vfs::mount("/dev_bdvd", iso_device::virtual_device_name + "/");
+	vfs::mount("/dev_bdvd/"sv, iso_device::virtual_device_name + "/");
 }
 
 void unload_iso()
 {
-	// set_virtual_device(name, null) removes and RETURNS the device that was
-	// registered (null if none). Only log when an ISO was actually loaded, so the
-	// Kill path of a normal (non-ISO) game does not print a misleading
-	// "Unloading ISO" line (observed booting an installed EBOOT).
+	// their 1a073c8: set_virtual_device(name, null) removes and RETURNS the device
+	// that was registered (null if none). unload_iso() runs on every Kill, so gate
+	// the notice on an actual unload - otherwise a normal (non-ISO) game booted
+	// from an installed EBOOT prints a misleading "Unloading ISO" line.
+	// Key must match load_iso()/Emu.Load(): the full prefix, not "iso_overlay_fs_dev".
 	if (fs::set_virtual_device(iso_device::virtual_device_name, stx::shared_ptr<iso_device>()))
 	{
 		sys_log.notice("Unloading ISO");
