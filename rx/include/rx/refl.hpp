@@ -130,7 +130,7 @@ template <auto &&V> constexpr auto getNameOf() {
       "V = ";
 #endif
   constexpr auto name = detail::unwrapName(prefix, RX_PRETTY_FUNCTION, true);
-  static constexpr auto result = rx::StaticString<name.size() + 1>{name};
+  static constexpr auto result = rx::StaticString<name.size()>{name};
   return std::string_view{result};
 }
 
@@ -147,7 +147,7 @@ constexpr auto getNameOf() {
 #endif
 
   constexpr auto name = detail::unwrapName(prefix, RX_PRETTY_FUNCTION, true);
-  static constexpr auto result = rx::StaticString<name.size() + 1>{name};
+  static constexpr auto result = rx::StaticString<name.size()>{name};
   return std::string_view{result};
 }
 
@@ -159,7 +159,7 @@ template <typename T> constexpr auto getNameOf() {
       "T = ";
 #endif
   constexpr auto name = detail::unwrapName(prefix, RX_PRETTY_FUNCTION, false);
-  static constexpr auto result = rx::StaticString<name.size() + 1>{name};
+  static constexpr auto result = rx::StaticString<name.size()>{name};
   return std::string_view{result};
 }
 
@@ -173,14 +173,32 @@ constexpr auto calcFieldCount() {
     return static_cast<std::size_t>(EnumT::_count);
   } else if constexpr (requires { EnumT::count; }) {
     return static_cast<std::size_t>(EnumT::count);
+  } else if constexpr (requires { EnumT::_last; }) {
+    return static_cast<std::size_t>(EnumT::_last) + 1;
   } else if constexpr (!requires { getNameOf<EnumT(N)>()[0]; }) {
-    return N;
+    if constexpr (requires { getNameOf<EnumT(N + 1)>()[0]; }) {
+      if constexpr (constexpr auto c = getNameOf<EnumT(N + 1)>()[0];
+                    c >= '0' && c <= '9') {
+        return N;
+      } else {
+        return calcFieldCount<EnumT, N + 2>();
+      }
+    } else {
+      return N;
+    }
   } else {
-    constexpr auto c = getNameOf<EnumT(N)>()[0];
-    if constexpr (!requires { getNameOf<EnumT(N)>()[0]; }) {
-      return N;
-    } else if constexpr (c >= '0' && c <= '9') {
-      return N;
+    if constexpr (constexpr auto c = getNameOf<EnumT(N)>()[0];
+                  c >= '0' && c <= '9') {
+      if constexpr (requires { getNameOf<EnumT(N + 1)>()[0]; }) {
+        if constexpr (constexpr auto c = getNameOf<EnumT(N + 1)>()[0];
+                      c >= '0' && c <= '9') {
+          return N;
+        } else {
+          return calcFieldCount<EnumT, N + 2>();
+        }
+      } else {
+        return N;
+      }
     } else {
       return calcFieldCount<EnumT, N + 1>();
     }

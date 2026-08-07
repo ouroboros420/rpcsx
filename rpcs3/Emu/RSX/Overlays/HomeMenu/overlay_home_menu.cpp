@@ -23,7 +23,7 @@ namespace rsx
 			m_dim_background.set_size(virtual_width, virtual_height);
 			m_dim_background.back_color.a = 0.85f;
 
-			m_description.set_font("Arial", 20);
+			m_description.set_font("Arial", 22);
 			m_description.set_pos(20, 37);
 			m_description.set_text(m_main_menu.title);
 			m_description.auto_resize();
@@ -62,8 +62,7 @@ namespace rsx
 
 		void home_menu_dialog::on_button_pressed(pad_button button_press, bool is_auto_repeat)
 		{
-			if (fade_animation.active)
-				return;
+			if (fade_animation.active) return;
 
 			// Increase auto repeat interval for some buttons
 			switch (button_press)
@@ -171,11 +170,8 @@ namespace rsx
 
 			overlayman.attach_thread_input(
 				uid, "Home menu",
-				[notify]()
-				{
-					*notify = true;
-					notify->notify_one();
-				});
+				[notify]() { *notify = true; notify->notify_one(); }
+			);
 
 			if (g_cfg.misc.pause_during_home_menu)
 			{

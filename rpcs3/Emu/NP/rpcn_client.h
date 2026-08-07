@@ -214,6 +214,11 @@ namespace rpcn
 	std::string rpcn_state_to_string(rpcn::rpcn_state state);
 	void print_error(rpcn::CommandType command, rpcn::ErrorType error);
 
+	// Client-side credential helpers (the Android build has no Qt settings dialog, which is
+	// where upstream derives the password before it ever reaches the server).
+	std::string derive_password(std::string_view user_password);
+	bool validate_token(std::string_view token);
+
 	class rpcn_client
 	{
 	private:
@@ -286,6 +291,13 @@ namespace rpcn
 		rpcn_client(rpcn_client& other) = delete;
 		void operator=(const rpcn_client&) = delete;
 		static std::shared_ptr<rpcn_client> get_instance(u32 binding_address, bool check_config = false);
+		// Get-only accessor: returns the live singleton if one exists, or nullptr. Unlike
+		// get_instance() it never creates a client (so a passive status poll / disable does not
+		// spin up a connection).
+		static std::shared_ptr<rpcn_client> get_active_instance();
+		// Gracefully terminate a live session (queued Terminate command; the disconnect then
+		// happens on the client's own reader/writer threads). No-op if no connected session.
+		static void terminate_active_session();
 		rpcn_state wait_for_connection();
 		rpcn_state wait_for_authentified();
 		bool terminate_connection();
@@ -326,6 +338,9 @@ namespace rpcn
 		rpcn_state get_rpcn_state() const;
 
 		void server_infos_updated();
+
+		// Clear a stale transient failure state so a user-initiated retry reconnects.
+		void clear_failure_state();
 
 		// Synchronous requests
 		bool get_server_list(u32 req_id, const SceNpCommunicationId& communication_id, std::vector<u16>& server_list);

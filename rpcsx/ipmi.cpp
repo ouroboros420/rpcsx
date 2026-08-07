@@ -4,15 +4,21 @@
 #include "io-device.hpp"
 #include "orbis/KernelContext.hpp"
 #include "orbis/osem.hpp"
+#include "orbis/pmem.hpp"
 #include "orbis/thread/Process.hpp"
+#include "orbis/thread/Thread.hpp"
+#include "orbis/uio.hpp"
 #include "orbis/utils/Logs.hpp"
+#include "orbis/vmem.hpp"
+#include "rx/AddressRange.hpp"
+#include "rx/align.hpp"
+#include "rx/die.hpp"
 #include "rx/format.hpp"
 #include "rx/hexdump.hpp"
-#include "rx/mem.hpp"
 #include "rx/print.hpp"
 #include "rx/watchdog.hpp"
 #include "vfs.hpp"
-#include "vm.hpp"
+#include <bit>
 #include <cstdint>
 #include <fcntl.h>
 #include <filesystem>
@@ -21,45 +27,65 @@
 
 ipmi::IpmiClient ipmi::audioIpmiClient;
 
+orbis::Process *g_workerProcess;
+
 template <typename T = std::byte> struct GuestAlloc {
   orbis::ptr<T> guestAddress;
+  std::size_t size;
 
-  GuestAlloc(std::size_t size) {
+  GuestAlloc(std::size_t size) : size(size) {
     if (size == 0) {
       guestAddress = nullptr;
     } else {
-      guestAddress = orbis::ptr<T>(
-          vm::map(nullptr, size, vm::kMapProtCpuRead | vm::kMapProtCpuWrite,
-                  vm::kMapFlagPrivate | vm::kMapFlagAnonymous));
+      size = rx::alignUp(size, orbis::vmem::kPageSize);
+
+      auto [range, vmemErrc] = orbis::vmem::mapFlex(
+          g_workerProcess ? g_workerProcess : orbis::g_currentThread->tproc,
+          size,
+          orbis::vmem::Protection::CpuRead | orbis::vmem::Protection::CpuWrite);
+
+      rx::dieIf(vmemErrc != orbis::ErrorCode{},
+                "impi: failed to map memory, error {}",
+                static_cast<int>(vmemErrc));
+
+      guestAddress = std::bit_cast<orbis::ptr<T>>(range.beginAddress());
     }
   }
 
   GuestAlloc() : GuestAlloc(sizeof(T)) {}
 
   GuestAlloc(const T &data) : GuestAlloc() {
-    if (orbis::uwrite(guestAddress, data) != orbis::ErrorCode{}) {
-      std::abort();
+    if (auto errc = orbis::uwrite(guestAddress, data);
+        errc != orbis::ErrorCode{}) {
+      rx::die("ipmi: failed to write data to allocated page {}, error {}",
+              (void *)guestAddress, errc);
     }
   }
 
   GuestAlloc(const void *data, std::size_t size) : GuestAlloc(size) {
-    if (orbis::uwriteRaw(guestAddress, data, size) != orbis::ErrorCode{}) {
-      std::abort();
+    if (auto errc = orbis::uwriteRaw(guestAddress, data, size);
+        errc != orbis::ErrorCode{}) {
+      rx::die("ipmi: failed to write data to allocated page {}, error {}, data "
+              "{}, size {}",
+              (void *)guestAddress, errc, data, size);
     }
   }
 
   GuestAlloc(const GuestAlloc &) = delete;
 
   GuestAlloc(GuestAlloc &&other) noexcept : guestAddress(other.guestAddress) {
-    other.guestAddress = 0;
+    other.guestAddress = nullptr;
   }
   GuestAlloc &operator=(GuestAlloc &&other) noexcept {
     std::swap(guestAddress, other.guestAddress);
   }
 
   ~GuestAlloc() {
-    if (guestAddress != 0) {
-      vm::unmap(guestAddress, sizeof(T));
+    if (guestAddress != nullptr) {
+      orbis::vmem::unmap(
+          g_workerProcess ? g_workerProcess : orbis::g_currentThread->tproc,
+          rx::AddressRange::fromBeginSize(
+              std::bit_cast<orbis::uintptr_t>(guestAddress), size));
     }
   }
 
@@ -115,6 +141,10 @@ orbis::sint ipmi::IpmiClient::sendSyncMessageRaw(
     buf.resize(size);
   }
   return serverResult;
+}
+
+void ipmi::setWorkerProcess(orbis::Process *process) {
+  g_workerProcess = process;
 }
 
 ipmi::IpmiClient ipmi::createIpmiClient(orbis::Thread *thread,
@@ -177,12 +207,14 @@ orbis::EventFlag *ipmi::createEventFlag(std::string_view name, uint32_t attrs,
       .first;
 }
 
-void ipmi::createShm(const char *name, uint32_t flags, uint32_t mode,
-                     uint64_t size) {
+rx::Ref<orbis::File> ipmi::createShm(const char *name, uint32_t flags,
+                                     uint32_t mode, uint64_t size) {
   rx::Ref<orbis::File> shm;
   auto shmDevice = orbis::g_context->shmDevice.staticCast<orbis::IoDevice>();
   shmDevice->open(&shm, name, flags, mode, nullptr);
   shm->ops->truncate(shm.get(), size, nullptr);
+
+  return shm;
 }
 
 orbis::ErrorCode
@@ -581,7 +613,49 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
       lnsStatusServer = 0x30010;
     }
   }
+
+  int lnsLoadExec;
+
+  if (orbis::g_context->fwType == orbis::FwType::Ps5) {
+    lnsLoadExec = 0x30013;
+  } else {
+    if (orbis::g_context->fwSdkVersion > 0x6000000) {
+      lnsLoadExec = 0x30010;
+    } else {
+      lnsLoadExec = 0x30013;
+    }
+  }
+
   createIpmiServer(process, "SceLncService")
+      .addSyncMethod(
+          lnsLoadExec,
+          [](std::vector<std::vector<std::byte>> &outData,
+             const std::vector<std::span<std::byte>> &inData) {
+            std::println(stderr,
+                         "SceLncService::loadExec(inBufCount={}, "
+                         "outBufCount={})",
+                         inData.size(), outData.size());
+
+            for (auto in : inData) {
+              std::println(stderr, "in {}", in.size());
+              rx::hexdump(in);
+            }
+
+            if (inData.size() == 3) {
+              auto action = inData[1];
+              if (std::string_view((const char *)action.data(),
+                                   action.size() - 1) == "EXIT") {
+                orbis::uint32_t status = 1;
+                if (inData[0].size() == sizeof(orbis::uint32_t)) {
+                  std::memcpy(&status, inData[0].data(), sizeof(status));
+                }
+
+                rx::println(stderr, "LNC exit request, status {}", status);
+                std::exit(status);
+              }
+            }
+            return 0;
+          })
       .addSyncMethod(lnsStatusServer,
                      [](void *out, std::uint64_t &size) -> std::int32_t {
                        struct SceLncServiceAppStatus {
@@ -609,7 +683,8 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
             auto commonDialog = std::get<0>(orbis::g_context->dialogs.front());
             auto currentDialogId =
                 *reinterpret_cast<std::int16_t *>(commonDialog + 4);
-            auto currentDialog = std::get<0>(orbis::g_context->dialogs.back());
+            auto [currentDialog, currentDialogSize] =
+                orbis::g_context->dialogs.back();
             if (currentDialogId == 5) {
               std::int32_t titleSize = 8192;
               std::int32_t buttonNameSize = 64;
@@ -624,8 +699,7 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
               auto buttonType =
                   *reinterpret_cast<std::uint8_t *>(currentDialog + 0x488);
               ORBIS_LOG_TODO("Activate message dialog", dialogTitle.data(),
-                             buttonOk.data(), buttonCancel.data(),
-                             (std::int16_t)buttonType);
+                             buttonOk.data(), buttonCancel.data(), buttonType);
               // ignore dialogs without buttons
               if (buttonType != 2 && buttonType != 5 && buttonType != 6) {
                 *reinterpret_cast<std::uint8_t *>(currentDialog + 0x18) =
@@ -635,8 +709,20 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
                 *reinterpret_cast<std::uint8_t *>(currentDialog + 0x24ec) =
                     1; // pressed button type
               }
+            } else if (currentDialogId == 0x11) {
+              // playgo dialog
+
+              ORBIS_LOG_TODO("Activate playgo dialog");
+
+              *reinterpret_cast<std::uint8_t *>(currentDialog + 0x18) =
+                  1; // finished state
+              *reinterpret_cast<std::int32_t *>(currentDialog + 0x30) =
+                  0; // result code
+              *reinterpret_cast<std::uint8_t *>(currentDialog + 0x24ec) =
+                  1; // pressed button type
             } else {
               ORBIS_LOG_TODO("Activate unsupported dialog", currentDialogId);
+              rx::hexdump(currentDialog, currentDialogSize);
             }
             return 0;
           })
@@ -657,22 +743,19 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
             int shmFd =
                 ::open(hostPath.c_str(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
             if (shmFd == -1) {
-              perror("shm_open");
-              std::abort();
+              rx::die("shm_open failed, errc {}", std::errc{ errno });
             }
 
             struct stat controlStat;
             if (::fstat(shmFd, &controlStat)) {
-              perror("fstat");
-              std::abort();
+              rx::die("fstat failed, errc {}", std::errc{errno});
             }
 
             auto shmAddress = reinterpret_cast<std::uint8_t *>(
-                rx::mem::map(nullptr, controlStat.st_size,
-                             PROT_READ | PROT_WRITE, MAP_SHARED, shmFd));
+                ::mmap(nullptr, controlStat.st_size, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, shmFd, 0));
             if (shmAddress == MAP_FAILED) {
-              perror("mmap");
-              std::abort();
+              rx::die("mmap failed, errc {}", std::errc{errno});
             }
             orbis::g_context->dialogs.emplace_back(shmAddress,
                                                    controlStat.st_size);
@@ -689,7 +772,7 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
                   std::get<1>(orbis::g_context->dialogs.back());
               ORBIS_LOG_TODO("Unmap shm after unlinking", currentDialogAddr,
                              currentDialogSize);
-              rx::mem::unmap(currentDialogAddr, currentDialogSize);
+              ::munmap(currentDialogAddr, currentDialogSize);
               orbis::g_context->dialogs.pop_back();
             }
             return 0;
@@ -742,6 +825,19 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
           });
 
   createIpmiServer(process, "SceNpTrophyIpc")
+      .addSyncMethod(0,
+                     [](orbis::IpmiSession &session,
+                        std::vector<std::vector<std::byte>> &out,
+                        const std::vector<std::span<std::byte>> &) {
+                       if (out.size() != 1 ||
+                           out[0].size() < sizeof(std::uint32_t)) {
+                         return orbis::ErrorCode::INVAL;
+                       }
+
+                       out = {toBytes<std::uint32_t>(1)};
+                       session.client->eventFlags[0].set(1);
+                       return orbis::ErrorCode{};
+                     })
       .addSyncMethod(2,
                      [](std::vector<std::vector<std::byte>> &out,
                         const std::vector<std::span<std::byte>> &) {
@@ -780,11 +876,11 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
                        return orbis::ErrorCode{};
                      })
       .addAsyncMethod(0x90024,
-                      [](orbis::IpmiSession &,
+                      [](orbis::IpmiSession &session,
                          std::vector<std::vector<std::byte>> &out,
                          const std::vector<std::span<std::byte>> &) {
                         out.push_back(toBytes<std::uint32_t>(0));
-                        // session.client->eventFlags[0].set(1);
+                        session.client->eventFlags[0].set(1);
                         return orbis::ErrorCode{};
                       })
       .addAsyncMethod(0x90026, [](orbis::IpmiSession &session,
@@ -800,7 +896,69 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
   createIpmiServer(process, "SceNpGameIntent");
   createIpmiServer(process, "SceBgft");
   createIpmiServer(process, "SceCntMgrService");
-  createIpmiServer(process, "ScePlayGo");
+  createIpmiServer(process, "ScePlayGo")
+      // .addSyncMethod<std::uint32_t, void>(0x30000,
+      //                                     [](std::uint32_t &result) {
+      //                                       rx::println(stderr,
+      //                                                   "PlayGo: 0x30000");
+      //                                       result = 1;
+      //                                       return 0;
+      //                                     })
+      // .addSyncMethod<std::uint32_t>(0x30001,
+      //                               [](std::uint32_t unk) {
+      //                                 rx::println(stderr,
+      //                                             "PlayGo: 0x30001 {:x}",
+      //                                             unk);
+      //                                 return 0;
+      //                               })
+      .addSyncMethod(0x30008,
+                     [](std::vector<std::vector<std::byte>> &out,
+                        const std::vector<std::span<std::byte>> &in) {
+                       // scePlayGoGetLocus
+                       rx::println(stderr, "PlayGo: 0x30008 out {}, in {}",
+                                   out.size(), in.size());
+
+                       std::memset(out[0].data(), 3, out[0].size());
+                       return orbis::ErrorCode{};
+                     })
+      .addSyncMethod(0x3000a,
+                     [](std::vector<std::vector<std::byte>> &out,
+                        const std::vector<std::span<std::byte>> &in) {
+                       rx::println(stderr, "PlayGo: 0x3000a out {}, in {}",
+                                   out.size(), in.size());
+                       // scePlayGoGetToDoList
+
+                       if (out.size() != 2 || in.size() != 1) {
+                         return orbis::ErrorCode::INVAL;
+                       }
+
+                       std::memset(out[0].data(), 0, out[0].size());
+                       out[1] = toBytes<std::uint32_t>(1000);
+                       return orbis::ErrorCode{};
+                     })
+      .addSyncMethod(0x3000e,
+                     [](std::vector<std::vector<std::byte>> &out,
+                        const std::vector<std::span<std::byte>> &in) {
+                       rx::println(stderr, "PlayGo: 0x3000a out {}, in {}",
+                                   out.size(), in.size());
+                       // scePlayGoGetChunkId
+
+                       if (out.size() != 2 || in.size() != 1) {
+                         return orbis::ErrorCode::INVAL;
+                       }
+
+                       std::memset(out[0].data(), 0, out[0].size());
+                       out[1] = toBytes<std::uint32_t>(1);
+                       return orbis::ErrorCode{};
+                     })
+      .addSyncMethod<std::uint32_t, std::uint32_t>(
+          0x3000f, [](std::uint32_t &result, std::uint32_t unk) {
+            rx::println(stderr, "PlayGo: 0x3000f {:x}", unk);
+            result = 1000;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            return 0;
+          });
+
   createIpmiServer(process, "SceCompAppProxyUtil");
   createIpmiServer(process, "SceShareSpIpcService");
   createIpmiServer(process, "SceRnpsAppMgr");
@@ -1083,17 +1241,34 @@ void ipmi::createShellCoreObjects(orbis::Process *process) {
   createEventFlag("SceDataTransfer", 0x120, 0);
 
   createEventFlag("SceLncUtilAppStatus00000000", 0x100, 0);
+  createEventFlag("SceLncUtilAppStatus0", 0x100, 0);
   createEventFlag("SceLncUtilAppStatus1", 0x100, 0);
+  createEventFlag("SceAppMessaging0", 0x120, 1);
   createEventFlag("SceAppMessaging1", 0x120, 1);
+  createEventFlag("SceShellCoreUtil0", 0x120, 0x3f8c);
   createEventFlag("SceShellCoreUtil1", 0x120, 0x3f8c);
   createEventFlag("SceNpScoreIpc_" + fmtHex(process->pid), 0x120, 0);
   createEventFlag("/vmicDdEvfAin", 0x120, 0);
 
+  createSemaphore("SceAppMessaging0", 0x101, 1, 0x7fffffff);
   createSemaphore("SceAppMessaging1", 0x101, 1, 0x7fffffff);
   createSemaphore("SceLncSuspendBlock1", 0x101, 1, 10000);
 
   createShm("SceGlsSharedMemory", 0x202, 0x1a4, 262144);
-  createShm("SceShellCoreUtil", 0x202, 0x1a4, 16384);
+  {
+    auto util = createShm("SceShellCoreUtil", 0x202, 0x1a4, 16384);
+    orbis::uint64_t header = 0x6ed81ede6df17259;
+    orbis::IoVec vec{
+        .base = &header,
+        .len = sizeof(header),
+    };
+    orbis::Uio uio{
+        .iov = &vec,
+        .iovcnt = 1,
+    };
+
+    util->ops->write(util.get(), &uio, process->threadsMap.get(0).get());
+  }
   createShm("SceNpTpip", 0x202, 0x1ff, 43008);
 
   createShm("vmicDdShmAin", 0x202, 0x1b6, 43008);

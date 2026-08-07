@@ -31,5 +31,5 @@ namespace rsx
 			animation_translate m_sliding_animation;
 			std::unique_ptr<list_view> m_sidebar; // Render proxy
 		};
-	} // namespace overlays
-} // namespace rsx
+	}
+}

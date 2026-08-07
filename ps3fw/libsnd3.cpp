@@ -334,6 +334,7 @@ error_code cellSnd3SMFGetKeyOnID(u32 smfID, u32 midiChannel, vm::ptr<u32> keyOnI
 	return CELL_OK;
 }
 
+
 DECLARE(ppu_module_manager::libsnd3)("libsnd3", []()
 	{
 		REG_FUNC(libsnd3, cellSnd3Init);

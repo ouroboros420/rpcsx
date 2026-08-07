@@ -1,10 +1,10 @@
 #include "stdafx.h"
-#include "cellGame.h"
-#include "Emu/Cell/PPUModule.h"
-#include "Emu/IdManager.h"
 #include "Emu/System.h"
-#include "Emu/VFS.h"
 #include "Emu/system_config.h"
+#include "Emu/IdManager.h"
+#include "Emu/VFS.h"
+#include "Emu/Cell/PPUModule.h"
+#include "cellGame.h"
 
 #include "cellos/sys_game.h"
 #include "cellos/sys_process.h"
@@ -13,8 +13,8 @@
 #include "util/StrUtil.h"
 #include "util/lockless.h"
 
-#include <deque>
 #include <span>
+#include <deque>
 
 LOG_CHANNEL(cellSysutil);
 
@@ -87,11 +87,9 @@ struct sysutil_cb_manager
 		std::shared_ptr<atomic_t<bool>> call_active;
 	};
 
-	std::deque<lf_queue<std::shared_ptr<atomic_t<bool>>>>
-		registered_callbacks_abort_handles = []()
+	std::deque<lf_queue<std::shared_ptr<atomic_t<bool>>>> registered_callbacks_abort_handles = []()
 	{
-		// Do resize for deque (cheap container which can store all non-movable
-		// value types)
+		// Do resize for deque (cheap container which can store all non-movable value types)
 		std::deque<lf_queue<std::shared_ptr<atomic_t<bool>>>> result;
 
 		for (usz i = 0; i < g_sysutil_callback_id_assigner; i++)
@@ -123,8 +121,7 @@ struct sysutil_cb_manager
 	}
 };
 
-void sysutil_register_cb_with_id_internal(std::function<s32(ppu_thread&)>&& cb,
-	usz call_id)
+void sysutil_register_cb_with_id_internal(std::function<s32(ppu_thread&)>&& cb, usz call_id)
 {
 	auto& cbm = *ensure(g_fxo->try_get<sysutil_cb_manager>());
 
@@ -133,8 +130,7 @@ void sysutil_register_cb_with_id_internal(std::function<s32(ppu_thread&)>&& cb,
 	if (call_id != umax)
 	{
 		info.call_active = std::make_shared<atomic_t<bool>>(true);
-		::at32(cbm.registered_callbacks_abort_handles, call_id)
-			.push(info.call_active);
+		::at32(cbm.registered_callbacks_abort_handles, call_id).push(info.call_active);
 	}
 
 	cbm.registered.push(std::move(info));
@@ -149,8 +145,7 @@ extern void sysutil_unregister_cb_with_id_internal(usz call_id)
 		return;
 	}
 
-	for (auto&& abort_handle :
-		::at32(cbm->registered_callbacks_abort_handles, call_id).pop_all())
+	for (auto&& abort_handle : ::at32(cbm->registered_callbacks_abort_handles, call_id).pop_all())
 	{
 		// Deactivate the existing event once
 		abort_handle->store(false);
@@ -172,8 +167,7 @@ extern s32 sysutil_send_system_cmd(u64 status, u64 param)
 		{
 			if (cbm->draw_cb_started.exchange(true))
 			{
-				cellSysutil.error(
-					"Tried to enqueue a second or more DRAWING_BEGIN callback!");
+				cellSysutil.error("Tried to enqueue a second or more DRAWING_BEGIN callback!");
 				return CELL_SYSUTIL_ERROR_BUSY;
 			}
 		}
@@ -181,8 +175,7 @@ extern s32 sysutil_send_system_cmd(u64 status, u64 param)
 		{
 			if (!cbm->draw_cb_started.exchange(false))
 			{
-				cellSysutil.error("Tried to enqueue a DRAWING_END callback without a "
-								  "BEGIN callback!");
+				cellSysutil.error("Tried to enqueue a DRAWING_END callback without a BEGIN callback!");
 				return -1;
 			}
 		}
@@ -195,11 +188,9 @@ extern s32 sysutil_send_system_cmd(u64 status, u64 param)
 		{
 			if (cb.callback)
 			{
-				cbm->registered.push(
-					sysutil_cb_manager::dispatcher_cb{[=](ppu_thread& ppu) -> s32
+				cbm->registered.push(sysutil_cb_manager::dispatcher_cb{[=](ppu_thread& ppu) -> s32
 						{
-							// TODO: check it and find the source of the return value (void
-					        // isn't equal to CELL_OK)
+					// TODO: check it and find the source of the return value (void isn't equal to CELL_OK)
 							cb.callback(ppu, status, param, cb.user_data);
 							return CELL_OK;
 						}});
@@ -267,46 +258,26 @@ void fmt_class_string<CellSysutilLang>::format(std::string& out, u64 arg)
 		{
 			switch (value)
 			{
-			case CELL_SYSUTIL_LANG_JAPANESE:
-				return "Japanese";
-			case CELL_SYSUTIL_LANG_ENGLISH_US:
-				return "English (US)";
-			case CELL_SYSUTIL_LANG_FRENCH:
-				return "French";
-			case CELL_SYSUTIL_LANG_SPANISH:
-				return "Spanish";
-			case CELL_SYSUTIL_LANG_GERMAN:
-				return "German";
-			case CELL_SYSUTIL_LANG_ITALIAN:
-				return "Italian";
-			case CELL_SYSUTIL_LANG_DUTCH:
-				return "Dutch";
-			case CELL_SYSUTIL_LANG_PORTUGUESE_PT:
-				return "Portuguese (Portugal)";
-			case CELL_SYSUTIL_LANG_RUSSIAN:
-				return "Russian";
-			case CELL_SYSUTIL_LANG_KOREAN:
-				return "Korean";
-			case CELL_SYSUTIL_LANG_CHINESE_T:
-				return "Chinese (Traditional)";
-			case CELL_SYSUTIL_LANG_CHINESE_S:
-				return "Chinese (Simplified)";
-			case CELL_SYSUTIL_LANG_FINNISH:
-				return "Finnish";
-			case CELL_SYSUTIL_LANG_SWEDISH:
-				return "Swedish";
-			case CELL_SYSUTIL_LANG_DANISH:
-				return "Danish";
-			case CELL_SYSUTIL_LANG_NORWEGIAN:
-				return "Norwegian";
-			case CELL_SYSUTIL_LANG_POLISH:
-				return "Polish";
-			case CELL_SYSUTIL_LANG_ENGLISH_GB:
-				return "English (UK)";
-			case CELL_SYSUTIL_LANG_PORTUGUESE_BR:
-				return "Portuguese (Brazil)";
-			case CELL_SYSUTIL_LANG_TURKISH:
-				return "Turkish";
+		case CELL_SYSUTIL_LANG_JAPANESE: return "Japanese";
+		case CELL_SYSUTIL_LANG_ENGLISH_US: return "English (US)";
+		case CELL_SYSUTIL_LANG_FRENCH: return "French";
+		case CELL_SYSUTIL_LANG_SPANISH: return "Spanish";
+		case CELL_SYSUTIL_LANG_GERMAN: return "German";
+		case CELL_SYSUTIL_LANG_ITALIAN: return "Italian";
+		case CELL_SYSUTIL_LANG_DUTCH: return "Dutch";
+		case CELL_SYSUTIL_LANG_PORTUGUESE_PT: return "Portuguese (Portugal)";
+		case CELL_SYSUTIL_LANG_RUSSIAN: return "Russian";
+		case CELL_SYSUTIL_LANG_KOREAN: return "Korean";
+		case CELL_SYSUTIL_LANG_CHINESE_T: return "Chinese (Traditional)";
+		case CELL_SYSUTIL_LANG_CHINESE_S: return "Chinese (Simplified)";
+		case CELL_SYSUTIL_LANG_FINNISH: return "Finnish";
+		case CELL_SYSUTIL_LANG_SWEDISH: return "Swedish";
+		case CELL_SYSUTIL_LANG_DANISH: return "Danish";
+		case CELL_SYSUTIL_LANG_NORWEGIAN: return "Norwegian";
+		case CELL_SYSUTIL_LANG_POLISH: return "Polish";
+		case CELL_SYSUTIL_LANG_ENGLISH_GB: return "English (UK)";
+		case CELL_SYSUTIL_LANG_PORTUGUESE_BR: return "Portuguese (Brazil)";
+		case CELL_SYSUTIL_LANG_TURKISH: return "Turkish";
 			}
 
 			return unknown;
@@ -314,27 +285,19 @@ void fmt_class_string<CellSysutilLang>::format(std::string& out, u64 arg)
 }
 
 template <>
-void fmt_class_string<CellSysutilLicenseArea>::format(std::string& out,
-	u64 arg)
+void fmt_class_string<CellSysutilLicenseArea>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](CellSysutilLicenseArea value)
 		{
 			switch (value)
 			{
-			case CELL_SYSUTIL_LICENSE_AREA_J:
-				return "SCEJ";
-			case CELL_SYSUTIL_LICENSE_AREA_A:
-				return "SCEA";
-			case CELL_SYSUTIL_LICENSE_AREA_E:
-				return "SCEE";
-			case CELL_SYSUTIL_LICENSE_AREA_H:
-				return "SCEH";
-			case CELL_SYSUTIL_LICENSE_AREA_K:
-				return "SCEK";
-			case CELL_SYSUTIL_LICENSE_AREA_C:
-				return "SCH";
-			case CELL_SYSUTIL_LICENSE_AREA_OTHER:
-				return "Other";
+		case CELL_SYSUTIL_LICENSE_AREA_J: return "SCEJ";
+		case CELL_SYSUTIL_LICENSE_AREA_A: return "SCEA";
+		case CELL_SYSUTIL_LICENSE_AREA_E: return "SCEE";
+		case CELL_SYSUTIL_LICENSE_AREA_H: return "SCEH";
+		case CELL_SYSUTIL_LICENSE_AREA_K: return "SCEK";
+		case CELL_SYSUTIL_LICENSE_AREA_C: return "SCH";
+		case CELL_SYSUTIL_LICENSE_AREA_OTHER: return "Other";
 			}
 
 			return unknown;
@@ -348,52 +311,29 @@ void fmt_class_string<CellSysutilParamId>::format(std::string& out, u64 arg)
 		{
 			switch (value)
 			{
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_LANG:
-				return "ID_LANG";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN:
-				return "ID_ENTER_BUTTON_ASSIGN";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT:
-				return "ID_DATE_FORMAT";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT:
-				return "ID_TIME_FORMAT";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_TIMEZONE:
-				return "ID_TIMEZONE";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_SUMMERTIME:
-				return "ID_SUMMERTIME";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL:
-				return "ID_GAME_PARENTAL_LEVEL";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_LICENSE_AREA:
-				return "ID_LICENSE_AREA";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL0_RESTRICT:
-				return "ID_GAME_PARENTAL_LEVEL0_RESTRICT";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USER_HAS_NP_ACCOUNT:
-				return "ID_CURRENT_USER_HAS_NP_ACCOUNT";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_CAMERA_PLFREQ:
-				return "ID_CAMERA_PLFREQ";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_RUMBLE:
-				return "ID_PAD_RUMBLE";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_KEYBOARD_TYPE:
-				return "ID_KEYBOARD_TYPE";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_JAPANESE_KEYBOARD_ENTRY_METHOD:
-				return "ID_JAPANESE_KEYBOARD_ENTRY_METHOD";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_CHINESE_KEYBOARD_ENTRY_METHOD:
-				return "ID_CHINESE_KEYBOARD_ENTRY_METHOD";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_AUTOOFF:
-				return "ID_PAD_AUTOOFF";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_MAGNETOMETER:
-				return "ID_MAGNETOMETER";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_NICKNAME:
-				return "ID_NICKNAME";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USERNAME:
-				return "ID_CURRENT_USERNAME";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_x1008:
-				return "ID_x1008";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_x1011:
-				return "ID_x1011";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_x1012:
-				return "ID_x1012";
-			case CELL_SYSUTIL_SYSTEMPARAM_ID_x1024:
-				return "ID_x1024";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_LANG: return "ID_LANG";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN: return "ID_ENTER_BUTTON_ASSIGN";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT: return "ID_DATE_FORMAT";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT: return "ID_TIME_FORMAT";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_TIMEZONE: return "ID_TIMEZONE";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_SUMMERTIME: return "ID_SUMMERTIME";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL: return "ID_GAME_PARENTAL_LEVEL";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_LICENSE_AREA: return "ID_LICENSE_AREA";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL0_RESTRICT: return "ID_GAME_PARENTAL_LEVEL0_RESTRICT";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USER_HAS_NP_ACCOUNT: return "ID_CURRENT_USER_HAS_NP_ACCOUNT";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_CAMERA_PLFREQ: return "ID_CAMERA_PLFREQ";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_RUMBLE: return "ID_PAD_RUMBLE";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_KEYBOARD_TYPE: return "ID_KEYBOARD_TYPE";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_JAPANESE_KEYBOARD_ENTRY_METHOD: return "ID_JAPANESE_KEYBOARD_ENTRY_METHOD";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_CHINESE_KEYBOARD_ENTRY_METHOD: return "ID_CHINESE_KEYBOARD_ENTRY_METHOD";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_AUTOOFF: return "ID_PAD_AUTOOFF";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_MAGNETOMETER: return "ID_MAGNETOMETER";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_NICKNAME: return "ID_NICKNAME";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USERNAME: return "ID_CURRENT_USERNAME";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_x1008: return "ID_x1008";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_x1011: return "ID_x1011";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_x1012: return "ID_x1012";
+		case CELL_SYSUTIL_SYSTEMPARAM_ID_x1024: return "ID_x1024";
 			}
 
 			return unknown;
@@ -464,11 +404,9 @@ error_code _cellSysutilGetSystemParamInt()
 	return CELL_OK;
 }
 
-error_code cellSysutilGetSystemParamInt(CellSysutilParamId id,
-	vm::ptr<s32> value)
+error_code cellSysutilGetSystemParamInt(CellSysutilParamId id, vm::ptr<s32> value)
 {
-	cellSysutil.warning("cellSysutilGetSystemParamInt(id=0x%x(%s), value=*0x%x)",
-		id, id, value);
+	cellSysutil.warning("cellSysutilGetSystemParamInt(id=0x%x(%s), value=*0x%x)", id, id, value);
 
 	if (!value)
 	{
@@ -565,12 +503,9 @@ error_code cellSysutilGetSystemParamInt(CellSysutilParamId id,
 	return CELL_OK;
 }
 
-error_code cellSysutilGetSystemParamString(CellSysutilParamId id,
-	vm::ptr<char> buf, u32 bufsize)
+error_code cellSysutilGetSystemParamString(CellSysutilParamId id, vm::ptr<char> buf, u32 bufsize)
 {
-	cellSysutil.trace(
-		"cellSysutilGetSystemParamString(id=0x%x(%s), buf=*0x%x, bufsize=%d)", id,
-		id, buf, bufsize);
+	cellSysutil.trace("cellSysutilGetSystemParamString(id=0x%x(%s), buf=*0x%x, bufsize=%d)", id, id, buf, bufsize);
 
 	if (!buf)
 	{
@@ -592,14 +527,11 @@ error_code cellSysutilGetSystemParamString(CellSysutilParamId id,
 
 	case CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USERNAME:
 	{
-		const fs::file username(vfs::get(
-			fmt::format("/dev_hdd0/home/%08u/localusername", Emu.GetUsrId())));
+		const fs::file username(vfs::get(fmt::format("/dev_hdd0/home/%08u/localusername", Emu.GetUsrId())));
 
 		if (!username)
 		{
-			cellSysutil.error("cellSysutilGetSystemParamString(): Username for user "
-							  "%08u doesn't exist. Did you delete the username file?",
-				Emu.GetUsrId());
+			cellSysutil.error("cellSysutilGetSystemParamString(): Username for user %08u doesn't exist. Did you delete the username file?", Emu.GetUsrId());
 		}
 		else
 		{
@@ -612,18 +544,9 @@ error_code cellSysutilGetSystemParamString(CellSysutilParamId id,
 	}
 
 	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1011: // Same as x1012
-	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1012:
-		copy_size = 0x400;
-		report_use = true;
-		break;
-	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1024:
-		copy_size = 0x100;
-		report_use = true;
-		break;
-	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1008:
-		copy_size = 0x4;
-		report_use = true;
-		break;
+	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1012: copy_size = 0x400; report_use = true; break;
+	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1024:	copy_size = 0x100; report_use = true; break;
+	case CELL_SYSUTIL_SYSTEMPARAM_ID_x1008: copy_size = 0x4; report_use = true; break;
 	default:
 	{
 		return CELL_SYSUTIL_ERROR_VALUE;
@@ -637,8 +560,7 @@ error_code cellSysutilGetSystemParamString(CellSysutilParamId id,
 
 	if (report_use)
 	{
-		cellSysutil.error("cellSysutilGetSystemParamString: Unknown ParamId 0x%x",
-			id);
+		cellSysutil.error("cellSysutilGetSystemParamString: Unknown ParamId 0x%x", id);
 	}
 
 	std::span dst(buf.get_ptr(), copy_size);
@@ -647,15 +569,11 @@ error_code cellSysutilGetSystemParamString(CellSysutilParamId id,
 }
 
 // Note: the way we do things here is inaccurate(but maybe sufficient)
-// The real function goes over a table of 0x20 entries[ event_code:u32
-// callback_addr:u32 ] Those callbacks are registered through
-// cellSysutilRegisterCallbackDispatcher(u32 event_code, vm::ptr<void>
-// func_addr) The function goes through all the callback looking for one
-// callback associated with event 0x100, if any is found it is called with
-// parameters r3=0x101 r4=0 This particular CB seems to be associated with
-// sysutil itself Then it checks for events on an event_queue associated with
-// sysutil, checks if any cb is associated with that event and calls them with
-// parameters that come from the event
+// The real function goes over a table of 0x20 entries[ event_code:u32 callback_addr:u32 ]
+// Those callbacks are registered through cellSysutilRegisterCallbackDispatcher(u32 event_code, vm::ptr<void> func_addr)
+// The function goes through all the callback looking for one callback associated with event 0x100, if any is found it is called with parameters r3=0x101 r4=0
+// This particular CB seems to be associated with sysutil itself
+// Then it checks for events on an event_queue associated with sysutil, checks if any cb is associated with that event and calls them with parameters that come from the event
 error_code cellSysutilCheckCallback(ppu_thread& ppu)
 {
 	cellSysutil.trace("cellSysutilCheckCallback()");
@@ -690,13 +608,9 @@ error_code cellSysutilCheckCallback(ppu_thread& ppu)
 	return CELL_OK;
 }
 
-error_code cellSysutilRegisterCallback(u32 slot,
-	vm::ptr<CellSysutilCallback> func,
-	vm::ptr<void> userdata)
+error_code cellSysutilRegisterCallback(u32 slot, vm::ptr<CellSysutilCallback> func, vm::ptr<void> userdata)
 {
-	cellSysutil.warning(
-		"cellSysutilRegisterCallback(slot=%d, func=*0x%x, userdata=*0x%x)", slot,
-		func, userdata);
+	cellSysutil.warning("cellSysutilRegisterCallback(slot=%d, func=*0x%x, userdata=*0x%x)", slot, func, userdata);
 
 	if (slot >= 4)
 	{
@@ -750,20 +664,15 @@ error_code cellSysutilEnableBgmPlayback()
 	return CELL_OK;
 }
 
-error_code cellSysutilEnableBgmPlaybackEx(
-	vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
+error_code cellSysutilEnableBgmPlaybackEx(vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
 {
 	cellSysutil.warning("cellSysutilEnableBgmPlaybackEx(param=*0x%x)", param);
 
 	if (!param ||
-		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeInTime > 60000 ||
-		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeOutTime > 60000 ||
-		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeInTime > 60000 ||
-		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeOutTime > 60000)
+		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeInTime > 60000 ||
+		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeOutTime > 60000 ||
+		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeInTime > 60000 ||
+		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeOutTime > 60000)
 	{
 		return CELL_SYSUTIL_BGMPLAYBACK_EX_ERROR_PARAM;
 	}
@@ -792,20 +701,15 @@ error_code cellSysutilDisableBgmPlayback()
 	return CELL_OK;
 }
 
-error_code cellSysutilDisableBgmPlaybackEx(
-	vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
+error_code cellSysutilDisableBgmPlaybackEx(vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
 {
 	cellSysutil.warning("cellSysutilDisableBgmPlaybackEx(param=*0x%x)", param);
 
 	if (!param ||
-		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeInTime > 60000 ||
-		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeOutTime > 60000 ||
-		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeInTime > 60000 ||
-		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeOutTime > 60000)
+		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeInTime > 60000 ||
+		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeOutTime > 60000 ||
+		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeInTime > 60000 ||
+		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeOutTime > 60000)
 	{
 		return CELL_SYSUTIL_BGMPLAYBACK_EX_ERROR_PARAM;
 	}
@@ -823,8 +727,7 @@ error_code cellSysutilDisableBgmPlaybackEx(
 	return CELL_OK;
 }
 
-error_code
-cellSysutilGetBgmPlaybackStatus(vm::ptr<CellSysutilBgmPlaybackStatus> status)
+error_code cellSysutilGetBgmPlaybackStatus(vm::ptr<CellSysutilBgmPlaybackStatus> status)
 {
 	cellSysutil.trace("cellSysutilGetBgmPlaybackStatus(status=*0x%x)", status);
 
@@ -840,8 +743,7 @@ cellSysutilGetBgmPlaybackStatus(vm::ptr<CellSysutilBgmPlaybackStatus> status)
 	return CELL_OK;
 }
 
-error_code cellSysutilGetBgmPlaybackStatus2(
-	vm::ptr<CellSysutilBgmPlaybackStatus2> status2)
+error_code cellSysutilGetBgmPlaybackStatus2(vm::ptr<CellSysutilBgmPlaybackStatus2> status2)
 {
 	cellSysutil.trace("cellSysutilGetBgmPlaybackStatus2(status2=*0x%x)", status2);
 
@@ -858,21 +760,15 @@ error_code cellSysutilGetBgmPlaybackStatus2(
 	return CELL_OK;
 }
 
-error_code cellSysutilSetBgmPlaybackExtraParam(
-	vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
+error_code cellSysutilSetBgmPlaybackExtraParam(vm::ptr<CellSysutilBgmPlaybackExtraParam> param)
 {
-	cellSysutil.warning("cellSysutilSetBgmPlaybackExtraParam(param=*0x%x)",
-		param);
+	cellSysutil.warning("cellSysutilSetBgmPlaybackExtraParam(param=*0x%x)", param);
 
 	if (!param ||
-		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeInTime > 60000 ||
-		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->systemBgmFadeOutTime > 60000 ||
-		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeInTime > 60000 ||
-		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID ||
-		param->gameBgmFadeOutTime > 60000)
+		param->systemBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeInTime > 60000 ||
+		param->systemBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->systemBgmFadeOutTime > 60000 ||
+		param->gameBgmFadeInTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeInTime > 60000 ||
+		param->gameBgmFadeOutTime < CELL_SYSUTIL_BGMPLAYBACK_FADE_INVALID || param->gameBgmFadeOutTime > 60000)
 	{
 		return CELL_SYSUTIL_BGMPLAYBACK_EX_ERROR_PARAM;
 	}
@@ -884,25 +780,20 @@ error_code cellSysutilSetBgmPlaybackExtraParam(
 	bgm.param.gameBgmFadeInTime = param->gameBgmFadeInTime;
 	bgm.param.gameBgmFadeOutTime = param->gameBgmFadeOutTime;
 
-	// TODO: apparently you are only able to set this only once and while bgm is
-	// enabled
+	// TODO: apparently you are only able to set this only once and while bgm is enabled
 
 	return CELL_OK;
 }
 
-error_code cellSysutilRegisterCallbackDispatcher(u32 event_code,
-	u32 func_addr)
+error_code cellSysutilRegisterCallbackDispatcher(u32 event_code, u32 func_addr)
 {
-	cellSysutil.warning(
-		"cellSysutilRegisterCallbackDispatcher(event_code=0x%x, func_addr=0x%x)",
-		event_code, func_addr);
+	cellSysutil.warning("cellSysutilRegisterCallbackDispatcher(event_code=0x%x, func_addr=0x%x)", event_code, func_addr);
 
 	auto& cbm = g_fxo->get<sysutil_cb_manager>();
 
 	for (u32 i = 0; i < cbm.dispatchers.size(); i++)
 	{
-		if (cbm.dispatchers[i].atomic_op(
-				[&](sysutil_cb_manager::registered_dispatcher& dispatcher)
+		if (cbm.dispatchers[i].atomic_op([&](sysutil_cb_manager::registered_dispatcher& dispatcher)
 				{
 					if (dispatcher.event_code == 0)
 					{
@@ -922,15 +813,13 @@ error_code cellSysutilRegisterCallbackDispatcher(u32 event_code,
 
 error_code cellSysutilUnregisterCallbackDispatcher(u32 event_code)
 {
-	cellSysutil.warning(
-		"cellSysutilUnregisterCallbackDispatcher(event_code=0x%x)", event_code);
+	cellSysutil.warning("cellSysutilUnregisterCallbackDispatcher(event_code=0x%x)", event_code);
 
 	auto& cbm = g_fxo->get<sysutil_cb_manager>();
 
 	for (u32 i = 0; i < cbm.dispatchers.size(); i++)
 	{
-		if (cbm.dispatchers[i].atomic_op(
-				[&](sysutil_cb_manager::registered_dispatcher& dispatcher)
+		if (cbm.dispatchers[i].atomic_op([&](sysutil_cb_manager::registered_dispatcher& dispatcher)
 				{
 					if (dispatcher.event_code == event_code)
 					{
@@ -1194,8 +1083,7 @@ error_code _ZN16sysutil_cxmlutil11FixedMemory5BeginEi()
 	return CELL_OK;
 }
 
-error_code
-_ZN16sysutil_cxmlutil11FixedMemory8AllocateEN4cxml14AllocationTypeEPvS3_jPS3_Pj()
+error_code _ZN16sysutil_cxmlutil11FixedMemory8AllocateEN4cxml14AllocationTypeEPvS3_jPS3_Pj()
 {
 	UNIMPLEMENTED_FUNC(cellSysutil);
 	return CELL_OK;
@@ -1307,18 +1195,14 @@ DECLARE(ppu_module_manager::cellSysutil)("cellSysutil", []()
 		REG_FUNC(cellSysutil, _ZN8cxmlutil9GetStringERKN4cxml7ElementEPKcPS5_Pj);
 		REG_FUNC(cellSysutil, _ZN8cxmlutil9SetStringERKN4cxml7ElementEPKcS5_);
 		REG_FUNC(cellSysutil, _ZN8cxmlutil16CheckElementNameERKN4cxml7ElementEPKc);
-		REG_FUNC(cellSysutil,
-			_ZN8cxmlutil16FindChildElementERKN4cxml7ElementEPKcS5_S5_);
+	REG_FUNC(cellSysutil, _ZN8cxmlutil16FindChildElementERKN4cxml7ElementEPKcS5_S5_);
 		REG_FUNC(cellSysutil, _ZN8cxmlutil7GetFileERKN4cxml7ElementEPKcPNS0_4FileE);
 
 		REG_FUNC(cellSysutil, _ZN16sysutil_cxmlutil11FixedMemory3EndEi);
 		REG_FUNC(cellSysutil, _ZN16sysutil_cxmlutil11FixedMemory5BeginEi);
-		REG_FUNC(
-			cellSysutil,
-			_ZN16sysutil_cxmlutil11FixedMemory8AllocateEN4cxml14AllocationTypeEPvS3_jPS3_Pj);
+	REG_FUNC(cellSysutil, _ZN16sysutil_cxmlutil11FixedMemory8AllocateEN4cxml14AllocationTypeEPvS3_jPS3_Pj);
 		REG_FUNC(cellSysutil, _ZN16sysutil_cxmlutil12PacketWriter5WriteEPKvjPv);
-		REG_FUNC(cellSysutil,
-			_ZN16sysutil_cxmlutil12PacketWriterC1EiiRN4cxml8DocumentE);
+	REG_FUNC(cellSysutil, _ZN16sysutil_cxmlutil12PacketWriterC1EiiRN4cxml8DocumentE);
 
 		REG_FNID(cellSysutil, 0xE1EC7B6A, cellSysutil_E1EC7B6A);
 	});

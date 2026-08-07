@@ -9,6 +9,7 @@
 #include "Emu/RSX/rsx_utils.h"
 #include "Emu/RSX/rsx_cache.h"
 #include "util/mutex.h"
+#include "util/Thread.h"
 #include "rx/asm.hpp"
 
 #include <optional>
@@ -283,6 +284,10 @@ namespace vk
 			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
 			while (num_waiters.load() != 0)
 			{
+				if (thread_ctrl::state() == thread_state::aborting)
+				{
+					return;
+				}
 				rx::pause();
 			}
 		}
@@ -292,6 +297,14 @@ namespace vk
 			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
 			while (pending_state.load())
 			{
+				// Don't spin forever if the emulator is tearing down: a non-RSX
+				// thread can fault into the flush handshake while the RSX thread has
+				// already left its loop for the stop-time flush, which otherwise
+				// deadlocks the join (savestate-save freeze).
+				if (thread_ctrl::state() == thread_state::aborting)
+				{
+					return;
+				}
 				std::this_thread::yield();
 			}
 		}

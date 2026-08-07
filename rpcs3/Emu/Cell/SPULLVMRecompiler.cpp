@@ -1672,7 +1672,19 @@ public:
 		}
 
 #ifdef ARCH_ARM64
-		m_use_tbl2 = !g_spu_llvm_compile_context || g_spu_llvm_compile_context->use_tbl2;
+		// Only emit the adjacency-fragile aarch64_neon_tbl2/tbx2 intrinsics when a compile
+		// context explicitly opts in. A null context means this compile did not come through
+		// compile_spu_llvm_with_retry, so there is no scavenger-error retry to fall back on;
+		// such compiles default to the split tbl1/tbx1 lowering, which is provably equivalent
+		// and has no register-pairing requirement. (their a2aa113)
+		//
+		// NOTE: today this is defensive only. On ARM64 every call site that reaches this line
+		// goes through compile_spu_llvm_with_retry (SPUCommonRecompiler.cpp), so the context is
+		// never null here and the first attempt still runs with use_tbl2 = true. It does NOT
+		// cover compile_interpreter(): compile() early-returns to it above, before this
+		// assignment, so the interpreter module keeps cpu_translator's m_use_tbl2 = true
+		// default and is still built with tbl2/tbx2 and no retry wrapper.
+		m_use_tbl2 = g_spu_llvm_compile_context && g_spu_llvm_compile_context->use_tbl2;
 
 		if (g_spu_llvm_compile_context)
 		{
@@ -1680,7 +1692,10 @@ public:
 		}
 #endif
 
-		spu_log.notice("Building function 0x%x... (size %u, %s)", func.entry_point, func.data.size(), m_hash);
+		// trace, not notice: this fires once per compiled SPU block on the saturated
+		// low-priority compile workers during every level-load burst (~32k ops in Mafia II).
+		// On a phone that is real CPU/IO/heat at the default log level. (their bb840a55)
+		spu_log.trace("Building function 0x%x... (size %u, %s)", func.entry_point, func.data.size(), m_hash);
 
 		m_pos = func.lower_bound;
 		m_base = func.entry_point;
@@ -3927,6 +3942,21 @@ public:
 					// Testing only
 					added = m_jit.try_add(std::move(_module), m_spurt->get_cache_path() + "llvm/", llvm_error);
 				}
+				else if (!m_spurt->get_object_cache_path().empty())
+				{
+					// Persistent SPU object cache (their 8430a655). ARM64 has no spu_fast tier,
+					// so without an on-disk object cache every launch re-JITs thousands of SPU
+					// blocks. Write the compiled object into the version+config+cpu-keyed dir
+					// built by the spu_runtime ctor so a repeat launch loads it instead. The
+					// keyed dir name IS the whole safety mechanism - LLVM's ObjectCache matches
+					// on module name only, never on IR/CPU/settings. The spu_runtime ctor half of
+					// the commit HAS landed (SPUCommonRecompiler.cpp builds spuobj-v<VER>-<key>/),
+					// so this branch is LIVE, not inert - an empty path only ever means the ctor
+					// declined to create the dir, which falls through to in-memory JIT only.
+					// Kept on our two-call try_add/try_fin API rather than their merged
+					// try_add_fin (a pthread-count micro-opt that needs a util/JIT.h change).
+					added = m_jit.try_add(std::move(_module), m_spurt->get_object_cache_path(), llvm_error);
+				}
 				else
 				{
 					added = m_jit.try_add(std::move(_module), llvm_error);
@@ -4693,7 +4723,7 @@ public:
 #if defined(ARCH_X64) || defined(ARCH_ARM64)
 			if (utils::get_tsc_freq() && !(g_cfg.core.spu_loop_detection) && (g_cfg.core.clocks_scale == 100))
 			{
-				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
+				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), get_timebase_offs_ptr());
 				const auto timestamp = m_ir->CreateLoad(get_type<u64>(), spu_ptr(OFFSET_OF(spu_thread, ch_dec_start_timestamp)));
 				const auto dec_value = m_ir->CreateLoad(get_type<u32>(), spu_ptr(OFFSET_OF(spu_thread, ch_dec_value)));
 				// RPCSX: upstream 61a260482 widened this path to ARM64 using
@@ -5533,7 +5563,7 @@ public:
 #if defined(ARCH_X64) || defined(ARCH_ARM64)
 			if (utils::get_tsc_freq() && !(g_cfg.core.spu_loop_detection) && (g_cfg.core.clocks_scale == 100))
 			{
-				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), m_ir->CreateIntToPtr(m_ir->getInt64(reinterpret_cast<u64>(&g_timebase_offs)), get_type<u64*>()));
+				const auto timebase_offs = m_ir->CreateLoad(get_type<u64>(), get_timebase_offs_ptr());
 				// RPCSX: upstream 61a260482 widened this path to ARM64 using
 				// llvm.readcyclecounter, but on AArch64 that lowers to
 				// MRS PMCCNTR_EL0 - the performance counter, which userspace cannot
@@ -10344,6 +10374,26 @@ public:
 		const auto func = llvm::cast<llvm::Function>(m_module->getOrInsertFunction("spu_segment_base", type).getCallee());
 		m_engine->updateGlobalMapping("spu_segment_base", reinterpret_cast<u64>(jit_runtime::alloc(0, 0)));
 		return func;
+	}
+
+	// Relocation-safe pointer to the host g_timebase_offs global (u64, sys_time.cpp).
+	// Baking reinterpret_cast<u64>(&g_timebase_offs) as an LLVM immediate freezes a
+	// per-process .bss address into the compiled object; once an SPU object cache reloads
+	// that block into a differently-based .so (a rebuild and/or per-launch ASLR of .bss)
+	// the immediate points at stale/unmapped memory and the RdDec/WrDec fast-path load
+	// faults. This was the only baked absolute host address in SPU codegen (RdDec + WrDec
+	// are the sole two sites), which is why the PPU object cache is safe but the SPU one
+	// was not. Reference it through a private external symbol bound via
+	// updateGlobalMapping instead, exactly like spu_segment_base / spu_dispatcher: the
+	// reference becomes a relocation that findSymbol re-resolves to the current address on
+	// every object load, fresh or cached. A private name (not "g_timebase_offs") keeps
+	// updateGlobalMapping the sole resolver. The runtime load still reads the live,
+	// savestate-updatable value. (their 5288a433)
+	llvm::Value* get_timebase_offs_ptr()
+	{
+		const auto gv = m_module->getOrInsertGlobal("spu_timebase_offs", get_type<u64>());
+		m_engine->updateGlobalMapping("spu_timebase_offs", reinterpret_cast<u64>(&g_timebase_offs));
+		return gv;
 	}
 
 	static decltype(&spu_llvm_recompiler::UNK) decode(u32 op);

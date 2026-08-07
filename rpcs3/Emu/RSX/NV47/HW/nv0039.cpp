@@ -75,6 +75,21 @@ namespace rsx
 			const auto read_length = in_pitch * (line_count - 1) + line_length;
 			const auto write_length = out_pitch * (line_count - 1) + line_length;
 
+			// A stale or corrupt transfer command (e.g. an RSX FIFO desync, easier to
+			// hit on weak-memory ARM under "Fast" accuracy) can carry offsets/pitches
+			// whose strided extent runs past mapped memory. get_address above only
+			// validates the start address; re-validate the full forward extent (it
+			// returns 0 on failure when given a size) and skip the transfer rather
+			// than memcpy into unmapped host memory and crash the RSX thread.
+			if (in_pitch >= 0 && out_pitch >= 0 &&
+				(!get_address(src_offset, src_dma, read_length) ||
+					!get_address(dst_offset, dst_dma, write_length)))
+			{
+				rsx_log.error("NV0039_BUFFER_NOTIFY: skipped out-of-bounds transfer (src=0x%x@0x%x, dst=0x%x@0x%x, line=0x%x x%u, pitch in=0x%x out=0x%x)",
+					src_offset, src_dma, dst_offset, dst_dma, line_length, line_count, in_pitch, out_pitch);
+				return;
+			}
+
 			RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, write_length);
 
 			if (const auto result = RSX(ctx)->read_barrier(read_address, read_length, !is_block_transfer);

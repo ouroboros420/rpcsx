@@ -215,8 +215,7 @@ namespace rsx
 			_capacity = size;
 		}
 
-		template <typename T>
-			requires UnsignedInt<T>
+		template <typename T> requires UnsignedInt<T>
 		void resize(T size)
 		{
 			const auto new_size = static_cast<u32>(size);
@@ -642,4 +641,4 @@ namespace rsx
 			std::for_each(begin(), end(), func);
 		}
 	};
-} // namespace rsx
+}

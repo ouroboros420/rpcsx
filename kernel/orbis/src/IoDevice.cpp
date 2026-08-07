@@ -1,8 +1,12 @@
 #include "IoDevice.hpp"
+#include "file.hpp"
+#include "rx/Mappable.hpp"
+#include "rx/format-base.hpp"
 #include "thread/Thread.hpp"
 #include "utils/Logs.hpp"
+#include "vmem.hpp"
 
-static std::string iocGroupToString(unsigned iocGroup) {
+std::string orbis::ioctl::groupToString(unsigned iocGroup) {
   if (iocGroup >= 128) {
     const char *sceGroups[] = {
         "DEV",
@@ -64,12 +68,33 @@ static std::string iocGroupToString(unsigned iocGroup) {
   return "'?'";
 }
 
+orbis::ErrorCode
+orbis::IoDevice::map(rx::AddressRange range, std::int64_t offset,
+                     rx::EnumBitSet<vmem::Protection> protection, File *file,
+                     Process *) {
+  if (!file->dirEntries.empty()) {
+    return orbis::ErrorCode::ISDIR;
+  }
+
+  if (!file->hostFd) {
+    return ErrorCode::NOTSUP;
+  }
+
+  auto errc = file->hostFd.map(range, offset, vmem::toCpuProtection(protection),
+                               orbis::vmem::kPageSize);
+  return orbis::toErrorCode(errc);
+}
+
 orbis::ErrorCode orbis::IoDevice::ioctl(std::uint64_t request,
                                         orbis::ptr<void> argp, Thread *thread) {
-  auto group = iocGroupToString(ioctl::group(request));
+  auto group = ioctl::groupToString(ioctl::group(request));
   auto paramSize = ioctl::paramSize(request);
   ORBIS_LOG_ERROR("unhandled ioctl", request, group, paramSize, argp,
                   thread->tid);
   thread->where();
   return ErrorCode::NOTSUP;
+}
+
+std::string orbis::IoDevice::toString() const {
+  return rx::format("{}", static_cast<const void *>(this));
 }

@@ -72,7 +72,6 @@ if(LINUX AND WITH_PS4)
     main.cpp
     AudioOut.cpp
     backtrace.cpp
-    vm.cpp
     ops.cpp
     linker.cpp
     io-device.cpp
@@ -81,7 +80,7 @@ if(LINUX AND WITH_PS4)
     ipmi.cpp
   )
 
-  target_base_address(rpcsx 0x0000070000000000)
+  target_base_address(rpcsx 0x00000700000000000)
   target_compile_options(rpcsx PRIVATE "-mfsgsbase")
   set_target_properties(rpcsx PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   install(TARGETS rpcsx RUNTIME DESTINATION bin)

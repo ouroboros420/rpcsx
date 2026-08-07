@@ -11,6 +11,7 @@
 #include "rx/align.hpp"
 #include "Crypto/unzip.h"
 
+#include <algorithm>
 #include <charconv>
 
 #if defined(__APPLE__)
@@ -384,6 +385,18 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 	// May be a memory container internally
 	std::function<u64(const std::string&)> m_symbols_cement;
 
+#ifdef ARCH_ARM64
+	// Code sections allocated since the last finalizeMemory(), recorded so the I-cache can be
+	// made coherent for CROSS-CORE execution (ouroboros420 04f9683). jit_runtime is WX and never
+	// re-protects, and this manager's finalizeMemory does nothing (unlike upstream's
+	// SectionMemoryManager, which calls __clear_cache). On a single PE the ISB+DSB ISH issued
+	// after codegen suffices, but a block finalized on one core and executed on another - the
+	// async background compile, and the boot-precompile workers - can fetch stale bytes without
+	// an explicit dc cvau + ic ivau publish.
+	// ARM64-only: x86-64 has coherent I/D caches, so this bookkeeping is pure overhead there.
+	std::vector<std::pair<u8*, usz>> m_code_sections;
+#endif
+
 	MemoryManager2(std::function<u64(const std::string&)> symbols_cement = {}) noexcept
 		: m_symbols_cement(std::move(symbols_cement))
 	{
@@ -417,7 +430,16 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 
 	u8* allocateCodeSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/) override
 	{
-		return jit_runtime::alloc(size, align, true);
+		u8* const ptr = jit_runtime::alloc(size, align, true);
+
+#ifdef ARCH_ARM64
+		if (ptr)
+		{
+			m_code_sections.emplace_back(ptr, size);
+		}
+#endif
+
+		return ptr;
 	}
 
 	u8* allocateDataSection(uptr size, uint align, uint /*sec_id*/, llvm::StringRef /*sec_name*/, bool /*is_ro*/) override
@@ -427,6 +449,21 @@ struct MemoryManager2 : llvm::RTDyldMemoryManager
 
 	bool finalizeMemory(std::string* = nullptr) override
 	{
+#ifdef ARCH_ARM64
+		// Make freshly written code coherent for execution on a DIFFERENT core: clean the data
+		// cache to the Point of Unification and invalidate stale instruction cache lines across
+		// the inner-shareable domain (dc cvau -> dsb ish -> ic ivau -> dsb ish), which is exactly
+		// what Bionic's __clear_cache emits. The plain ISB+DSB ISH used elsewhere is a same-core
+		// SMC flush and is NOT sufficient cross-core. See ouroboros420 04f9683.
+#if defined(__GNUC__) || defined(__clang__)
+		for (const auto& [ptr, size] : m_code_sections)
+		{
+			__builtin___clear_cache(reinterpret_cast<char*>(ptr), reinterpret_cast<char*>(ptr + size));
+		}
+#endif
+
+		m_code_sections.clear();
+#endif
 		return false;
 	}
 
@@ -559,6 +596,37 @@ std::string jit_compiler::cpu(std::string_view _cpu)
 
 	if (m_cpu.empty())
 	{
+#if defined(ARCH_ARM64) && !defined(__APPLE__)
+		// LLVM's host detection misreports many modern ARM SoCs - it returns e.g.
+		// "cortex-a34" (a tiny in-order ARMv8.0 core) on Cortex-A520/A720 devices, so
+		// the recompilers end up scheduled and cost-modeled for the wrong, far weaker
+		// microarchitecture. Prefer our own MIDR table (aarch64::get_cpu_name picks the
+		// prime/big core, where the hot PPU/SPU threads run); it used to be consulted
+		// only when getHostCPUName said "generic", i.e. never when LLVM was
+		// confidently wrong. CPU *features* are pinned separately via setMAttrs below,
+		// so this only affects scheduling/cost - it can never select an illegal
+		// instruction. (ouroboros420 e3254ee + cc3a18e; Apple targets excluded because
+		// getHostCPUName is accurate there and get_cpu_name returns a marketing name.)
+		m_cpu = aarch64::get_cpu_name();
+		std::transform(m_cpu.begin(), m_cpu.end(), m_cpu.begin(), [](unsigned char c) { return ::tolower(c); });
+
+		if (m_cpu.empty())
+		{
+			m_cpu = llvm::sys::getHostCPUName().str();
+		}
+
+		// Last-resort guard: if detection lands on "generic" or a tiny in-order core
+		// (what LLVM reports for unknown/new SoCs - 2nd-gen Oryon / Snapdragon 8 Elite
+		// resolves to "generic"), use a known modern out-of-order core as the
+		// schedule/cost-model baseline instead. cortex-a78 (ARMv8.2-A, wide OoO) is the
+		// same baseline fallback_cpu_detection() uses for non-Android ARM64. (On Android
+		// it returns "cortex-a34" for the empty-MIDR case, which is precisely the value
+		// this guard exists to reject, so we do not route through it here.)
+		if (m_cpu.empty() || m_cpu == "generic" || m_cpu == "cortex-a34" || m_cpu == "cortex-a35")
+		{
+			m_cpu = "cortex-a78";
+		}
+#else
 		m_cpu = llvm::sys::getHostCPUName().str();
 
 		if (m_cpu == "generic")
@@ -626,6 +694,7 @@ std::string jit_compiler::cpu(std::string_view _cpu)
 			// Upgrade
 			m_cpu = "alderlake";
 		}
+#endif
 	}
 
 	return m_cpu;
@@ -708,6 +777,30 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 			},
 			nullptr);
 
+		// Separate handler from the fatal one - LLVM installs and dispatches them
+		// independently (ouroboros420 39a6a4c). Without it, an allocation failure inside
+		// LLVM (report_bad_alloc_error, e.g. SmallVector growth while codegenning the
+		// ~478k-declaration PPU symbol-resolver module) writes "LLVM ERROR: out of memory"
+		// to fd 2 - which goes nowhere in an Android app - and abort()s: a signal-6 death
+		// with zero file log. Route it through the same recoverable path as the fatal
+		// handler so a guarded compile survives and everything else at least logs first.
+		// Allocating inside a bad-alloc handler is best-effort, but the failures seen here
+		// are huge single allocations, so small log/string allocations still succeed.
+		llvm::remove_bad_alloc_error_handler();
+		llvm::install_bad_alloc_error_handler([](void*, const char* msg, bool)
+			{
+				const std::string_view out = msg ? msg : "";
+
+				if (g_llvm_fatal_message)
+				{
+					*g_llvm_fatal_message = out;
+					thread_ctrl::silent_exit();
+				}
+
+				fmt::throw_exception("LLVM Out Of Memory: '%s'", out);
+			},
+			nullptr);
+
 		return true;
 	}();
 
@@ -771,6 +864,22 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 	else
 		attributes.push_back("-i8mm");
 
+	// MUST stay gated on the same runtime HWCAP the recompilers gate their intrinsics on.
+	// cpu_translator::initialize() sets m_use_sve_128 / m_use_sve2_128 from utils::has_sve()
+	// / utils::has_sve2() (+ sve_length() == 128), and the SPU LLVM recompiler then emits
+	// llvm.aarch64.sve.* directly: smullb/smullt/umullb/umullt/smlalt/umlalt (MPY, MPYS,
+	// MPYHH, MPYU, MPYHHA...) and, via llvm_rol's use_sve_xar, llvm.aarch64.sve.xar for
+	// every constant-amount rotate. Advertising -sve/-sve2 while those are still emitted
+	// makes ISel abort with "Cannot select: intrinsic %llvm.aarch64.sve.xar" on exactly the
+	// SVE2 devices it would have been meant to protect - same failure mode as the i8mm note
+	// above.
+	//
+	// ouroboros420 da93bef force-pins these off, but it can only do that because that fork
+	// ALSO deleted the SVE2 paths from SPULLVMRecompiler.cpp; we kept them (they are the
+	// "ours" side of this merge). If the SVE2 SPU miscompile is ever reproduced on our LLVM
+	// (22.1.8 - da93bef's diagnosis was on LLVM 20), the fix is to clear m_use_sve_128 /
+	// m_use_sve2_128 in CPUTranslator.cpp AND pin these off in the same change, never one
+	// without the other.
 	if (utils::has_sve())
 		attributes.push_back("+sve");
 	else
@@ -805,6 +914,15 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 		};
 	}
 
+	// Check before any m_engine use (ouroboros420 e3e1edf): create() can return null
+	// (e.g. when the target backend was never registered) and the calls below would
+	// otherwise dereference it, crashing inside pthread_mutex_lock on the engine's
+	// own mutex instead of reporting the real error.
+	if (!m_engine)
+	{
+		fmt::throw_exception("LLVM: Failed to create ExecutionEngine: %s", result);
+	}
+
 	if (!_link.empty())
 	{
 		for (auto&& [name, addr] : _link)
@@ -819,11 +937,6 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 		m_engine->RegisterJITEventListener(llvm::JITEventListener::createIntelJITEventListener());
 #endif
 		m_engine->RegisterJITEventListener(new JITAnnouncer);
-	}
-
-	if (!m_engine)
-	{
-		fmt::throw_exception("LLVM: Failed to create ExecutionEngine: %s", result);
 	}
 
 	fs::device_stat stats{};
@@ -880,6 +993,9 @@ bool jit_compiler::try_add(std::unique_ptr<llvm::Module> _module, const std::str
 		m_engine->generateCodeForModule(ptr);
 	}, error))
 	{
+		// Do not leave the engine pointing at the (stack-local) cache object
+		// once we unwind past it (ouroboros420 0f7c8aa).
+		m_engine->setObjectCache(nullptr);
 		return false;
 	}
 

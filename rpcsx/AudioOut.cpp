@@ -17,8 +17,7 @@
 
 AudioOut::AudioOut() {
   if (sox_init() != SOX_SUCCESS) {
-    ORBIS_LOG_FATAL("Failed to initialize sox");
-    std::abort();
+    rx::die("Failed to initialize sox");
   }
 }
 
@@ -50,34 +49,29 @@ void AudioOut::channelEntry(AudioOutChannelInfo info) {
 
   int controlFd = ::open(control_shm_name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
   if (controlFd == -1) {
-    perror("shm_open");
-    std::abort();
+    rx::die("shm_open failed, errc {}", std::errc{errno});
   }
 
   struct stat controlStat;
   if (::fstat(controlFd, &controlStat)) {
-    perror("fstat");
-    std::abort();
+    rx::die("fstat failed, errc {}", std::errc{errno});
   }
 
   auto controlPtr = reinterpret_cast<std::uint8_t *>(
-      rx::mem::map(nullptr, controlStat.st_size, PROT_READ | PROT_WRITE,
-                   MAP_SHARED, controlFd));
+      ::mmap(nullptr, controlStat.st_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+             controlFd, 0));
   if (controlPtr == MAP_FAILED) {
-    perror("mmap");
-    std::abort();
+    rx::die("mmap failed, errc {}", std::errc{errno});
   }
 
   int bufferFd = ::open(audio_shm_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   if (bufferFd == -1) {
-    perror("open");
-    std::abort();
+    rx::die("buffer shm open failed, errc {}", std::errc{errno});
   }
 
   struct stat bufferStat;
   if (::fstat(bufferFd, &bufferStat)) {
-    perror("fstat");
-    std::abort();
+    rx::die("buffer shm fstat failed, errc {}", std::errc{errno});
   }
 
   auto audioBuffer = ::mmap(NULL, bufferStat.st_size, PROT_READ | PROT_WRITE,
@@ -154,7 +148,7 @@ void AudioOut::channelEntry(AudioOutChannelInfo info) {
   soxMtx.unlock();
 
   if (!output) {
-    std::abort();
+    rx::die("sox_open_write failed");
   }
 
   std::vector<sox_sample_t> samples(inSamples * inChannels);

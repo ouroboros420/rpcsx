@@ -112,6 +112,31 @@ namespace rsx
 
 				bool& last_state = last_button_state[pad_index][static_cast<u32>(button_id)];
 
+				// Serialize overlay-tree mutation against the present thread. on_button_pressed
+				// runs navigation/selection that rebuilds an overlay's compiled_resource (clears
+				// and reallocates the per-command vertex vectors). The flip/present thread renders
+				// that same overlay under the display_manager lock (VKPresent) and reads
+				// verts.data()/size() to upload them. Without taking the same lock here, a button
+				// press can reallocate those vectors while the flip thread is mid-upload, handing
+				// the Vulkan driver a dangling pointer - observed as an rsx::thread segfault inside
+				// libvulkan_freedreno while toggling home-menu checkboxes. Safe against deadlock:
+				// all home-menu manager interactions are deferred via Emu.CallFromMainThread, so
+				// this never re-enters the manager lock on the input thread, and the present thread
+				// never takes pad::g_pad_mutex (no reverse lock order).
+				auto* overlay_mgr = g_fxo->try_get<display_manager>();
+				const auto dispatch_button = [&](pad_button id, bool auto_repeat)
+				{
+					if (overlay_mgr)
+					{
+						std::lock_guard lock(*overlay_mgr);
+						on_button_pressed(id, auto_repeat);
+					}
+					else
+					{
+						on_button_pressed(id, auto_repeat);
+					}
+				};
+
 				if (pressed)
 				{
 					const bool is_auto_repeat_button = m_auto_repeat_buttons.contains(button_id);
@@ -122,7 +147,7 @@ namespace rsx
 						timestamp[pad_index] = steady_clock::now();
 						initial_timestamp[pad_index] = timestamp[pad_index];
 						last_auto_repeat_button[pad_index] = is_auto_repeat_button ? button_id : pad_button::pad_button_max_enum;
-						on_button_pressed(static_cast<pad_button>(button_id), false);
+						dispatch_button(static_cast<pad_button>(button_id), false);
 					}
 					else if (is_auto_repeat_button)
 					{
@@ -130,7 +155,7 @@ namespace rsx
 						{
 							// The auto-repeat button was pressed for at least the given threshold in ms and will trigger at an interval.
 							timestamp[pad_index] = steady_clock::now();
-							on_button_pressed(static_cast<pad_button>(button_id), true);
+							dispatch_button(static_cast<pad_button>(button_id), true);
 						}
 						else if (last_auto_repeat_button[pad_index] == pad_button::pad_button_max_enum)
 						{

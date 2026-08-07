@@ -214,6 +214,13 @@ namespace rsx
 				query->result = -1;
 			}
 			virtual void discard_occlusion_query(occlusion_query_info* /*query*/) {}
+
+			// Optional batched GPU occlusion readback. The drain calls this once before its
+			// per-query read loop so a backend can collapse N blocking result reads into one
+			// round-trip (priming its own per-query cache). The default is intentionally EMPTY:
+			// every non-overriding backend (GL, Null) then reads per-query in the loop exactly
+			// as before, so this is byte-identical for them. Only the VK backend overrides it.
+			virtual void prefetch_occlusion_query_results(const std::vector<occlusion_query_info*>& /*queries*/) {}
 		};
 
 		// Helper class for conditional rendering

@@ -7,6 +7,10 @@ using pid_t = int32_t;
 using uid_t = uint32_t;
 using gid_t = uint32_t;
 
+enum class FileDescriptor : std::int32_t {
+  Invalid = -1
+};
+
 struct rtprio {
   uint16_t type;
   uint16_t prio;
@@ -15,7 +19,7 @@ struct rtprio {
 struct thr_param {
   ptr<void(void *)> start_func;
   ptr<void> arg;
-  ptr<char> stack_base;
+  uint64_t stack_base;
   size_t stack_size;
   ptr<char> tls_base;
   size_t tls_size;

@@ -83,9 +83,7 @@ error_code sys_get_random_number(vm::ptr<void> addr, u64 size)
 	case 0x80010501: return CELL_ENOMEM;
 	case 0x80010503: return CELL_EAGAIN;
 	case 0x80010509: return CELL_EINVAL;
-	default:
-		if (rs)
-			return CELL_EABORT;
+	default: if (rs) return CELL_EABORT;
 	}
 
 	return CELL_OK;

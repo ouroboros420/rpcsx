@@ -138,6 +138,14 @@ class Emulator final
 {
 	atomic_t<system_state> m_state{system_state::stopped};
 
+	// True only during an install-time / --test precompile (SetTestMode), which forces
+	// m_state=running so the PPU/memory managers can run outside a real boot. This makes
+	// IsRunning() unreliable as a "real game is running" signal, so the persistent RPCN
+	// thread (Android fork) would otherwise touch a torn-down g_fxo (p2p_context) during
+	// the install's g_fxo reset - the install-finished native crash. IsTestMode() lets it
+	// tell the fake-running precompile apart from a real game.
+	atomic_t<bool> m_test_mode{false};
+
 	EmuCallbacks m_cb;
 
 	atomic_t<u64> m_pause_start_time{0}; // set when paused
@@ -268,11 +276,17 @@ public:
 	 */
 	void SetTestMode()
 	{
+		m_test_mode = true;
 		m_state = system_state::running;
 	}
 
 	void SetState(system_state state)
 	{
+		// Any transition out of running ends test mode (the install precompile ends with
+		// SetState(stopped)). A real SetState(running) leaves m_test_mode untouched - it
+		// was never set for a real boot, so real games keep IsTestMode()==false.
+		if (state != system_state::running)
+			m_test_mode = false;
 		m_state = state;
 	}
 
@@ -487,6 +501,12 @@ public:
 	bool IsRunning() const
 	{
 		return m_state == system_state::running;
+	}
+	// True only during an install-time/--test precompile (see m_test_mode). Lets the
+	// persistent RPCN thread stay off g_fxo while the install forces a fake running state.
+	bool IsTestMode() const
+	{
+		return m_test_mode;
 	}
 	bool IsPaused() const
 	{

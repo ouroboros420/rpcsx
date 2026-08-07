@@ -197,7 +197,12 @@ namespace utils
 			}
 		}
 
-#elif __linux__ && !defined(ANDROID)
+#elif __linux__
+		// Android is also __linux__: the per-core /proc/stat path used to be excluded here, so the
+		// perf overlay only ever showed an aggregate "Total" and "Cores: 0.0%..." - which hid that
+		// big-cluster affinity pins all emulation threads onto the big cores while the little cores
+		// sit idle. /proc/stat's global per-cpu lines are world-readable on Android; if the open
+		// fails we fall back to the process-CPU total below so the reading never regresses to 0.
 		m_previous_idle_times_per_cpu.resize(utils::get_thread_count(), 0.0);
 		m_previous_total_times_per_cpu.resize(utils::get_thread_count(), 0.0);
 
@@ -288,6 +293,8 @@ namespace utils
 		else
 		{
 			perf_log.error("Failed to open /proc/stat (%s)", strerror(errno));
+			// Keep a usable aggregate if /proc/stat is unreadable (e.g. a locked-down Android).
+			total_usage = get_usage();
 		}
 #else
 		total_usage = get_usage();

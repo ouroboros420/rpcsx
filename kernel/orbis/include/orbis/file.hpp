@@ -1,11 +1,12 @@
 #pragma once
 
+#include "IoDevice.hpp"
 #include "KernelAllocator.hpp"
 #include "error/ErrorCode.hpp"
 #include "note.hpp"
+#include "rx/Mappable.hpp"
 #include "rx/Rc.hpp"
 #include "rx/SharedMutex.hpp"
-#include "IoDevice.hpp"
 #include "stat.hpp"
 #include <cstdint>
 
@@ -14,6 +15,7 @@ struct File;
 struct KNote;
 struct Thread;
 struct Stat;
+struct StatFs;
 struct Uio;
 struct SocketAddress;
 struct msghdr;
@@ -34,44 +36,39 @@ struct FileOps {
   ErrorCode (*kqfilter)(File *file, KNote *kn, Thread *thread) = nullptr;
 
   ErrorCode (*stat)(File *file, Stat *sb, Thread *thread) = nullptr;
+  ErrorCode (*statfs)(File *file, StatFs *sb, Thread *thread) = nullptr;
 
   ErrorCode (*mkdir)(File *file, const char *path, std::int32_t mode) = nullptr;
 
   // TODO: chown
   // TODO: chmod
 
-  ErrorCode (*mmap)(File *file, void **address, std::uint64_t size,
-                    std::int32_t prot, std::int32_t flags, std::int64_t offset,
+  ErrorCode (*bind)(File *file, SocketAddress *address, std::size_t addressLen,
                     Thread *thread) = nullptr;
-  ErrorCode (*munmap)(File *file, void **address, std::uint64_t size,
-                      Thread *thread) = nullptr;
-
-  ErrorCode (*bind)(orbis::File *file, SocketAddress *address,
-                    std::size_t addressLen, Thread *thread) = nullptr;
-  ErrorCode (*listen)(orbis::File *file, int backlog, Thread *thread) = nullptr;
-  ErrorCode (*accept)(orbis::File *file, SocketAddress *address,
+  ErrorCode (*listen)(File *file, int backlog, Thread *thread) = nullptr;
+  ErrorCode (*accept)(File *file, SocketAddress *address,
                       std::uint32_t *addressLen, Thread *thread) = nullptr;
-  ErrorCode (*connect)(orbis::File *file, SocketAddress *address,
+  ErrorCode (*connect)(File *file, SocketAddress *address,
                        std::uint32_t addressLen, Thread *thread) = nullptr;
-  ErrorCode (*sendto)(orbis::File *file, const void *buf, size_t len,
-                      sint flags, caddr_t to, sint tolen,
-                      Thread *thread) = nullptr;
-  ErrorCode (*sendmsg)(orbis::File *file, msghdr *msg, sint flags,
+  ErrorCode (*sendto)(File *file, const void *buf, size_t len, sint flags,
+                      caddr_t to, sint tolen, Thread *thread) = nullptr;
+  ErrorCode (*sendmsg)(File *file, msghdr *msg, sint flags,
                        Thread *thread) = nullptr;
-  ErrorCode (*recvfrom)(orbis::File *file, void *buf, size_t len, sint flags,
+  ErrorCode (*recvfrom)(File *file, void *buf, size_t len, sint flags,
                         SocketAddress *from, uint32_t *fromlenaddr,
                         Thread *thread) = nullptr;
-  ErrorCode (*recvmsg)(orbis::File *file, msghdr *msg, sint flags,
+  ErrorCode (*recvmsg)(File *file, msghdr *msg, sint flags,
                        Thread *thread) = nullptr;
-  ErrorCode (*shutdown)(orbis::File *file, sint how, Thread *thread) = nullptr;
-  ErrorCode (*setsockopt)(orbis::File *file, sint level, sint name,
-                          const void *val, sint valsize,
-                          Thread *thread) = nullptr;
-  ErrorCode (*getsockopt)(orbis::File *file, sint level, sint name, void *val,
+  ErrorCode (*shutdown)(File *file, sint how, Thread *thread) = nullptr;
+  ErrorCode (*setsockopt)(File *file, sint level, sint name, const void *val,
+                          sint valsize, Thread *thread) = nullptr;
+  ErrorCode (*getsockopt)(File *file, sint level, sint name, void *val,
                           sint *avalsize, Thread *thread) = nullptr;
-  ErrorCode (*sendfile)(orbis::File *file, sint fd, off_t offset, size_t nbytes,
+  ErrorCode (*sendfile)(File *file, sint fd, off_t offset, size_t nbytes,
                         ptr<struct sf_hdtr> hdtr, ptr<off_t> sbytes, sint flags,
                         Thread *thread) = nullptr;
+
+  std::string (*toString)(File *file);
 };
 
 struct File : rx::RcBase {
@@ -82,9 +79,10 @@ struct File : rx::RcBase {
   std::uint64_t nextOff = 0;
   int flags = 0;
   int mode = 0;
-  int hostFd = -1;
+  rx::Mappable hostFd;
   kvector<Dirent> dirEntries;
 
   bool noBlock() const { return (flags & 4) != 0; }
+  std::string toString();
 };
 } // namespace orbis

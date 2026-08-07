@@ -129,7 +129,6 @@ add_library(rpcs3 STATIC
     rpcs3_version.cpp
     module_verifier.cpp
 
-    dev/iso.cpp
 
     Crypto/aes.cpp
     Crypto/aesni.cpp
@@ -148,12 +147,12 @@ add_library(rpcs3 STATIC
 
     Loader/disc.cpp
     Loader/ELF.cpp
+    Loader/ISO.cpp
+    Loader/iso_cache.cpp
     Loader/mself.cpp
     Loader/PSF.cpp
     Loader/PUP.cpp
     Loader/TAR.cpp
-    Loader/ISO.cpp
-    Loader/iso_cache.cpp
     Loader/content_validation.cpp
     Loader/TROPUSR.cpp
     Loader/TRP.cpp

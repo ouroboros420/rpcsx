@@ -1622,6 +1622,11 @@ namespace rsx
 		void on_miss()
 		{
 			// rsx_log.trace("Cache miss at address 0x%X. This is gonna hurt...", get_section_base());
+
+			// Their 116133fbf320: attribute frame hitches to texture/WCB readback faults vs ZCULL
+			// occlusion readbacks in the throttled Perf overlay line. Relaxed atomic, read+reset
+			// by the overlay each interval.
+			rsx::g_perf_texture_readbacks++;
 			m_tex_cache->on_miss(*derived());
 		}
 

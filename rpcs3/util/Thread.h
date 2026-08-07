@@ -337,6 +337,12 @@ public:
 	// Returns a core affinity mask. Set whether to generate the high priority set or not
 	static u64 get_affinity_mask(thread_class group);
 
+	// Android: when enabled, bias the heavy emulation threads (PPU/SPU/RSX) onto
+	// the big CPU cluster so background/helper work stays off them. Experimental,
+	// opt-in; a no-op (and falls back to all cores) if cluster detection fails.
+	static void set_android_affinity(bool enable);
+	static bool android_affinity_enabled();
+
 	// Sets the native thread priority
 	static void set_native_priority(int priority);
 

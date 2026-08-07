@@ -72,6 +72,9 @@ private:
 	std::unique_ptr<vk::buffer> m_cond_render_buffer;
 	u64 m_cond_render_sync_tag = 0;
 
+	// Host-visible scratch for the batched ZCULL occlusion readback (prefetch_occlusion_query_results).
+	std::unique_ptr<vk::buffer> m_occlusion_readback_buffer;
+
 	shared_mutex m_sampler_mutex;
 	atomic_t<bool> m_samplers_dirty = {true};
 	std::unique_ptr<vk::sampler> m_stencil_mirror_sampler;
@@ -121,6 +124,7 @@ private:
 	bool surface_lost = false;
 
 	u64 m_last_heap_sync_time = 0;
+	u64 m_last_pipeline_cache_save_time = 0;
 	u32 m_texbuffer_view_size = 0;
 
 	vk::data_heap m_attrib_ring_info;                  // Vertex data
@@ -267,6 +271,7 @@ public:
 	void end_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 	bool check_occlusion_query_status(rsx::reports::occlusion_query_info* query) override;
 	void get_occlusion_query_result(rsx::reports::occlusion_query_info* query) override;
+	void prefetch_occlusion_query_results(const std::vector<rsx::reports::occlusion_query_info*>& queries) override;
 	void discard_occlusion_query(rsx::reports::occlusion_query_info* query) override;
 
 	// External callback in case we need to suddenly submit a commandlist unexpectedly, e.g in a violation handler

@@ -174,7 +174,8 @@ constexpr const char* rsx_fp_input_attr_regs[] =
 	{
 		"WPOS", "COL0", "COL1", "FOGC", "TEX0",
 		"TEX1", "TEX2", "TEX3", "TEX4", "TEX5",
-		"TEX6", "TEX7", "TEX8", "TEX9", "SSA"};
+	"TEX6", "TEX7", "TEX8", "TEX9", "SSA"
+};
 
 static const std::string rsx_fp_op_names[] =
 	{
@@ -187,7 +188,8 @@ static const std::string rsx_fp_op_names[] =
 		"UP16", "BEM", "PKG", "UPG", "DP2A", "TXL", "NULL",
 		"TXB", "NULL", "TEXBEM", "TXPBEM", "BEMLUM", "REFL", "TIMESWTEX",
 		"DP2", "NRM", "DIV", "DIVSQ", "LIF", "FENCT", "FENCB",
-		"NULL", "BRK", "CAL", "IFE", "LOOP", "REP", "RET"};
+	"NULL", "BRK", "CAL", "IFE", "LOOP", "REP", "RET"
+};
 
 struct RSXFragmentProgram
 {
@@ -210,15 +212,15 @@ struct RSXFragmentProgram
 		}
 
 		data_storage_helper(data_storage_helper&& other) noexcept
-			: data_ptr(other.data_ptr), local_storage(std::move(other.local_storage))
+			: data_ptr(other.data_ptr)
+			, local_storage(std::move(other.local_storage))
 		{
 			other.data_ptr = nullptr;
 		}
 
 		data_storage_helper& operator=(const data_storage_helper& other)
 		{
-			if (this == &other)
-				return *this;
+			if (this == &other) return *this;
 
 			if (other.data_ptr == other.local_storage.data())
 			{
@@ -236,8 +238,7 @@ struct RSXFragmentProgram
 
 		data_storage_helper& operator=(data_storage_helper&& other) noexcept
 		{
-			if (this == &other)
-				return *this;
+			if (this == &other) return *this;
 
 			data_ptr = other.data_ptr;
 			local_storage = std::move(other.local_storage);

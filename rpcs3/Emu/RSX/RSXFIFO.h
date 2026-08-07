@@ -171,6 +171,10 @@ namespace rsx
 			{
 				return m_cmd;
 			}
+			// Low-power idle: when the FIFO is empty (GPU caught up to the CPU),
+			// park on the 'put' register instead of yield-spinning a core. The CPU
+			// writes 'put' when it posts new commands, waking the park immediately.
+			void idle_wait() const;
 			void sync_get() const;
 			std::span<const u32> get_current_arg_ptr(u32 length_in_words) const;
 			u32 get_remaining_args_count() const

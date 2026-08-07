@@ -1,14 +1,17 @@
 #include "io-device.hpp"
 #include "orbis/KernelAllocator.hpp"
 #include "orbis/SocketAddress.hpp"
+#include "orbis/error.hpp"
 #include "orbis/file.hpp"
 #include "orbis/stat.hpp"
 #include "orbis/thread/Process.hpp"
 #include "orbis/thread/Thread.hpp"
 #include "orbis/uio.hpp"
 #include "orbis/utils/Logs.hpp"
+#include "orbis/vmem.hpp"
+#include "rx/Mappable.hpp"
+#include "rx/format-base.hpp"
 #include "vfs.hpp"
-#include "vm.hpp"
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
@@ -25,16 +28,17 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <thread>
-#include <unistd.h>
+#include <utility>
 #include <vector>
 
 struct HostFile : orbis::File {
   bool closeOnExit = true;
   bool alignTruncate = false;
+  orbis::kstring path;
 
   ~HostFile() {
-    if (hostFd > 0 && closeOnExit) {
-      ::close(hostFd);
+    if (!closeOnExit && hostFd) {
+      static_cast<void>(hostFd.release());
     }
   }
 };
@@ -46,12 +50,6 @@ struct SocketFile : orbis::File {
   int prot = -1;
 
   orbis::kmap<int, orbis::kvector<std::byte>> options;
-
-  ~SocketFile() {
-    if (hostFd > 0) {
-      ::close(hostFd);
-    }
-  }
 };
 
 static orbis::ErrorCode convertErrc(std::errc errc) {
@@ -319,7 +317,7 @@ static orbis::ErrorCode host_read(orbis::File *file, orbis::Uio *uio,
   if (!hostFile->dirEntries.empty())
     return orbis::ErrorCode::ISDIR;
 
-  return host_fd_read(hostFile->hostFd, uio);
+  return host_fd_read(hostFile->hostFd.native_handle(), uio);
 }
 
 static orbis::ErrorCode host_write(orbis::File *file, orbis::Uio *uio,
@@ -328,73 +326,14 @@ static orbis::ErrorCode host_write(orbis::File *file, orbis::Uio *uio,
   if (!hostFile->dirEntries.empty())
     return orbis::ErrorCode::ISDIR;
 
-  return host_fd_write(hostFile->hostFd, uio);
-}
-
-static orbis::ErrorCode host_mmap(orbis::File *file, void **address,
-                                  std::uint64_t size, std::int32_t prot,
-                                  std::int32_t flags, std::int64_t offset,
-                                  orbis::Thread *thread) {
-  auto hostFile = static_cast<HostFile *>(file);
-  if (!hostFile->dirEntries.empty())
-    return orbis::ErrorCode::ISDIR;
-
-  auto result = vm::map(*address, size, prot, flags,
-                        vm::kMapInternalReserveOnly, hostFile->device.get(), offset);
-
-  if (result == (void *)-1) {
-    return orbis::ErrorCode::NOMEM;
-  }
-
-  size = rx::alignUp(size, vm::kPageSize);
-
-  result =
-      ::mmap(result, size, prot & vm::kMapProtCpuAll,
-             ((flags & vm::kMapFlagPrivate) != 0 ? MAP_PRIVATE : MAP_SHARED) |
-                 MAP_FIXED,
-             hostFile->hostFd, offset);
-  if (result == (void *)-1) {
-    auto errc = convertErrno();
-    std::printf("Failed to map file at %p-%p\n", *address,
-                (char *)*address + size);
-    return errc;
-  }
-
-  std::printf("file mapped at %p-%p:%lx\n", result, (char *)result + size,
-              offset);
-
-  struct stat stat;
-  fstat(hostFile->hostFd, &stat);
-  if (stat.st_size < offset + size) {
-    std::size_t rest = std::min(offset + size - stat.st_size, vm::kPageSize);
-
-    if (rest > rx::mem::pageSize) {
-      auto fillSize = rx::alignUp(rest, rx::mem::pageSize) - rx::mem::pageSize;
-
-      std::printf("adding dummy mapping %p-%p, file ends at %p\n",
-                  (char *)result + size - fillSize, (char *)result + size,
-                  (char *)result + (stat.st_size - offset));
-
-      auto ptr = ::mmap((char *)result + size - fillSize, fillSize,
-                        prot & vm::kMapProtCpuAll,
-                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-
-      if (ptr == (void *)-1) {
-        std::printf("failed to add dummy mapping %p-%p\n", result,
-                    (char *)result + size);
-      }
-    }
-  }
-
-  *address = result;
-  return {};
+  return host_fd_write(hostFile->hostFd.native_handle(), uio);
 }
 
 static orbis::ErrorCode host_stat(orbis::File *file, orbis::Stat *sb,
                                   orbis::Thread *thread) {
   auto hostFile = static_cast<HostFile *>(file);
   struct stat hostStat;
-  ::fstat(hostFile->hostFd, &hostStat);
+  ::fstat(hostFile->hostFd.native_handle(), &hostStat);
   sb->dev = hostStat.st_dev; // TODO
   sb->ino = hostStat.st_ino;
   sb->mode = hostStat.st_mode;
@@ -437,10 +376,10 @@ static orbis::ErrorCode host_truncate(orbis::File *file, std::uint64_t len,
   }
 
   if (hostFile->alignTruncate) {
-    len = rx::alignUp(len, vm::kPageSize);
+    len = rx::alignUp(len, orbis::vmem::kPageSize);
   }
 
-  if (::ftruncate(hostFile->hostFd, len)) {
+  if (::ftruncate(hostFile->hostFd.native_handle(), len)) {
     return convertErrno();
   }
 
@@ -458,7 +397,7 @@ static orbis::ErrorCode socket_read(orbis::File *file, orbis::Uio *uio,
                                     orbis::Thread *) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     while (true) {
       std::this_thread::sleep_for(std::chrono::days(1));
     }
@@ -468,14 +407,14 @@ static orbis::ErrorCode socket_read(orbis::File *file, orbis::Uio *uio,
   if (uio->iov->len) {
     ORBIS_LOG_FATAL(__FUNCTION__, file, uio->iov->len);
   }
-  return host_fd_read(socket->hostFd, uio);
+  return host_fd_read(socket->hostFd.native_handle(), uio);
 }
 
 static orbis::ErrorCode socket_write(orbis::File *file, orbis::Uio *uio,
                                      orbis::Thread *) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     for (auto io : std::span(uio->iov, uio->iovcnt)) {
       uio->offset += io.len;
     }
@@ -483,7 +422,7 @@ static orbis::ErrorCode socket_write(orbis::File *file, orbis::Uio *uio,
   }
 
   ORBIS_LOG_FATAL(__FUNCTION__, file, uio->iov->len);
-  return host_fd_write(socket->hostFd, uio);
+  return host_fd_write(socket->hostFd.native_handle(), uio);
 }
 
 static orbis::ErrorCode socket_bind(orbis::File *file,
@@ -492,7 +431,7 @@ static orbis::ErrorCode socket_bind(orbis::File *file,
                                     orbis::Thread *thread) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     return {};
   }
 
@@ -512,8 +451,8 @@ static orbis::ErrorCode socket_bind(orbis::File *file,
 
       sockaddr_un un{.sun_family = AF_UNIX};
       std::strncpy(un.sun_path, socketPath.c_str(), sizeof(un.sun_path));
-      if (::bind(socket->hostFd, reinterpret_cast<::sockaddr *>(&un),
-                 sizeof(un)) < 0) {
+      if (::bind(socket->hostFd.native_handle(),
+                 reinterpret_cast<::sockaddr *>(&un), sizeof(un)) < 0) {
         return convertErrno();
       }
 
@@ -528,11 +467,11 @@ static orbis::ErrorCode socket_listen(orbis::File *file, int backlog,
                                       orbis::Thread *thread) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     return {};
   }
 
-  if (::listen(socket->hostFd, backlog) < 0) {
+  if (::listen(socket->hostFd.native_handle(), backlog) < 0) {
     return convertErrno();
   }
 
@@ -545,7 +484,7 @@ static orbis::ErrorCode socket_accept(orbis::File *file,
                                       orbis::Thread *thread) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     ORBIS_LOG_ERROR(__FUNCTION__, socket->name, "wait forever");
 
     while (true) {
@@ -558,8 +497,8 @@ static orbis::ErrorCode socket_accept(orbis::File *file,
   if (socket->dom == 1 && socket->type == 1 && socket->prot == 0) {
     sockaddr_un un{.sun_family = AF_UNIX};
     socklen_t len = sizeof(un);
-    int result =
-        ::accept(socket->hostFd, reinterpret_cast<sockaddr *>(&un), &len);
+    int result = ::accept(socket->hostFd.native_handle(),
+                          reinterpret_cast<sockaddr *>(&un), &len);
 
     if (result < 0) {
       return convertErrno();
@@ -571,8 +510,8 @@ static orbis::ErrorCode socket_accept(orbis::File *file,
 
     auto guestSocket = wrapSocket(result, "", 1, 1, 0);
     auto guestFd = thread->tproc->fileDescriptors.insert(guestSocket);
-    thread->retval[0] = guestFd;
-    ORBIS_LOG_ERROR(__FUNCTION__, socket->name, guestFd);
+    thread->retval[0] = std::to_underlying(guestFd);
+    ORBIS_LOG_ERROR(__FUNCTION__, socket->name, (int)guestFd);
     return {};
   }
 
@@ -585,7 +524,7 @@ static orbis::ErrorCode socket_connect(orbis::File *file,
                                        orbis::Thread *thread) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (socket->hostFd.native_handle()) {
     return orbis::ErrorCode::CONNREFUSED;
   }
 
@@ -604,8 +543,8 @@ static orbis::ErrorCode socket_connect(orbis::File *file,
 
       sockaddr_un un{.sun_family = AF_UNIX};
       std::strncpy(un.sun_path, socketPath.c_str(), sizeof(un.sun_path));
-      if (::connect(socket->hostFd, reinterpret_cast<::sockaddr *>(&un),
-                    sizeof(un)) < 0) {
+      if (::connect(socket->hostFd.native_handle(),
+                    reinterpret_cast<::sockaddr *>(&un), sizeof(un)) < 0) {
         return convertErrno();
       }
 
@@ -650,12 +589,13 @@ orbis::ErrorCode socket_recvfrom(orbis::File *file, void *buf,
                                  orbis::Thread *thread) {
   auto socket = static_cast<SocketFile *>(file);
 
-  if (socket->hostFd < 0) {
+  if (!socket->hostFd) {
     return orbis::ErrorCode::CONNREFUSED;
   }
 
   if (socket->dom == 1 && socket->type == 1 && socket->prot == 0) {
-    auto count = ::recvfrom(socket->hostFd, buf, len, flags, nullptr, nullptr);
+    auto count = ::recvfrom(socket->hostFd.native_handle(), buf, len, flags,
+                            nullptr, nullptr);
     if (count < 0) {
       return convertErrno();
     }
@@ -673,12 +613,26 @@ orbis::ErrorCode socket_recvfrom(orbis::File *file, void *buf,
   return orbis::ErrorCode::NOTSUP;
 }
 
+static std::string host_toString(orbis::File *file) {
+  auto hostFile = static_cast<HostFile *>(file);
+
+  if (!hostFile->path.empty()) {
+    std::string result;
+    result += '"';
+    result += hostFile->path;
+    result += '"';
+    return result;
+  }
+
+  return rx::format("host fd {}", hostFile->hostFd.native_handle());
+}
+
 static const orbis::FileOps hostOps = {
     .read = host_read,
     .write = host_write,
     .truncate = host_truncate,
     .stat = host_stat,
-    .mmap = host_mmap,
+    .toString = host_toString,
 };
 
 static const orbis::FileOps socketOps = {
@@ -710,7 +664,7 @@ rx::Ref<orbis::File> wrapSocket(int hostFd, orbis::kstring name, int dom,
   s->dom = dom;
   s->type = type;
   s->prot = prot;
-  s->hostFd = hostFd;
+  s->hostFd = rx::Mappable::CreateFromNativeHandle(hostFd);
   s->ops = &socketOps;
   return s;
 }
@@ -736,7 +690,7 @@ orbis::ErrorCode createSocket(rx::Ref<orbis::File> *file, orbis::kstring name,
 
 static std::optional<std::string>
 findFileInDir(const std::filesystem::path &dir, const char *name) {
-  for (auto entry : std::filesystem::directory_iterator(dir)) {
+  for (auto &entry : std::filesystem::directory_iterator(dir)) {
     auto entryName = entry.path().filename();
     if (strcasecmp(entryName.c_str(), name) == 0) {
       return entryName;
@@ -752,7 +706,7 @@ toRealPath(const std::filesystem::path &inp) {
   }
 
   std::filesystem::path result;
-  for (auto elem : inp) {
+  for (auto &elem : inp) {
     if (result.empty() || std::filesystem::exists(result / elem)) {
       result /= elem;
       continue;
@@ -887,10 +841,11 @@ orbis::ErrorCode HostFsDevice::open(rx::Ref<orbis::File> *file,
   }
 
   auto newFile = orbis::knew<HostFile>();
-  newFile->hostFd = hostFd;
+  newFile->hostFd = rx::Mappable::CreateFromNativeHandle(hostFd);
   newFile->dirEntries = std::move(dirEntries);
   newFile->ops = &hostOps;
   newFile->device = this;
+  newFile->path = path;
   *file = newFile;
   return {};
 }
@@ -936,10 +891,10 @@ orbis::ErrorCode HostFsDevice::rename(const char *from, const char *to,
   return convertErrorCode(ec);
 }
 
-orbis::File *createHostFile(int hostFd, rx::Ref<orbis::IoDevice> device,
+orbis::File *createHostFile(int hostFd, orbis::IoDevice *device,
                             bool alignTruncate) {
   auto newFile = orbis::knew<HostFile>();
-  newFile->hostFd = hostFd;
+  newFile->hostFd = rx::Mappable::CreateFromNativeHandle(hostFd);
   newFile->ops = &hostOps;
   newFile->device = device;
   newFile->alignTruncate = alignTruncate;

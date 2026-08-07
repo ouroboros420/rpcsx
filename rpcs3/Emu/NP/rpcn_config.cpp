@@ -50,7 +50,65 @@ void cfg_rpcn::save() const
 
 std::string cfg_rpcn::get_path()
 {
+#ifdef __ANDROID__
+	// RPCN credentials (PBKDF2-derived password + bearer token) must NOT live on
+	// external storage: getExternalFilesDir is MTP/USB-readable and swept into
+	// cloud backup. Store rpcn.yml in the app-internal filesDir instead, which is
+	// private to the app and excluded from backup.
+	extern std::string g_android_internal_config_dir;
+
+	// If the app never handed us an internal dir (older app build, or the
+	// additive _rpcsx_setRpcnConfigDir entry point is absent), fall back to the
+	// external path rather than building a bogus relative "rpcn.yml". This keeps
+	// the emulator working on any app/core version skew.
+	if (g_android_internal_config_dir.empty())
+	{
 	return fs::get_config_dir(true) + "rpcn.yml";
+}
+
+	const std::string internal_path = g_android_internal_config_dir + "rpcn.yml";
+
+	// One-time migration: move any existing external rpcn.yml into internal
+	// storage so already-logged-in users keep their credentials, then delete the
+	// world-readable copy.
+	if (!fs::is_file(internal_path))
+	{
+		const std::string external_path = fs::get_config_dir(true) + "rpcn.yml";
+		if (fs::is_file(external_path))
+		{
+			if (fs::file src(external_path, fs::read); src)
+			{
+				const std::string contents = src.to_string();
+				src.close();
+				fs::create_path(g_android_internal_config_dir);
+				if (fs::file dst(internal_path, fs::rewrite); dst)
+				{
+					dst.write(contents);
+					dst.close();
+					if (!fs::remove_file(external_path))
+					{
+						rpcn_log.error("Could not remove external rpcn.yml after migration: %s", external_path);
+					}
+					rpcn_log.notice("Migrated rpcn.yml to internal storage: %s", internal_path);
+				}
+				else
+				{
+					rpcn_log.error("Could not write internal rpcn.yml: %s (error=%s)", internal_path, fs::g_tls_error);
+				}
+			}
+		}
+		else
+		{
+			// Fresh install / no creds yet: ensure the internal dir exists so the
+			// first save() can write into it.
+			fs::create_path(g_android_internal_config_dir);
+		}
+	}
+
+	return internal_path;
+#else
+	return fs::get_config_dir(true) + "rpcn.yml";
+#endif
 }
 
 std::string cfg_rpcn::generate_npid()

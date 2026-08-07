@@ -18,9 +18,15 @@
 
 #include "generated/np2_structs.pb.h"
 
+// For client-side password derivation (PBKDF2-HMAC-SHA3-256). Upstream does this
+// in the Qt settings dialog, which the Android fork does not build, so it lives
+// here instead (their f52b6c53).
+#include <wolfssl/wolfcrypt/pwdbased.h>
+#include <wolfssl/wolfcrypt/sha3.h>
+
 #ifdef _WIN32
 #include <winsock2.h>
-#include <WS2tcpip.h>
+#include <ws2tcpip.h>
 #else
 #ifdef __clang__
 #pragma clang diagnostic push
@@ -232,6 +238,20 @@ namespace rpcn
 		if (!g_cfg.misc.show_rpcn_popups)
 			return;
 
+		// The Android fork keeps the RPCN client (and its reader thread) alive across
+		// game boots via g_rpcn_persistent. A friend notification dispatching here while
+		// no game is running would call rsx::overlays::queue_message into the overlay
+		// display_manager - a g_fxo object that Emulator::Init destroys via g_fxo->reset()
+		// at boot - which is a use-after-free on its shared_mutex (the reported Demon's
+		// Souls instant-crash with RPCN logged in). Only touch the overlay when a game is
+		// actually running and the display_manager is live; the friend state itself is
+		// still updated by the caller regardless.
+		// IsTestMode(): the install-time precompile forces IsRunning() true while g_fxo is
+		// being reset, so IsRunning() alone is not enough - skip the overlay then too.
+		// (their faf9bc91)
+		if (!Emu.IsRunning() || Emu.IsTestMode())
+			return;
+
 		localized_string_id loc_id = localized_string_id::INVALID;
 
 		switch (ntype)
@@ -373,6 +393,24 @@ namespace rpcn
 		return sptr;
 	}
 
+	// Get-only accessor (their 3656ec8f): returns the live singleton or nullptr, never creates
+	// one, so a passive status poll or a "disable RPCN" action does not spin up a connection.
+	std::shared_ptr<rpcn_client> rpcn_client::get_active_instance()
+	{
+		std::lock_guard lock(inst_mutex);
+		return instance.lock();
+	}
+
+	void rpcn_client::terminate_active_session()
+	{
+		// Grab a strong ref under the instance lock, then drop the lock before issuing the
+		// (queued) Terminate so we never hold inst_mutex across the packet-queue mutex.
+		if (auto sptr = get_active_instance(); sptr && sptr->is_connected())
+		{
+			sptr->terminate_connection();
+		}
+	}
+
 	// inform rpcn that the server infos have been updated and signal rpcn_thread to try again
 	void rpcn_client::server_infos_updated()
 	{
@@ -382,6 +420,49 @@ namespace rpcn
 		}
 
 		sem_rpcn.release();
+	}
+
+	// Clear a stale transient failure state so a user-initiated retry actually
+	// re-runs connect() (which resets state at its start). Only meaningful when
+	// not currently connected; deliberately NOT done inside disconnect() because
+	// the connect()/login() failure paths call disconnect() and must keep the
+	// failure state for the UI to read. (their f52b6c53)
+	void rpcn_client::clear_failure_state()
+	{
+		std::lock_guard lock(mutex_connected);
+		if (!connected)
+		{
+			state = rpcn_state::failure_no_failure;
+		}
+	}
+
+	// Client-side password derivation, mirroring upstream rpcs3qt
+	// rpcn_settings_dialog.cpp::derive_password. The RPCN server stores
+	// PBKDF2-HMAC-SHA3-256 of the password; the client MUST send this derived
+	// hex, never the raw password (otherwise every login is rejected as invalid).
+	// The Android build has no Qt settings dialog, so the derivation has to live
+	// here for the JNI credential entry points to use. (their f52b6c53)
+	std::string derive_password(std::string_view user_password)
+	{
+		std::string_view salt_str = "No matter where you go, everybody's connected.";
+
+		u8 derived_password_digest[WC_SHA3_256_DIGEST_SIZE];
+		ensure(!wc_PBKDF2(derived_password_digest, reinterpret_cast<const u8*>(user_password.data()), ::narrow<s32>(user_password.size()), reinterpret_cast<const u8*>(salt_str.data()), ::narrow<s32>(salt_str.size()), 200'000, WC_SHA3_256_DIGEST_SIZE, WC_SHA3_256));
+
+		std::string derived_password("0000000000000000000000000000000000000000000000000000000000000000");
+		for (usz i = 0; i < sizeof(derived_password_digest); i++)
+		{
+			constexpr auto pal            = "0123456789ABCDEF";
+			derived_password[i * 2]       = pal[derived_password_digest[i] >> 4];
+			derived_password[(i * 2) + 1] = pal[derived_password_digest[i] & 15];
+		}
+
+		return derived_password;
+	}
+
+	bool validate_token(std::string_view token)
+	{
+		return token.size() == 16 && std::all_of(token.cbegin(), token.cend(), [](const char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'); });
 	}
 
 	// RPCN thread
@@ -493,7 +574,19 @@ namespace rpcn
 					}
 				}
 
-				if (authentified && !Emu.IsStopped())
+				// "ingame" must be Emu.IsRunning(), NOT merely !IsStopped(): during a game
+				// boot the status is starting/loading (not stopped) while Emulator::Init runs
+				// g_fxo->reset(), which destroys the p2p_context. The persistent RPCN client
+				// (Android fork) keeps this thread alive across boots; the signaling below does
+				// g_fxo->get<p2p_context>() and locks its list_p2p_ports_mutex - a use-after-
+				// free on a freed shared_mutex during boot (the Demon's Souls instant-crash with
+				// RPCN logged in). Only signal while a game is actually running, p2p_context live.
+				// && !IsTestMode(): the install-time precompile (rpcsx-android.cpp) forces
+				// IsRunning() true while it resets g_fxo, which would tear the p2p_context
+				// out from under get_rpcn_msgs()/send_packet_from_p2p_port() here = the
+				// install-finished crash (mutex.cpp:89 imp_lock underflow). Real games have
+				// IsTestMode()==false, so signaling still runs normally for them. (their faf9bc91)
+				if (authentified && Emu.IsRunning() && !Emu.IsTestMode())
 				{
 					// Ping the UDP Signaling Server if we're authentified & ingame
 					const auto now = steady_clock::now();
@@ -1098,6 +1191,32 @@ namespace rpcn
 
 			rpcn_log.notice("connect: Connection successful");
 
+#ifndef _WIN32
+			// Keep this long-lived RPCN control connection alive across idle periods. During a
+			// first-boot game compile no online packets flow for minutes; some mobile carrier NATs
+			// then silently drop the idle TCP mapping and the server side closes the connection
+			// ("connection reset by server") before the game's online code ever runs - and we do not
+			// transparently reconnect. Periodic TCP keepalive probes keep the NAT mapping warm. The
+			// OS-default keepalive only probes after ~2h idle (useless here), so tune it explicitly.
+			// All best-effort: a failed setsockopt just leaves the OS defaults.
+			{
+				const int ka_on = 1;
+				setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &ka_on, sizeof(ka_on));
+#ifdef TCP_KEEPIDLE
+				const int ka_idle = 30; // begin probing after 30s idle (well under typical NAT timeouts)
+				setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
+#endif
+#ifdef TCP_KEEPINTVL
+				const int ka_intvl = 15; // probe every 15s
+				setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
+#endif
+#ifdef TCP_KEEPCNT
+				const int ka_cnt = 4; // give up after 4 missed probes
+				setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
+#endif
+			}
+#endif
+
 #ifdef _WIN32
 			u_long _true = 1;
 			ensure(::ioctlsocket(sockfd, FIONBIO, &_true) == 0);
@@ -1274,7 +1393,8 @@ namespace rpcn
 		if (reply.is_error())
 			return error_and_disconnect("Malformed reply to Login command");
 
-		rpcn_log.success("You are now logged in RPCN(%s | %s)!", npid, online_name);
+		// Privacy: do not log the user's NPID / online name (logs get shared for debugging).
+		rpcn_log.success("You are now logged in RPCN!");
 		authentified = true;
 
 		return true;
@@ -1332,7 +1452,8 @@ namespace rpcn
 
 		if (error == rpcn::ErrorType::NoError)
 		{
-			rpcn_log.success("You have successfully created a RPCN account(%s | %s)!", npid, online_name);
+			// Privacy: do not log the user's NPID / online name.
+			rpcn_log.success("You have successfully created a RPCN account!");
 		}
 
 		return error;

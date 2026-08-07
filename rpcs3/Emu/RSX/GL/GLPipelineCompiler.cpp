@@ -39,6 +39,14 @@ namespace gl
 		{
 			for (auto&& job : m_work_queue.pop_all())
 			{
+				// Emulation is shutting down; don't drain a potentially large backlog of
+				// pending pipelines (the results are discarded on teardown anyway). This
+				// avoids a multi-second join stall when stopping mid-scene with shaders queued.
+				if (thread_ctrl::state() == thread_state::aborting)
+				{
+					break;
+				}
+
 				if (!m_context_ready.test_and_set())
 				{
 					// Bind context on first use

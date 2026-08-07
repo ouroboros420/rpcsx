@@ -1,10 +1,16 @@
+#include "orbis-config.hpp"
+#include "rx/EnumBitSet.hpp"
+#include "rx/die.hpp"
+#include "rx/format.hpp"
 #include "sys/syscall.hpp"
 #include "sys/sysentry.hpp"
 #include "sys/sysproto.hpp"
 #include "thread/Process.hpp"
 #include "thread/Thread.hpp"
 #include <algorithm>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 
 enum { PSL_C = 0x1 };
 
@@ -49,9 +55,10 @@ void orbis::syscall_entry(Thread *thread) {
     std::memcpy(args, regsptr,
                 std::min(regcnt, sysent.narg) * sizeof(uint64_t));
     if (sysent.narg > regcnt) {
-      if (sysent.narg > std::ssize(args)) {
-        std::abort();
-      }
+      rx::dieIf(sysent.narg > std::ssize(args),
+                "syscall {} uses unexpected number of "
+                "arguments, narg = {}",
+                syscall_num, sysent.narg);
 
       error = int(
           ureadRaw(args + regcnt,
@@ -101,6 +108,88 @@ struct WrapImpl<Fn> {
     sysent result;
     result.narg = sizeof...(Args);
     result.call = &WrapImpl::call;
+    result.format = [](Thread *thread, uint64_t *values) -> std::string {
+      std::string result = getSysentName(&WrapImpl::call);
+      result += "(";
+
+      auto formatArg =
+          [&]<std::size_t I, typename T>(std::integral_constant<std::size_t, I>,
+                                         T value, std::uint64_t raw) {
+            if (I != 0) {
+              result += ", ";
+            }
+
+            using type = std::remove_cvref_t<T>;
+
+            if constexpr (std::is_same_v<type, bool>) {
+              if (value) {
+                result += "true";
+              } else {
+                result += "false";
+              }
+            } else if constexpr (std::is_integral_v<type>) {
+              if (value > 9) {
+                result += rx::format("{:#x}", value);
+              } else {
+                result += rx::format("{}", value);
+              }
+            } else if constexpr (std::is_pointer_v<type>) {
+              result += rx::format("{}", (void *)value);
+
+              // using pointee =
+              // std::remove_cvref_t<std::remove_pointer_t<type>>;
+              //
+              // if constexpr (requires(rx::format_parse_context &ctx) {
+              //                 rx::formatter<pointee>().parse(ctx);
+              //               }) {
+              //   if (value) {
+              //     pointee kernelValue;
+              //     auto errc = orbis::uread(kernelValue, value);
+
+              //     if (errc == ErrorCode{}) {
+              //       result += rx::format("={}", kernelValue);
+              //     } else {
+              //       result += rx::format("={}", errc);
+              //     }
+              //   }
+              // }
+            } else if constexpr (std::is_same_v<type, FileDescriptor>) {
+              result += rx::format("{}", std::to_underlying(value));
+              if (std::to_underlying(value) >= 0) {
+                auto file = thread->tproc->fileDescriptors.get(value);
+                result += " (";
+
+                if (file) {
+                  result += file->toString();
+                } else {
+                  result += "<invalid fd>";
+                }
+
+                result += ")";
+              }
+            } else if constexpr (requires(rx::format_parse_context &ctx) {
+                                   rx::formatter<type>().parse(ctx);
+                                 }) {
+              result += rx::format("{}", value);
+            } else {
+              if (raw > 9) {
+                result += rx::format("{:#x}", raw);
+              } else {
+                result += rx::format("{}", raw);
+              }
+            }
+          };
+      auto formatArgs = [&]<std::size_t... I>(std::index_sequence<I...>,
+                                              uint64_t *values) {
+        (formatArg(std::integral_constant<std::size_t, I>{},
+                   makeArg<Args>(values[I]), values[I]),
+         ...);
+      };
+
+      formatArgs(std::make_index_sequence<sizeof...(Args)>{}, values);
+      result += ")";
+      return result;
+    };
 
     return result;
   }
@@ -113,7 +202,28 @@ private:
   template <std::size_t... I>
   static SysResult callImpl(Thread *thread, uint64_t *args,
                             std::index_sequence<I...>) {
-    return Fn(thread, Args(args[I])...);
+    return Fn(thread, makeArg<Args>(args[I])...);
+  }
+
+  template <typename T>
+  static T makeArg(uint64_t raw)
+    requires requires { std::bit_cast<T>(raw); }
+  {
+    return std::bit_cast<T>(raw);
+  }
+
+  template <typename T>
+  static T makeArg(uint64_t raw)
+    requires requires { T(raw); } && (!requires { std::bit_cast<T>(raw); })
+  {
+    return T(raw);
+  }
+
+  template <typename T>
+  static T makeArg(uint64_t raw)
+    requires requires { T(T::fromUnderlying(raw)); }
+  {
+    return T::fromUnderlying(raw);
   }
 };
 } // namespace detail

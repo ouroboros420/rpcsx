@@ -35,6 +35,8 @@
 .vs/*
 .vscode/*
 !.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
 *.ipch
 *.vspx
 *.psess
@@ -61,9 +63,18 @@ compile_commands.json
 *.DS_Store
 
 build*/
+release-variants/
 .cache/
 rpcs3/git-version.h
 .rx.version
 
 log-*.txt
 tty.txt
+
+# build/test artifacts (never commit)
+.claude/
+release-*/
+*.apk
+
+# Vendored protobuf source clone (build dependency, fetched separately, not tracked)
+/3rdparty/protobuf/protobuf/

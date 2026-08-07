@@ -1,6 +1,6 @@
-set(RPCS3_GIT_VERSION "local_build")
-set(RPCS3_GIT_BRANCH "local_build")
-set(RPCS3_GIT_FULL_BRANCH "local_build")
+set(RPCS3_GIT_VERSION "1.0.0")
+set(RPCS3_GIT_BRANCH "ouroboros-arm64")
+set(RPCS3_GIT_FULL_BRANCH "ouroboros-arm64")
 
 find_package(Git)
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git/")

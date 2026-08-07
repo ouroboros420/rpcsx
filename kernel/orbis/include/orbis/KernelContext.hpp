@@ -109,7 +109,7 @@ public:
     return {};
   }
 
-  std::tuple<kmap<kstring, rx::StaticString<128>> &, std::unique_lock<rx::shared_mutex>>
+  std::tuple<kmap<kstring, rx::StaticString<127>> &, std::unique_lock<rx::shared_mutex>>
   getKernelEnv() {
     std::unique_lock lock(m_kenv_mtx);
     return {m_kenv, std::move(lock)};
@@ -122,8 +122,8 @@ public:
 
   rx::Ref<EventEmitter> deviceEventEmitter;
   rx::Ref<IoDevice> shmDevice;
-  rx::Ref<IoDevice> dmemDevice;
-  rx::Ref<IoDevice> blockpoolDevice;
+  rx::Ref<File> dmem;
+  rx::Ref<File> blockpool;
   rx::Ref<rx::RcBase> gpuDevice;
   rx::Ref<IoDevice> dceDevice;
   rx::shared_mutex gpuDeviceMtx;
@@ -137,6 +137,7 @@ public:
 
   rx::shared_mutex regMgrMtx;
   kmap<std::uint32_t, std::uint32_t> regMgrInt;
+  kmap<std::uint32_t, rx::StaticCString<2048>> regMgrStr;
   std::vector<std::tuple<std::uint8_t *, size_t>> dialogs{};
 
   FwType fwType = FwType::Unknown;
@@ -171,7 +172,7 @@ private:
   kmap<kstring, rx::Ref<IpmiServer>> mIpmiServers;
 
   rx::shared_mutex m_kenv_mtx;
-  kmap<kstring, rx::StaticString<128>> m_kenv; // max size: 127 + '\0'
+  kmap<kstring, rx::StaticString<127>> m_kenv;
 };
 
 extern GlobalObjectRef<KernelContext> g_context;

@@ -484,6 +484,14 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 	if (!m_swapchain->init(m_swapchain_dims.width, m_swapchain_dims.height))
 	{
 		swapchain_unavailable = true;
+#ifdef ANDROID
+		// Graft of ouroboros 40b4b5f60682: on Android the VkSurfaceKHR is bound to the ANativeWindow
+		// captured at create time, so a surface lost during boot-time init (e.g. backgrounding the app
+		// mid-compile) stays lost on re-query. Flag surface_lost so the first reinitialize_swapchain()
+		// takes the recreate branch (create() -> make_WSI_surface) with the new window instead of
+		// soft-looping forever without ever rebuilding the surface.
+		surface_lost = true;
+#endif
 	}
 
 	// create command buffer...
@@ -865,6 +873,7 @@ VKGSRender::~VKGSRender()
 	// Queries
 	m_occlusion_query_manager.reset();
 	m_cond_render_buffer.reset();
+	m_occlusion_readback_buffer.reset();
 
 	// Command buffer
 	m_primary_cb_list.destroy();
@@ -2778,6 +2787,109 @@ bool VKGSRender::check_occlusion_query_status(rsx::reports::occlusion_query_info
 	return m_occlusion_query_manager->check_query_status(oldest);
 }
 
+void VKGSRender::prefetch_occlusion_query_results(const std::vector<rsx::reports::occlusion_query_info*>& queries)
+{
+	// Graft of ouroboros 7ed3365bcbb8: games that read the GCM report area from MAIN (Mafia II et al)
+	// flip ZCULL into eager mode, and the drain then does one blocking vkGetQueryPoolResults(WAIT_BIT)
+	// per query - a CPU<->GPU round trip each. Collapse the drain's N blocking reads into a single GPU
+	// copy + one fence wait, then prime each slot's cache so the unchanged per-query read loop below hits
+	// cache (no WAIT_BIT). This NEVER frees queries or clears indices: get_occlusion_query_result stays
+	// the sole owner of free_queries()/indices.clear(), so there is no use-after-free risk and the
+	// occlusion sums stay bit-identical - only WHERE the GPU wait happens changes.
+	bool needs_hard_sync = false;
+	u32 total_indices = 0;
+	for (auto* query : queries)
+	{
+		const auto& data = m_occlusion_map[query->driver_handle];
+		if (data.indices.empty())
+		{
+			continue;
+		}
+
+		total_indices += ::size32(data.indices);
+		if (data.is_current(m_current_command_buffer))
+		{
+			needs_hard_sync = true;
+		}
+	}
+
+	if (total_indices < 2)
+	{
+		// Not worth a batch round-trip; let the per-query loop handle it with no extra hard sync.
+		return;
+	}
+
+	std::vector<u32> indices;
+	indices.reserve(total_indices);
+	u32 bytes = 0;
+
+	{
+		std::lock_guard lock(m_flush_queue_mutex);
+
+		// Any query still on the current cb must be submitted before its result can be copied. One hard
+		// sync covers the whole batch (mirrors the per-query is_current path in get_occlusion_query_result).
+		if (needs_hard_sync)
+		{
+			flush_command_queue();
+			if (m_flush_requests.pending())
+			{
+				m_flush_requests.clear_pending_flag();
+			}
+		}
+
+		for (auto* query : queries)
+		{
+			auto& data = m_occlusion_map[query->driver_handle];
+			if (data.indices.empty())
+			{
+				continue;
+			}
+
+			data.sync();
+			for (const auto idx : data.indices)
+			{
+				indices.push_back(idx);
+			}
+		}
+
+		if (indices.empty())
+		{
+			return;
+		}
+
+		bytes = ::size32(indices) * 4;
+		if (!m_occlusion_readback_buffer || m_occlusion_readback_buffer->size() < bytes)
+		{
+			const u32 alloc_bytes = (bytes < 4096) ? 4096 : bytes;
+			m_occlusion_readback_buffer = std::make_unique<vk::buffer>(*m_device,
+				alloc_bytes,
+				m_device->get_memory_mapping().host_visible_coherent, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0,
+				VMM_ALLOCATION_POOL_UNDEFINED);
+		}
+
+		// One pool-aware, range-latched copy of all results into the host buffer (ends any open RP first).
+		m_occlusion_query_manager->copy_query_results(*m_current_command_buffer, indices, m_occlusion_readback_buffer->value);
+
+		// Make the transfer writes host-visible before the post-fence CPU read.
+		vk::insert_buffer_memory_barrier(*m_current_command_buffer, m_occlusion_readback_buffer->value, 0, bytes,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+
+		// The single fence wait that drains the whole batch.
+		flush_command_queue(true, false);
+	}
+
+	// Scatter the results into the slot cache; the per-query drain loop now hits cache instead of doing a
+	// blocking WAIT_BIT read per query.
+	auto* host = static_cast<u32*>(m_occlusion_readback_buffer->map(0, bytes));
+	for (usz i = 0; i < indices.size(); ++i)
+	{
+		m_occlusion_query_manager->prime_query_result(indices[i], host[i]);
+	}
+	m_occlusion_readback_buffer->unmap();
+}
+
 void VKGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* query)
 {
 	auto& data = m_occlusion_map[query->driver_handle];
@@ -3044,6 +3156,9 @@ void VKGSRender::begin_conditional_rendering(const std::vector<rsx::reports::occ
 		{
 			if (!scratch)
 			{
+				// NOTE: get_scratch_buffer() emits the pre-copy barrier itself from these flags
+				// (upstream ee4ca6bd8), which supersedes the explicit call-site barrier in their
+				// 33d45234f17a (a port of the older upstream form b9f05ba71).
 				scratch = vk::get_scratch_buffer(*m_current_command_buffer, num_hw_queries * 4, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 			}
 

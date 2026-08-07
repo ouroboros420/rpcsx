@@ -160,6 +160,11 @@ namespace vk
 		case driver_vendor::ARM_MALI:
 			// Needs more testing
 			break;
+		case driver_vendor::TURNIP:
+		case driver_vendor::QUALCOMM_PROPRIETARY:
+			// Primary Android target (Qualcomm proprietary and Mesa Turnip). No global driver
+			// quirks needed here; per-feature handling lives where the relevant caps are probed.
+			break;
 		default:
 			rsx_log.warning("Unsupported device: %s", gpu_name);
 		}

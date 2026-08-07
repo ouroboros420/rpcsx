@@ -409,6 +409,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: unk_offset is less than psmf_marks_offset + psmf_marks_size"};
 	}
 
+
 	// Sequence Info
 
 	const u32 seq_info_size = pAddr->seq_info.size;
@@ -438,6 +439,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 	{
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: invalid grouping_period_num"};
 	}
+
 
 	// Grouping Period
 
@@ -474,6 +476,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: invalid group_num"};
 	}
 
+
 	// Group
 
 	const u32 group_size = pAddr->seq_info.grouping_periods.groups.size;
@@ -491,6 +494,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 	{
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: invalid stream_num"};
 	}
+
 
 	// Streams
 
@@ -547,6 +551,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 			}
 		}
 
+
 		// Entry points
 
 		// Skip if there are no entry points or if the minimum header attribute is set
@@ -595,7 +600,8 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 	}
 
 	// This can overflow on LLE, the +4 is necessary on both sides and the left operand needs to be u32
-	if (group_size + 4 > grouping_period_size - offsetof(PamfGroupingPeriod, groups) + sizeof(u32) || grouping_period_size + 4 > seq_info_size - offsetof(PamfSequenceInfo, grouping_periods) + sizeof(u32))
+	if (group_size + 4 > grouping_period_size - offsetof(PamfGroupingPeriod, groups) + sizeof(u32)
+		|| grouping_period_size + 4 > seq_info_size - offsetof(PamfSequenceInfo, grouping_periods) + sizeof(u32))
 	{
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: size mismatch"};
 	}
@@ -605,6 +611,7 @@ error_code pamfVerify(vm::cptr<PamfHeader> pAddr, u64 fileSize, vm::ptr<CellPamf
 	{
 		return {CELL_PAMF_ERROR_INVALID_PAMF, "pamfVerify() failed: number of streams mismatch"};
 	}
+
 
 	// PsmfMarks
 	// This is probably useless since the official PAMF tools don't support PsmfMarks
@@ -1370,7 +1377,8 @@ error_code cellPamfReaderGetEpIteratorWithIndex(vm::ptr<CellPamfReader> pSelf, u
 	pIt->isPamf = !pSelf->isPsmf;
 	pIt->index = epIndex;
 	pIt->num = ep_num;
-	pIt->pCur.set(pSelf->isPsmf ? pSelf->psmf.header.addr() + pSelf->psmf.currentStream->ep_offset + epIndex * sizeof(PsmfEpHeader) : pSelf->pamf.header.addr() + pSelf->pamf.currentStream->ep_offset + epIndex * sizeof(PamfEpHeader));
+	pIt->pCur.set(pSelf->isPsmf ? pSelf->psmf.header.addr() + pSelf->psmf.currentStream->ep_offset + epIndex * sizeof(PsmfEpHeader)
+		: pSelf->pamf.header.addr() + pSelf->pamf.currentStream->ep_offset + epIndex * sizeof(PamfEpHeader));
 
 	return CELL_OK;
 }

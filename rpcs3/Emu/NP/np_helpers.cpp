@@ -5,7 +5,7 @@
 #include "rpcn_client.h"
 
 #ifdef _WIN32
-#include <WS2tcpip.h>
+#include <ws2tcpip.h>
 #endif
 
 LOG_CHANNEL(rpcn_log, "rpcn");

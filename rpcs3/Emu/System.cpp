@@ -4,8 +4,6 @@
 #include "Crypto/unpkg.h"
 #include "Loader/PUP.h"
 #include "util/File.h"
-#include "dev/block_dev.hpp"
-#include "dev/iso.hpp"
 #include "VFS.h"
 #include "util/bin_patch.h"
 #include "Emu/Memory/vm.h"
@@ -239,9 +237,15 @@ static FileType getFileType(const fs::file& file)
 		return FileType::Rap;
 	}
 
-	if (iso_dev::open(std::make_unique<file_view_block_dev>(file)))
 	{
-		return FileType::Iso;
+		// ISO9660 volume-descriptor probe (sector 16). Works for plain AND
+		// redump-encrypted ISOs (region 0 is unencrypted). The old sniff parsed
+		// the whole directory tree and failed on encrypted images. (ouroboros 822c1174d)
+		char vd[6]{};
+		if (file.read_at(0x8000, vd, sizeof(vd)) == sizeof(vd) && std::memcmp(vd + 1, "CD001", 5) == 0)
+		{
+			return FileType::Iso;
+		}
 	}
 
 	return FileType::Unknown;
@@ -1102,26 +1106,11 @@ game_boot_result Emulator::BootGame(std::string path, const std::string& title_i
 
 	Init();
 
-	if (fs::is_file(path))
-	{
-		fs::file file(path);
-		if (getFileType(file) == FileType::Iso)
-		{
-			shared_ptr<fs::device_base> iso_device = stx::make_shared<iso_dev>(*ensure(iso_dev::open(std::make_unique<file_block_dev>(std::move(file)))));
-
-			auto mount_path = iso_device->fs_prefix + "/";
-			sys_log.notice("Mounting iso: '%s' -> '%s'", path, mount_path);
-			fs::set_virtual_device(iso_device->fs_prefix, iso_device);
-			vfs::mount("/dev_bdvd", mount_path);
-			path = mount_path;
-			direct = false;
-
-			for (auto& item : fs::dir(mount_path))
-			{
-				sys_log.notice("%s", item.name);
-			}
-		}
-	}
+	// NOTE: ISO boot is handled natively inside Load() now (Loader/ISO):
+	// is_iso_file(m_path) -> load_iso -> fixed-prefix virtual device. The old
+	// ad-hoc dev/iso.hpp mount here leaked one device registration + open file per
+	// boot (never unloaded) and stored ephemeral /vfsv0_<random> paths in games.yml.
+	// (ouroboros 822c1174d; dev/iso.{cpp,hpp} + dev/block_dev.hpp are gone)
 
 	// Handle files and special paths inside Load unmodified
 	if (direct || !fs::is_dir(path) || fs::get_optical_raw_device(path))
@@ -1644,6 +1633,31 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 		}
 
 		const std::string resolved_path = GetCallbacks().resolve_path(m_path);
+
+		// Converge the pre-mounted-ISO flows (Android SAF fd boot, and savestate-of-
+		// archive restore) with the path-boot flow. Both reach here with the ISO
+		// device already mounted and m_path a virtual-device path, so the
+		// is_iso_file(m_path) test below is false and the disc-archive branches
+		// (m_dir/m_cat=DG, bdvd=virtual, games.yml prefix translation) would be
+		// skipped, and m_path_real would stay empty - which makes the Restart
+		// re-mount path misbehave. Set both from the mounted device so every branch
+		// fires identically. (ouroboros a3e5c17b0)
+		if (m_path.starts_with(iso_device::virtual_device_name))
+		{
+			launching_from_disc_archive = true;
+
+			if (m_path_real.empty())
+			{
+				if (const auto device = fs::get_virtual_device(iso_device::virtual_device_name + "/"))
+				{
+					if (const auto dev = dynamic_cast<const iso_device*>(device.get()))
+					{
+						m_path_real = dev->get_loaded_iso();
+					}
+				}
+			}
+		}
+
 		if (!launching_from_disc_archive && is_iso_file(m_path))
 		{
 			sys_log.notice("Loading iso archive '%s'", m_path);
@@ -2447,8 +2461,11 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 			}
 			else if (rpcs3::utils::version_is_bigger(game_fw_version, fw_version, m_title_id, true))
 			{
-				sys_log.error("The game's required firmware version is higher than the installed firmware's version. (title_id='%s', game_fw='%s', fw='%s')", m_title_id, game_fw_version, fw_version);
-				return game_boot_result::firmware_version;
+				// Do not hard-fail: many titles over-declare PS3_SYSTEM_VER relative to
+				// the syscalls they actually use, and the working Android reference port
+				// (aps3e) has no such gate and boots them. A genuinely missing syscall
+				// surfaces its own error later. (ouroboros 7e164babd)
+				sys_log.warning("The game's required firmware version is higher than the installed firmware's version. Booting anyway. (title_id='%s', game_fw='%s', fw='%s')", m_title_id, game_fw_version, fw_version);
 			}
 		}
 
@@ -3696,7 +3713,7 @@ void Emulator::Kill(bool allow_autoexit, bool savestate, savestate_stage* save_s
 
 					bool is_being_held_longer = false;
 
-			for (int i = 0; !*join_ended && thread_ctrl::state() != thread_state::aborting; i++)
+					for (int i = 0; !*join_ended && thread_ctrl::state() != thread_state::aborting; i++)
 					{
 						if (g_watchdog_hold_ctr)
 						{
@@ -4284,12 +4301,26 @@ game_boot_result Emulator::Restart(bool graceful, bool reset_path)
 
 	Emu.after_kill_callback = [this, reset_path]
 	{
-		// Reset boot path in case of ISO
-		if (m_path.starts_with(iso_device::virtual_device_name))
+		// Re-run Init() before reloading: Kill() resets g_fxo, which destroys the VFS
+		// mount table, and Load() only re-mounts the game devices (/dev_bdvd,
+		// /app_home) - not the firmware devices (/dev_hdd0, /dev_flash*) that Init()
+		// mounts. Without this, reloading a savestate that has LLE-loaded firmware
+		// modules (real .sprx) fails to reopen them in lv2_prx::load and aborts. A
+		// normal boot avoids this because BootGame() calls Init() before Load(), and
+		// so does loading a savestate from a file; the in-place home-menu savestate
+		// was the only path that skipped it. (ouroboros 4757ca05e)
+		Init();
+
+		// Reset boot path in case of ISO. A path-boot ISO (real .iso file) must reboot
+		// through that real path so Load() re-mounts it. A content://-fd ISO (Android
+		// SAF) has a URI m_path_real the core cannot re-open, so keep the virtual path
+		// and rely on the overlay device staying mounted across a continuous restart
+		// (Kill skips unload_iso when m_continuous_mode). Guard on fs::is_file so a URI
+		// never becomes the boot path. (ouroboros 76328f783)
+		if (m_path.starts_with(iso_device::virtual_device_name) && !m_path_real.empty()
+			&& !m_path_real.starts_with(iso_device::virtual_device_name) && fs::is_file(m_path_real))
 		{
 			sys_log.notice("Continuous boot: Resetting boot path from '%s' to '%s'", m_path, m_path_real);
-			ensure(!m_path_real.empty());
-			ensure(!m_path_real.starts_with(iso_device::virtual_device_name));
 			m_path = m_path_real;
 		}
 
@@ -4633,6 +4664,12 @@ game_boot_result Emulator::AddGameToYml(std::string path)
 
 			return game_boot_result::generic_error;
 		}
+
+		// Non-DG ISO (install/patch disc etc.): do NOT fall through to the filesystem
+		// bdvd_dir/elf_dir logic below, which would treat the .iso host path as a
+		// directory and derive bogus paths. (ouroboros a3e5c17b0)
+		sys_log.notice("Can not add non-DG ISO to games.yml. (path=%s, title_id=%s, category=%s)", path, title_id, cat);
+		return game_boot_result::invalid_file_or_folder;
 	}
 
 	// Set bdvd_dir

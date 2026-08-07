@@ -148,8 +148,28 @@ if(WITH_LLVM)
 			endif()
 
 			message(STATUS "LLVM build cache: ${RPCSX_LLVM_CACHE_DIR}")
+
+			# If the cache is already populated, consume it with find_package
+			# instead of add_subdirectory().
+			#
+			# add_subdirectory() records the source directory that produced the
+			# build tree, so a cache built from one checkout cannot be reused by
+			# another - CMake aborts with "does not match the source ... used to
+			# generate cache". That is exactly what happens with a second clone
+			# (e.g. a fork) whose LLVM submodule is at the SAME revision: the
+			# cache key matches, the artifacts are identical, and CMake still
+			# refuses. Since the key already pins revision + system + ABI, an
+			# existing cache is by construction the right one, so just import it.
 			if (EXISTS "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/llvm")
-				message(STATUS "LLVM: reusing cached build (delete that directory to force a rebuild)")
+				message(STATUS "LLVM: importing prebuilt cache (delete that directory to force a rebuild)")
+
+				set(LLVM_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/llvm/")
+				set(MLIR_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/mlir/")
+				find_package(LLVM REQUIRED CONFIG PATHS "${LLVM_DIR}" NO_DEFAULT_PATH)
+				find_package(MLIR CONFIG PATHS "${MLIR_DIR}" NO_DEFAULT_PATH)
+
+				list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+				set(RPCSX_LLVM_IMPORTED ON)
 			else()
 				message(STATUS "LLVM: no cache yet - this first build takes a long time, later ones reuse it")
 			endif()
@@ -254,9 +274,12 @@ if(WITH_LLVM)
 			# bundled it. Building it would add a lot of time for nothing.
 			set(LLVM_ENABLE_PROJECTS "" CACHE STRING "" FORCE)
 
-			add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/llvm/llvm" "${RPCSX_LLVM_CACHE_DIR}" EXCLUDE_FROM_ALL)
-			set(LLVM_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/llvm/")
-			set(MLIR_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/mlir/")
+			# Skipped when the cache was already imported above.
+			if (NOT RPCSX_LLVM_IMPORTED)
+				add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/llvm/llvm" "${RPCSX_LLVM_CACHE_DIR}" EXCLUDE_FROM_ALL)
+				set(LLVM_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/llvm/")
+				set(MLIR_DIR "${RPCSX_LLVM_CACHE_DIR}/lib/cmake/mlir/")
+			endif()
 		else()
 			set(LLVM_DOWNLOAD_LINK https://github.com/RPCSX/llvm-build/releases/download/${USE_LLVM_VERSION})
 

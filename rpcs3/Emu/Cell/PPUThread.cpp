@@ -272,11 +272,41 @@ private:
 	}
 };
 
+// Single source of truth for the LLVM PPU compile memory budget (graft of ouroboros420
+// f0aa39c58 + cb95aea86). concurent_memory_limit uses it to throttle concurrent module
+// compilation: a module whose estimate exceeds the budget compiles solo (others wait via
+// the solo-allocation escape), so peak memory stays ~one big module instead of N.
+// utils::get_total_memory() returns accurate PHYSICAL RAM (sysconf(_SC_PHYS_PAGES) =
+// kernel totalram; it does NOT count zRAM/swap), but a single Android process cannot
+// allocate near all of it before the per-process cgroup / Low Memory Killer limit fires,
+// so total/3 is far too loose. We prefer the app-pushed ActivityManager per-process-safe
+// budget and otherwise cap conservatively at 1.5 GiB. EVERY PPU-compile
+// concurent_memory_limit MUST use this: a loose budget on any path (the old
+// get_total_memory()/2 in the public ppu_initialize overload) admits multiple ~1.6 GiB
+// modules concurrently and OOMs/segfaults first-time compiles (e.g. Skate 2, BLUS30253).
+static u64 ppu_get_llvm_compile_budget()
+{
+	u64 compile_budget = utils::get_total_memory() / 3;
+#ifdef ANDROID
+	if (const u64 app_budget = rpcs3::utils::get_compile_memory_budget(); app_budget != 0)
+	{
+		compile_budget = std::min<u64>(compile_budget, app_budget);
+	}
+	else
+	{
+		compile_budget = std::min<u64>(compile_budget, 1536ull * 1024 * 1024);
+	}
+#endif
+	return compile_budget;
+}
+
 extern void ppu_initialize();
 extern void ppu_finalize(const ppu_module<lv2_obj>& info, bool force_mem_release = false);
 extern bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only = false, u64 file_size = 0);
 extern bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_size, concurent_memory_limit& memory_limit);
-static void ppu_initialize2(class jit_compiler& jit, const ppu_module<lv2_obj>& module_part, const std::string& cache_path, const std::string& obj_name);
+// Returns true if the module was compiled (or loaded) and its object is usable;
+// false when cancelled by shutdown/pause or when LLVM codegen failed (e.g. OOM).
+static bool ppu_initialize2(class jit_compiler& jit, const ppu_module<lv2_obj>& module_part, const std::string& cache_path, const std::string& obj_name);
 extern bool ppu_load_exec(const ppu_exec_object&, bool virtual_load, const std::string&, utils::serial* = nullptr);
 extern std::pair<shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_exec_object&, bool virtual_load, const std::string& path, s64 file_offset, utils::serial* = nullptr);
 extern void ppu_unload_prx(const lv2_prx&);
@@ -932,6 +962,11 @@ extern void ppu_register_function_at(u32 addr, u32 size, ppu_intrp_func_t ptr = 
 
 		return;
 	}
+
+	// Align to instruction boundaries so unaligned writes (e.g. via
+	// sys_dbg_write_process_memory) don't corrupt the interpreter cache
+	size = rx::alignUp<u32>(size + addr % 4, 4);
+	addr &= -4;
 
 	if (g_cfg.core.ppu_decoder != ppu_decoder_type::_static)
 	{
@@ -2612,7 +2647,16 @@ void ppu_thread::serialize_common(utils::serial& ar)
 {
 	[[maybe_unused]] const s32 version = GET_OR_USE_SERIALIZATION_VERSION(ar.is_writing(), ppu);
 
-	// ar(gpr, fpr, cr, fpscr.bits, lr, ctr, vrsave, cia, xer, sat, nj, prio.raw().all);
+	// PPU scalar registers were never serialized here (the upstream line was commented out
+	// during the rpcsx re-vendor because the PPUContext fields were renamed: cr -> cr_bits,
+	// xer -> xer_so/ov/ca/cnt, sat -> v128, fpscr.bits union). Without this, savestate reload
+	// zeroed every GPR/cia, so the game dereferenced a NULL pointer (reported as base+0 =
+	// 0x300000000) and segfaulted. Re-enabled adapted to the current field types, serialized
+	// UNCONDITIONALLY (matching upstream): a `version >=` gate here is IMPOSSIBLE because
+	// GET_OR_USE_SERIALIZATION_VERSION returns 0 on the write path, so a gate would write
+	// nothing yet read registers -> stream desync (serial_breathe_and_tag).
+	// vr is serialized below. (graft of ouroboros420 94e5b39be + d42134836)
+	ar(gpr, fpr, cr, fpscr.bits, lr, ctr, vrsave, cia, xer_so, xer_ov, xer_ca, xer_cnt, sat, nj, prio.raw().all);
 
 	if (cia % 4 || (cia >> 28) >= 0xCu)
 	{
@@ -3567,7 +3611,16 @@ extern bool ppu_stdcx(ppu_thread& ppu, u32 addr, u64 reg_value)
 
 struct jit_core_allocator
 {
-	const s16 thread_count = g_cfg.core.llvm_threads ? std::min<s32>(g_cfg.core.llvm_threads, limit()) : limit();
+	// Honour the Android low-RAM compile-thread cap (0 = no cap) so the
+	// concurrent-codegen semaphore - the real peak-memory bound during boot -
+	// never exceeds what the device can hold. (ouroboros420 f7851ac47)
+	static s16 capped(s16 tc)
+	{
+		const u32 cap = rpcs3::utils::get_compile_thread_cap();
+		return cap ? std::min<s16>(tc, static_cast<s16>(cap)) : tc;
+	}
+
+	const s16 thread_count = capped(g_cfg.core.llvm_threads ? std::min<s32>(g_cfg.core.llvm_threads, limit()) : limit());
 
 	// Initialize global semaphore with the max number of threads
 	::semaphore<0x7fff> sem{std::max<s16>(thread_count, 1)};
@@ -4039,9 +4092,17 @@ extern void ppu_precompile(std::vector<std::string>& dir_queue, std::vector<ppu_
 
 	lf_queue<file_info> possible_exec_file_paths;
 
-	concurent_memory_limit memory_limit(utils::get_total_memory() / 3);
+	// Device-scaled, app-pushed budget (see ppu_get_llvm_compile_budget). Big modules
+	// serialize via the solo-allocation escape; small modules still run concurrently.
+	concurent_memory_limit memory_limit(ppu_get_llvm_compile_budget());
 
-	const u32 software_thread_limit = std::min<u32>(g_cfg.core.llvm_threads ? g_cfg.core.llvm_threads : u32{umax}, ::size32(file_queue));
+	u32 software_thread_limit = std::min<u32>(g_cfg.core.llvm_threads ? g_cfg.core.llvm_threads : u32{umax}, ::size32(file_queue));
+	if (const u32 cap = rpcs3::utils::get_compile_thread_cap(); cap > 0)
+	{
+		// Android low-RAM guard (ouroboros420 f7851ac47): applied to the EFFECTIVE thread
+		// count so a per-game cfg_mode::custom config cannot silently undo the cap.
+		software_thread_limit = std::min<u32>(software_thread_limit, cap);
+	}
 	const u32 cpu_thread_limit = utils::get_thread_count() > 8u ? std::max<u32>(utils::get_thread_count(), 2) - 1 : utils::get_thread_count(); // One LLVM thread less
 
 	std::vector<u128> decrypt_klics;
@@ -5372,18 +5433,47 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 						total_fn_size += fn.size;
 					}
 
+					// CAUTION (ouroboros420 e449e48ff): this estimate is degenerate and
+					// load-bearing: ~16 KiB per guest-code byte makes every ~100 KiB part
+					// request ~1.6 GiB, exceeding the Android budget, so the solo-allocation
+					// escape admits exactly ONE part at a time. That accidental full
+					// serialization is the only thing bounding peak compile RSS on 7-8 GiB
+					// phones (the resolver parts' real LLVM cost is dominated by their
+					// ~program-wide declaration count, which this formula does not model at
+					// all). Do NOT make the multiplier "honest" without adding a real
+					// concurrency bound - honest small requests would admit several
+					// multi-GiB codegens in parallel and OOM.
 					ppu_log.warning("LLVM: reporting used memory %u (free/total: %u/%u) by %s%s", total_fn_size * 1024 * 16, memory_limit.free_memory(), memory_limit.total_memory(), cache_path, obj_name);
 					auto used_memory = memory_limit.acquire(total_fn_size * 1024 * 16);
 
 					ppu_log.warning("LLVM: Compiling module %s%s", cache_path, obj_name);
 
+					bool compiled_ok = false;
 					{
 						// Use another JIT instance
 						jit_compiler jit2({}, g_cfg.core.llvm_cpu.to_string(), 0x1);
-						ppu_initialize2(jit2, part, cache_path, obj_name);
+						compiled_ok = ppu_initialize2(jit2, part, cache_path, obj_name);
 					}
 
-					ppu_log.success("LLVM: Compiled module %s", obj_name);
+					// ouroboros420 0f7c8aacb: the unconditional success log was a lie -
+					// cancelled/failed translations wrote no object yet still logged
+					// "Compiled module" (158 such lines in one tester log).
+					if (compiled_ok)
+					{
+						ppu_log.success("LLVM: Compiled module %s", obj_name);
+					}
+					else if (cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped())
+					{
+						// Shutdown cancelled the translation - no object was written,
+						// the module recompiles on the next launch.
+						ppu_log.notice("LLVM: Compile of module %s cancelled", obj_name);
+					}
+					else
+					{
+						// Codegen failed (e.g. LLVM OOM on a giant symbol-resolver
+						// part) - object absent, retried next boot with a cold RSS.
+						ppu_log.error("LLVM: Module %s failed to compile and was skipped", obj_name);
+					}
 				}
 
 				core_lock.unlock();
@@ -5483,6 +5573,12 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{
 				break;
 			}
+
+			// Log BEFORE add(): success was only logged afterwards, so a silent
+			// native death inside RuntimeDyld left the victim object unnamed
+			// (observed: Dante's Inferno died between "Loaded module #0" and any
+			// further output). (ouroboros420 5bb2b4c16)
+			ppu_log.notice("LLVM: Linking module #%u %s", mod_index, obj_name);
 
 			if (!failed_to_load && !jits[mod_index / c_moudles_per_jit]->add(cache_path + obj_name))
 			{
@@ -5637,11 +5733,15 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_size)
 {
-	concurent_memory_limit memory_limit(rx::aligned_div<u64>(utils::get_total_memory(), 2));
+	// MUST match the main precompile path's budget: was get_total_memory()/2 here, which
+	// is UNCLAMPED - on Android it admits ~2 concurrent ~1.6 GiB modules and OOMs/segfaults
+	// first-time compiles (Skate 2). The clamped budget makes an over-budget module compile
+	// solo (others wait), bounding peak compile memory to ~one module. (ouroboros420 f0aa39c58)
+	concurent_memory_limit memory_limit(ppu_get_llvm_compile_budget());
 	return ppu_initialize(info, check_only, file_size, memory_limit);
 }
 
-static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module_part, const std::string& cache_path, const std::string& obj_name)
+static bool ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module_part, const std::string& cache_path, const std::string& obj_name)
 {
 #ifdef LLVM_AVAILABLE
 	using namespace llvm;
@@ -5702,7 +5802,6 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		{
 			translator.build_interpreter();
 		}
-#ifdef ARCH_X64
 		// Create the analysis managers.
 		// These must be declared in this order so that they are destroyed in the
 		// correct order due to inter-analysis-manager references.
@@ -5727,7 +5826,6 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		FunctionPassManager fpm;
 		// Basic optimizations
 		fpm.addPass(EarlyCSEPass());
-#endif
 		u32 guest_code_size = 0;
 		u32 min_addr = umax;
 		u32 max_addr = 0;
@@ -5739,8 +5837,8 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		{
 			if (Emu.IsStopped())
 			{
-				ppu_log.success("LLVM: Translation cancelled");
-				return;
+				ppu_log.notice("LLVM: Translation cancelled");
+				return false;
 			}
 
 			if (mod_func.size)
@@ -5758,15 +5856,13 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 				// Translate
 				if ([[maybe_unused]] const auto func = translator.Translate(mod_func))
 				{
-#ifdef ARCH_X64 // TODO
                 // Run optimization passes
 					fpm.run(*func, fam);
-#endif // ARCH_X64
 				}
 				else
 				{
 					Emu.Pause();
-					return;
+					return false;
 				}
 			}
 		}
@@ -5776,15 +5872,13 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 		{
 			if ([[maybe_unused]] const auto func = translator.GetSymbolResolver(module_part))
 			{
-#ifdef ARCH_X64 // TODO
                 // Run optimization passes
 				fpm.run(*func, fam);
-#endif // ARCH_X64
 			}
 			else
 			{
 				Emu.Pause();
-				return;
+				return false;
 			}
 		}
 
@@ -5814,13 +5908,23 @@ static void ppu_initialize2(jit_compiler& jit, const ppu_module<lv2_obj>& module
 				{
 					Emu.GracefulShutdown(false, true);
 				});
-			return;
+			return false;
 		}
 #endif
 		ppu_log.notice("LLVM: %zu functions generated (code_size=0x%x, num_func=%d, max_addr(-)min_addr=0x%x)", _module->getFunctionList().size(), guest_code_size, num_func, max_addr - min_addr);
 	}
 
-	// Load or compile module
-	jit.add(std::move(_module), cache_path);
+	// Load or compile module. Use the recoverable path (codegen runs on a
+	// disposable helper thread): an LLVM OOM/fatal during a giant module (e.g.
+	// the ~478k-declaration symbol-resolver part of huge executables) then
+	// kills only that helper instead of abort()ing the whole process - the
+	// module is skipped, its object stays absent and is retried on the next
+	// boot, when no live game RSS competes for memory. (ouroboros420 0f7c8aacb)
+	if (std::string error; !jit.try_add(std::move(_module), cache_path, error))
+	{
+		ppu_log.error("LLVM: Codegen failed for module %s: %s", obj_name, error);
+		return false;
+	}
 #endif // LLVM_AVAILABLE
+	return true;
 }

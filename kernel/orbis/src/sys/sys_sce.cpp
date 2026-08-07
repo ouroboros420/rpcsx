@@ -7,6 +7,9 @@
 #include "module/ModuleInfoEx.hpp"
 #include "orbis/time.hpp"
 #include "osem.hpp"
+#include "pmem.hpp"
+#include "rx/AddressRange.hpp"
+#include "rx/EnumBitSet.hpp"
 #include "sys/sysproto.hpp"
 #include "thread/Process.hpp"
 #include "thread/ProcessOps.hpp"
@@ -14,10 +17,9 @@
 #include "ucontext.hpp"
 #include "uio.hpp"
 #include "utils/Logs.hpp"
+#include "vmem.hpp"
 #include <fcntl.h>
 #include <ranges>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <utility>
 
 struct orbis::AppMountInfo {
@@ -30,13 +32,57 @@ struct orbis::AppMountInfo {
 
 static_assert(sizeof(orbis::AppMountInfo) == 120);
 
-orbis::SysResult orbis::sys_netcontrol(Thread *thread, sint fd, uint op,
-                                       ptr<void> buf, uint nbuf) {
+static std::pair<std::uint64_t, orbis::ErrorCode>
+mmap_dmem(orbis::Thread *thread, orbis::uintptr_t addr, orbis::size_t len,
+          orbis::MemoryType memoryType,
+          rx::EnumBitSet<orbis::vmem::Protection> prot,
+          rx::EnumBitSet<orbis::vmem::MapFlags> flags,
+          orbis::off_t directMemoryStart, std::uint64_t callerAddress) {
+  auto alignment = orbis::dmem::kPageSize;
+
+  {
+    auto unpacked = unpackMapFlags(flags, orbis::dmem::kPageSize);
+    alignment = unpacked.first;
+    flags = unpacked.second;
+  }
+
+  len = rx::alignUp(len, orbis::dmem::kPageSize);
+
+  rx::EnumBitSet<orbis::AllocationFlags> allocFlags{};
+
+  if (prot & orbis::vmem::Protection::CpuExec) {
+    return {{}, orbis::ErrorCode::INVAL};
+  }
+
+  if (flags & orbis::vmem::MapFlags::Fixed) {
+    allocFlags = orbis::AllocationFlags::Fixed;
+  } else if (addr == 0) {
+    addr = 0xfe0000000;
+  }
+
+  if (flags & orbis::vmem::MapFlags::NoOverwrite) {
+    allocFlags |= orbis::AllocationFlags::NoOverwrite;
+  }
+
+  auto name = callerAddress ? rx::format("anon:{:012x}", callerAddress) : "";
+
+  auto [range, errc] = orbis::vmem::mapDirect(
+      thread->tproc, addr,
+      rx::AddressRange::fromBeginSize(directMemoryStart, len), prot, allocFlags,
+      name, alignment, callerAddress, memoryType);
+
+  if (errc != orbis::ErrorCode{}) {
+    return {{}, errc};
+  }
+
+  return {range.beginAddress(), {}};
+}
+
+orbis::SysResult orbis::sys_netcontrol(Thread *thread, FileDescriptor fd,
+                                       uint op, ptr<void> buf, uint nbuf) {
   return {};
 }
-orbis::SysResult orbis::sys_netabort(Thread *thread /* TODO */) {
-  return ErrorCode::NOSYS;
-}
+orbis::SysResult orbis::sys_netabort(Thread *thread /* TODO */) { return {}; }
 orbis::SysResult orbis::sys_netgetsockinfo(Thread *thread /* TODO */) {
   return ErrorCode::NOSYS;
 }
@@ -52,15 +98,15 @@ orbis::SysResult orbis::sys_socketex(Thread *thread, ptr<const char> name,
     }
 
     auto fd = thread->tproc->fileDescriptors.insert(file);
-    ORBIS_LOG_WARNING("Socket opened", name, fd);
-    thread->retval[0] = fd;
+    ORBIS_LOG_WARNING("Socket opened", name, (int)fd);
+    thread->retval[0] = std::to_underlying(fd);
     return {};
   }
   return ErrorCode::NOSYS;
 }
-orbis::SysResult orbis::sys_socketclose(Thread *thread, sint fd) {
+orbis::SysResult orbis::sys_socketclose(Thread *thread, FileDescriptor fd) {
   // This syscall is identical to sys_close
-  ORBIS_LOG_NOTICE(__FUNCTION__, fd);
+  ORBIS_LOG_NOTICE(__FUNCTION__, (int)fd);
   if (thread->tproc->fileDescriptors.close(fd)) {
     return {};
   }
@@ -71,9 +117,118 @@ orbis::SysResult orbis::sys_netgetiflist(Thread *thread /* TODO */) {
   return {};
 }
 
-orbis::SysResult orbis::sys_mtypeprotect(Thread *thread /* TODO */) {
-  return ErrorCode::NOSYS;
+orbis::SysResult
+orbis::sys_mtypeprotect(Thread *thread, uintptr_t addr, size_t len,
+                        MemoryType type,
+                        rx::EnumBitSet<vmem::Protection> prot) {
+  auto range = rx::AddressRange::fromBeginSize(addr, len);
+  if (!range.isValid() || static_cast<unsigned>(type) > 10) {
+    return ErrorCode::INVAL;
+  }
+
+  return vmem::setTypeAndProtect(thread->tproc, range, type, prot);
 }
+
+struct RegMgrComKey {
+  std::uint8_t data[4]{};
+  std::uint8_t table{};
+  std::uint8_t index{};
+
+  [[nodiscard]] static constexpr RegMgrComKey unpack(std::uint64_t key) {
+    RegMgrComKey result;
+    result.data[0] = static_cast<std::uint8_t>(key & 0xff);
+    result.data[1] = static_cast<std::uint8_t>((key >> 8) & 0xff);
+    result.data[2] = static_cast<std::uint8_t>((key >> 16) & 0xff);
+    result.data[3] = static_cast<std::uint8_t>((key >> 24) & 0xff);
+    result.table = static_cast<std::uint8_t>(key >> 32);
+    result.index = static_cast<std::uint8_t>(key >> 40);
+    return result;
+  }
+
+  [[nodiscard]] constexpr std::uint64_t pack() const {
+    std::uint64_t result = data[0];
+    result |= static_cast<std::uint64_t>(data[0]) << 0;
+    result |= static_cast<std::uint64_t>(data[1]) << 8;
+    result |= static_cast<std::uint64_t>(data[2]) << 16;
+    result |= static_cast<std::uint64_t>(data[3]) << 24;
+    result |= static_cast<std::uint64_t>(table) << 32;
+    result |= static_cast<std::uint64_t>(index) << 40;
+    result |= static_cast<std::uint64_t>(calcChecksum()) << 48;
+    return result;
+  }
+
+  [[nodiscard]] constexpr bool validate(std::uint64_t key) const {
+    return calcChecksum() == static_cast<std::uint16_t>(key >> 48);
+  }
+
+  [[nodiscard]] constexpr std::uint16_t calcChecksum() const {
+    return std::uint16_t(data[0]) + data[1] + data[2] + data[3] + table * index;
+  }
+};
+
+constexpr std::int32_t regMgrGetRegId(std::uint64_t encoded) {
+  constexpr std::uint8_t kRegMgrScrambSdk[] = {
+      0x6b, 0xe8, 0x98, 0x03, 0x9a, 0x70, 0x23, 0x5a,
+      0x63, 0xee, 0xf5, 0x7b, 0xff, 0xa4, 0x4c, 0x8c,
+  };
+  constexpr std::uint8_t kRegMgrScrambLib[] = {
+      0x14, 0xee, 0xde, 0xe1, 0x80, 0xac, 0xf3, 0x78,
+      0x47, 0x43, 0xdb, 0x40, 0x93, 0xdd, 0xb1, 0x34,
+  };
+
+  auto key = RegMgrComKey::unpack(encoded);
+  auto slot = key.index ^ 0x6b;
+
+  const std::uint8_t *table = kRegMgrScrambSdk;
+
+  switch ((key.table ^ table[0xf - slot])) {
+  case 0x19:
+    table = kRegMgrScrambLib;
+    break;
+  case 0x72:
+    table = kRegMgrScrambSdk;
+    break;
+
+  default:
+    return 0x800d0205;
+  }
+
+  std::uint32_t decodedKey = (key.data[1] ^ table[slot + 0]) * 0x1000000 +
+                             (key.data[3] ^ table[slot + 1]) * 0x10000 +
+                             (key.data[2] ^ table[slot + 2]) * 0x100 +
+                             (key.data[0] ^ table[slot + 3]);
+
+  return decodedKey;
+}
+
+struct RegMgrComInt {
+  uint64_t encodedId;
+  uint32_t unk;
+  uint32_t value;
+};
+
+static_assert(sizeof(RegMgrComInt) == 0x10);
+
+struct RegMgrComStr {
+  uint64_t encodedId;
+  uint32_t unk;
+  uint32_t padding;
+  uint64_t len;
+  rx::StaticCString<2048> string;
+};
+
+static_assert(sizeof(RegMgrComStr) == 0x818);
+
+struct RegMgrComBin {
+  uint64_t encodedId;
+  uint32_t unk;
+  uint32_t padding;
+  uint64_t len;
+  std::uint8_t data[2048];
+};
+
+static_assert(sizeof(RegMgrComBin) == 0x818);
+
 orbis::SysResult orbis::sys_regmgr_call(Thread *thread, uint32_t op,
                                         uint32_t id, ptr<void> result,
                                         ptr<void> value, uint64_t len) {
@@ -92,6 +247,7 @@ orbis::SysResult orbis::sys_regmgr_call(Thread *thread, uint32_t op,
     g_context->regMgrInt[id] = *(std::uint32_t *)value;
     return {};
   }
+
   if (op == 2) {
     // get int
     if (len != sizeof(uint32_t)) {
@@ -104,10 +260,20 @@ orbis::SysResult orbis::sys_regmgr_call(Thread *thread, uint32_t op,
       thread->where();
       // return ErrorCode::NOENT;
       return uwrite((ptr<uint>)value, 0u);
-      return {};
     }
-    return uwrite((ptr<uint>)value, intValIt->second);
 
+    return uwrite((ptr<uint>)value, intValIt->second);
+  }
+
+  if (op == 3) {
+    // set string
+
+    rx::StaticCString<2048> string;
+    ORBIS_RET_ON_ERROR(ureadString(
+        string.data(), std::min(string.max_size(), len), ptr<char>(value)));
+
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, string.data());
+    g_context->regMgrStr[id] = string;
     return {};
   }
 
@@ -119,63 +285,146 @@ orbis::SysResult orbis::sys_regmgr_call(Thread *thread, uint32_t op,
       return ErrorCode::INVAL;
     }
 
-    std::memset(value, 0, len);
+    auto it = g_context->regMgrStr.find(id);
+    if (it == g_context->regMgrStr.end()) {
+      ORBIS_LOG_ERROR("registry string entry not exists", op, id);
+      thread->where();
+      std::memset(value, 0, len);
+      return {};
+    }
 
-    ORBIS_LOG_ERROR(__FUNCTION__, op, id, len);
+    if (it->second.length() > len) {
+      return ErrorCode(-0x800d0606);
+    }
+
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, len, it->second.data());
     thread->where();
+    ORBIS_RET_ON_ERROR(
+        uwriteRaw(value, it->second.data(), it->second.length() + 1));
+
+    return {};
+  }
+
+  if (op == 24) {
+    // com: set int
+    RegMgrComInt _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComInt>(value)));
+
+    auto id = regMgrGetRegId(_request.encodedId);
+
+    if (id < 0) {
+      return ErrorCode(-id);
+    }
+
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, _request.unk, _request.value);
+    g_context->regMgrInt[id] = _request.value;
+
     return {};
   }
 
   if (op == 25) {
-    struct nonsys_int {
-      union {
-        uint64_t encoded_id;
-        struct {
-          uint8_t data[4];
-          uint8_t table;
-          uint8_t index;
-          uint16_t checksum;
-        } encoded_id_parts;
-      };
-      uint32_t unk;
-      uint32_t value;
-    };
+    // com: get int
+    RegMgrComInt _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComInt>(value)));
 
-    auto int_value = reinterpret_cast<nonsys_int *>(value);
-    ORBIS_LOG_TODO(
-        __FUNCTION__, int_value->encoded_id,
-        int_value->encoded_id_parts.data[0],
-        int_value->encoded_id_parts.data[1],
-        int_value->encoded_id_parts.data[2],
-        int_value->encoded_id_parts.data[3], int_value->encoded_id_parts.table,
-        int_value->encoded_id_parts.index, int_value->encoded_id_parts.checksum,
-        int_value->unk, int_value->value);
+    auto id = regMgrGetRegId(_request.encodedId);
 
-    // HACK: set default system language and gamepad layout to US/EU region
-    // 0x12356328ECF5617B -> language where is 0 is Japanese, 1 is English
-    // 0x22666251FE7BECFF -> confirm button layout, 0 is Circle, 1 is Cross
-    if (int_value->encoded_id == 0x12356328ECF5617B ||
-        int_value->encoded_id == 0x22666251FE7BECFF) {
-      int_value->value = 1;
-      return {};
+    if (id < 0) {
+      return ErrorCode(-id);
     }
 
-    if (int_value->encoded_id == 0x1ac46343411b3f40) {
-      int_value->value = 0; // allow debug libraries
-      return {};
+    auto it = g_context->regMgrInt.find(id);
+    if (it == g_context->regMgrInt.end()) {
+      ORBIS_LOG_ERROR("registry int entry not exists", op, id);
+      thread->where();
+      // return ErrorCode::NOENT;
+      _request.value = 0;
+    } else {
+      _request.value = it->second;
     }
 
-    if (int_value->encoded_id == 0x29b56169422aa3dd) {
-      int_value->value = 2;
-      return {};
-    }
-
-    // 0x503f69bde385a6ac // allow loading from dev machine?
-    // 0x2d946f62aef8f878
-
-    int_value->value = 0;
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, _request.unk, _request.value);
+    return uwrite((ptr<RegMgrComInt>)value, _request);
   }
 
+  if (op == 26) {
+    // com: set string
+    RegMgrComStr _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComStr>(value)));
+
+    auto id = regMgrGetRegId(_request.encodedId);
+
+    if (id < 0) {
+      return ErrorCode(-id);
+    }
+
+    if (_request.len > 2048 || _request.string[_request.len - 1] != '\0' ||
+        _request.string.length() + 1 != _request.len) {
+      return ErrorCode(-0x800d0205);
+    }
+
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, _request.unk,
+                      _request.string.data());
+    g_context->regMgrStr[id] = _request.string;
+    return {};
+  }
+
+  if (op == 27) {
+    // com: get string
+    RegMgrComStr _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComStr>(value)));
+
+    auto id = regMgrGetRegId(_request.encodedId);
+
+    if (id < 0) {
+      return ErrorCode(-id);
+    }
+
+    auto it = g_context->regMgrStr.find(id);
+    if (it == g_context->regMgrStr.end()) {
+      ORBIS_LOG_ERROR("registry string entry not exists", op, id);
+      thread->where();
+      _request.string = "";
+    } else {
+      _request.len = it->second.length();
+      _request.string = it->second;
+    }
+
+    ORBIS_LOG_WARNING(__FUNCTION__, op, id, _request.string.data());
+    return uwrite((ptr<RegMgrComStr>)value, _request);
+  }
+
+  if (op == 28) {
+    // com: set bin
+    RegMgrComBin _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComBin>(value)));
+
+    auto id = regMgrGetRegId(_request.encodedId);
+
+    if (id < 0) {
+      return ErrorCode(-id);
+    }
+
+    ORBIS_LOG_TODO(__FUNCTION__, op, id, _request.unk);
+    return {};
+  }
+
+  if (op == 29) {
+    // com: get bin
+    RegMgrComBin _request;
+    ORBIS_RET_ON_ERROR(uread(_request, ptr<RegMgrComBin>(value)));
+
+    auto id = regMgrGetRegId(_request.encodedId);
+
+    if (id < 0) {
+      return ErrorCode(-id);
+    }
+
+    ORBIS_LOG_TODO(__FUNCTION__, op, id, _request.unk);
+    return {};
+  }
+
+  ORBIS_LOG_TODO(__FUNCTION__, op, id);
   return {};
 }
 orbis::SysResult orbis::sys_jitshm_create(Thread *thread /* TODO */) {
@@ -395,19 +644,20 @@ orbis::SysResult orbis::sys_evf_cancel(Thread *thread, sint id, uint64_t value,
   return {};
 }
 orbis::SysResult
-orbis::sys_query_memory_protection(Thread *thread, ptr<void> address,
-                                   ptr<MemoryProtection> protection) {
-  if (auto query_memory_protection =
-          thread->tproc->ops->query_memory_protection) {
-    return query_memory_protection(thread, address, protection);
+orbis::sys_query_memory_protection(Thread *thread, uintptr_t address,
+                                   ptr<vmem::MemoryProtection> protection) {
+  auto result = vmem::queryProtection(thread->tproc, address);
+
+  if (!result) {
+    return ErrorCode::ACCES;
   }
 
-  return ErrorCode::NOSYS;
+  return uwrite(protection, *result);
 }
 
 namespace orbis {
 struct BatchMapEntry {
-  ptr<char> start;
+  uintptr_t start;
   off_t offset;
   size_t length;
   char protection;
@@ -421,14 +671,16 @@ struct BatchMapEntry {
 };
 } // namespace orbis
 
-orbis::SysResult orbis::sys_batch_map(Thread *thread, sint unk, sint flags,
+orbis::SysResult orbis::sys_batch_map(Thread *thread, sint unk,
+                                      rx::EnumBitSet<vmem::MapFlags> flags,
                                       ptr<BatchMapEntry> entries,
                                       sint entriesCount,
                                       ptr<sint> processedCount) {
-  auto ops = thread->tproc->ops;
   SysResult result = ErrorCode{};
-  ORBIS_LOG_ERROR(__FUNCTION__, unk, flags, entries, entriesCount,
-                  processedCount);
+  ORBIS_LOG_ERROR(__FUNCTION__, unk, flags.toUnderlying(), entries,
+                  entriesCount, processedCount);
+
+  auto callerAddress = getCallerAddress(thread);
 
   int processed = 0;
   for (int i = 0; i < entriesCount; ++i) {
@@ -439,17 +691,35 @@ orbis::SysResult orbis::sys_batch_map(Thread *thread, sint unk, sint flags,
                     _entry.offset);
 
     switch (_entry.operation) {
-    case 0:
-      result = ops->dmem_mmap(thread, _entry.start, _entry.length, _entry.type,
-                              _entry.protection, flags, _entry.offset);
+    case 0: {
+      auto [address, errc] = mmap_dmem(
+          thread, _entry.start, _entry.length, MemoryType::Invalid,
+          rx::EnumBitSet<vmem::Protection>::fromUnderlying(_entry.protection),
+          flags, _entry.offset, callerAddress);
+      result = errc;
       break;
+    }
     case 1:
-      result = ops->munmap(thread, _entry.start, _entry.length);
+      result = sys_munmap(thread, _entry.start, _entry.length);
       break;
     case 2:
-      result =
-          ops->mprotect(thread, _entry.start, _entry.length, _entry.protection);
+      result = sys_mprotect(
+          thread, _entry.start, _entry.length,
+          rx::EnumBitSet<vmem::Protection>::fromUnderlying(_entry.protection));
       break;
+    case 3:
+      result = sys_mmap(
+          thread, _entry.start, _entry.length,
+          rx::EnumBitSet<vmem::Protection>::fromUnderlying(_entry.protection),
+          vmem::MapFlags::Anon | flags, FileDescriptor::Invalid, 0);
+      break;
+    case 4:
+      result = sys_mtypeprotect(
+          thread, _entry.start, _entry.length,
+          static_cast<MemoryType>(_entry.type),
+          rx::EnumBitSet<vmem::Protection>::fromUnderlying(_entry.protection));
+      break;
+
     default:
       result = ErrorCode::INVAL;
       break;
@@ -882,14 +1152,22 @@ orbis::SysResult orbis::sys_budget_set(Thread *thread, sint budgetId) {
   thread->tproc->budgetId = budgetId;
   return {};
 }
-orbis::SysResult orbis::sys_virtual_query(Thread *thread, ptr<void> addr,
-                                          uint64_t unk, ptr<void> info,
+
+orbis::SysResult orbis::sys_virtual_query(Thread *thread, uintptr_t addr,
+                                          uint64_t flags, ptr<void> info,
                                           size_t infosz) {
-  if (auto virtual_query = thread->tproc->ops->virtual_query) {
-    return virtual_query(thread, addr, unk, info, infosz);
+
+  if (infosz != sizeof(vmem::QueryResult)) {
+    return ErrorCode::INVAL;
   }
 
-  return ErrorCode::NOSYS;
+  auto result = vmem::query(thread->tproc, addr, flags & 1);
+
+  if (!result) {
+    return ErrorCode::ACCES;
+  }
+
+  return uwrite(ptr<vmem::QueryResult>(info), *result);
 }
 orbis::SysResult orbis::sys_mdbg_call(Thread *thread /* TODO */) { return {}; }
 orbis::SysResult orbis::sys_obs_sblock_create(Thread *thread /* TODO */) {
@@ -932,7 +1210,7 @@ orbis::SysResult orbis::sys_is_in_sandbox(Thread *thread /* TODO */) {
 }
 orbis::SysResult orbis::sys_dmem_container(Thread *thread, uint id) {
   ORBIS_LOG_NOTICE(__FUNCTION__, id);
-  thread->retval[0] = 1; // returns default direct memory device
+  thread->retval[0] = 0; // returns default direct memory device
   if (id + 1)
     return ErrorCode::PERM;
   return {};
@@ -957,24 +1235,11 @@ orbis::SysResult orbis::sys_mname(Thread *thread, uint64_t addr, uint64_t len,
     return result;
   }
 
-  NamedMemoryRange range;
-  range.begin = addr & ~0x3fffull;
-  range.end = range.begin;
-  range.end += ((addr & 0x3fff) + 0x3fff + len) & ~0x3fffull;
-
-  std::lock_guard lock(thread->tproc->namedMemMutex);
-  auto [it, end] = thread->tproc->namedMem.equal_range<NamedMemoryRange>(range);
-  while (it != end) {
-    auto [addr2, end2] = it->first;
-    auto len2 = end2 - addr2;
-    ORBIS_LOG_NOTICE("sys_mname: removed overlapped", it->second, addr2, len2);
-    it = thread->tproc->namedMem.erase(it);
+  auto range = rx::AddressRange::fromBeginSize(addr, len);
+  if (auto error = vmem::setName(thread->tproc, range, _name);
+      error != ErrorCode{}) {
+    ORBIS_LOG_ERROR(__FUNCTION__, "failure:", static_cast<int>(error));
   }
-  if (!thread->tproc->namedMem.try_emplace(range, _name).second)
-    std::abort();
-  if (!thread->tproc->namedMem.count(addr))
-    std::abort();
-
   return {};
 }
 orbis::SysResult orbis::sys_dynlib_dlopen(Thread *thread /* TODO */) {
@@ -1021,7 +1286,7 @@ orbis::SysResult orbis::sys_dynlib_get_info(Thread *thread,
 
   ModuleInfo result = {};
   result.size = sizeof(ModuleInfo);
-  std::strncpy(result.name, module->moduleName, sizeof(result.name));
+  std::strncpy(result.name, module->soName, sizeof(result.name));
   std::memcpy(result.segments, module->segments,
               sizeof(ModuleSegment) * module->segmentCount);
   result.segmentCount = module->segmentCount;
@@ -1186,8 +1451,8 @@ orbis::SysResult orbis::sys_randomized_path(Thread *thread, sint type,
   }
   return {};
 }
-orbis::SysResult orbis::sys_rdup(Thread *thread, sint pid, sint fd) {
-  ORBIS_LOG_TODO(__FUNCTION__, pid, fd);
+orbis::SysResult orbis::sys_rdup(Thread *thread, pid_t pid, FileDescriptor fd) {
+  ORBIS_LOG_TODO(__FUNCTION__, pid, (int)fd);
   auto process = pid == -1 || pid == thread->tproc->pid ? thread->tproc
                                                         : findProcessById(pid);
 
@@ -1200,7 +1465,8 @@ orbis::SysResult orbis::sys_rdup(Thread *thread, sint pid, sint fd) {
     return ErrorCode::BADF;
   }
 
-  thread->retval[0] = thread->tproc->fileDescriptors.insert(std::move(file));
+  thread->retval[0] = std::to_underlying(
+      thread->tproc->fileDescriptors.insert(std::move(file)));
   return {};
 }
 orbis::SysResult orbis::sys_dl_get_metadata(Thread *thread /* TODO */) {
@@ -1273,7 +1539,7 @@ orbis::sys_dynlib_get_info_ex(Thread *thread, SceKernelModule handle,
   result.ehFrameSize = module->ehFrameSize;
   std::memcpy(result.segments, module->segments, sizeof(ModuleSegment) * 2);
   result.segmentCount = 2;
-  result.refCount = 1;
+  result.refCount = module->refCount;
   ORBIS_LOG_WARNING(__FUNCTION__, result.id, result.name, result.tlsIndex,
                     result.tlsInit, result.tlsInitSize, result.tlsSize,
                     result.tlsOffset, result.tlsAlign, result.initProc,
@@ -1487,14 +1753,26 @@ orbis::SysResult orbis::sys_get_cpu_usage_all(Thread *thread, uint32_t unk,
   ORBIS_LOG_TODO(__FUNCTION__, unk, result);
   return {};
 }
-orbis::SysResult orbis::sys_mmap_dmem(Thread *thread, caddr_t addr, size_t len,
-                                      sint memoryType, sint prot, sint flags,
+orbis::SysResult orbis::sys_mmap_dmem(Thread *thread, uintptr_t addr,
+                                      size_t len, MemoryType memoryType,
+                                      rx::EnumBitSet<vmem::Protection> prot,
+                                      rx::EnumBitSet<vmem::MapFlags> flags,
                                       off_t directMemoryStart) {
-  if (auto dmem_mmap = thread->tproc->ops->dmem_mmap) {
-    return dmem_mmap(thread, addr, len, memoryType, prot, flags,
-                     directMemoryStart);
+  if (static_cast<unsigned>(memoryType) > 10) {
+    return ErrorCode::INVAL;
   }
-  return ErrorCode::NOSYS;
+
+  auto callerAddress = getCallerAddress(thread);
+
+  auto [result, errc] = mmap_dmem(thread, addr, len, memoryType, prot, flags,
+                                  directMemoryStart, callerAddress);
+
+  if (errc != ErrorCode{}) {
+    return errc;
+  }
+
+  thread->retval[0] = result;
+  return {};
 }
 orbis::SysResult orbis::sys_physhm_open(Thread *thread /* TODO */) {
   return ErrorCode::NOSYS;
@@ -1635,7 +1913,7 @@ orbis::SysResult orbis::sys_get_cpu_usage_proc(Thread *thread /* TODO */) {
 orbis::SysResult orbis::sys_get_map_statistics(Thread *thread /* TODO */) {
   return ErrorCode::NOSYS;
 }
-orbis::SysResult orbis::sys_set_chicken_switches(Thread *thread /* TODO */) {
+orbis::SysResult orbis::sys_set_chicken_switches(Thread *thread, sint flags) {
   return ErrorCode::NOSYS;
 }
 orbis::SysResult orbis::sys_extend_page_table_pool(Thread *thread) {
@@ -1696,31 +1974,53 @@ orbis::SysResult orbis::sys_process_terminate(Thread *thread /* TODO */) {
   return ErrorCode::NOSYS;
 }
 orbis::SysResult orbis::sys_blockpool_open(Thread *thread) {
-  if (auto blockpool_open = thread->tproc->ops->blockpool_open) {
-    rx::Ref<File> file;
-    auto result = blockpool_open(thread, &file);
-    if (result.isError()) {
-      return result;
-    }
+  if (!g_context->blockpool) {
+    return ErrorCode::NOSYS;
+  }
 
-    thread->retval[0] = thread->tproc->fileDescriptors.insert(file);
-    return {};
+  auto fd = thread->tproc->fileDescriptors.insert(g_context->blockpool);
+
+  if (fd == thread->tproc->fileDescriptors.npos) {
+    return ErrorCode::MFILE;
   }
-  return ErrorCode::NOSYS;
+
+  thread->retval[0] = std::to_underlying(fd);
+  return {};
 }
-orbis::SysResult orbis::sys_blockpool_map(Thread *thread, caddr_t addr,
-                                          size_t len, sint prot, sint flags) {
-  if (auto blockpool_map = thread->tproc->ops->blockpool_map) {
-    return blockpool_map(thread, addr, len, prot, flags);
+orbis::SysResult
+orbis::sys_blockpool_map(Thread *thread, uintptr_t addr, size_t len,
+                         MemoryType type, rx::EnumBitSet<vmem::Protection> prot,
+                         rx::EnumBitSet<vmem::MapFlags> flags) {
+  rx::EnumBitSet<AllocationFlags> allocFlags{};
+
+  if (flags & vmem::MapFlags::Fixed) {
+    allocFlags |= AllocationFlags::Fixed;
   }
-  return ErrorCode::NOSYS;
+  if (flags & vmem::MapFlags::NoOverwrite) {
+    allocFlags |= AllocationFlags::NoOverwrite;
+  }
+  if (flags & vmem::MapFlags::NoCoalesce) {
+    allocFlags |= AllocationFlags::NoMerge;
+  }
+
+  auto [range, errc] = vmem::commitPooled(
+      thread->tproc, rx::AddressRange::fromBeginSize(addr, len), type, prot);
+
+  if (errc != ErrorCode{}) {
+    return errc;
+  }
+
+  thread->retval[0] = range.beginAddress();
+  return {};
 }
-orbis::SysResult orbis::sys_blockpool_unmap(Thread *thread, caddr_t addr,
+orbis::SysResult orbis::sys_blockpool_unmap(Thread *thread, uintptr_t addr,
                                             size_t len, sint flags) {
-  if (auto blockpool_unmap = thread->tproc->ops->blockpool_unmap) {
-    return blockpool_unmap(thread, addr, len);
+  if (flags != 0) {
+    return ErrorCode::INVAL;
   }
-  return ErrorCode::NOSYS;
+
+  return vmem::decommitPooled(thread->tproc,
+                              rx::AddressRange::fromBeginSize(addr, len));
 }
 orbis::SysResult
 orbis::sys_dynlib_get_info_for_libdbg(Thread *thread /* TODO */) {

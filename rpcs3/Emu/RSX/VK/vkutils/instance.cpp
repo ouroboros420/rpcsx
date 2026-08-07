@@ -68,11 +68,22 @@ namespace vk
 			m_debugger = nullptr;
 		}
 
+#if defined(ANDROID)
+		// Explicitly destroy every WSI surface created on this instance (including
+		// any leaked by a home-menu swapchain reinit) so the Adreno/Turnip driver
+		// releases the ANativeWindow producer claim. Reaping them via
+		// vkDestroyInstance leaves the window "in use" and the next session (e.g. a
+		// savestate reload) fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR. All
+		// swapchains built on these surfaces are already gone by this point.
+		destroy_WSI_surfaces(m_instance);
+		m_surface = VK_NULL_HANDLE;
+#else
 		if (m_surface)
 		{
 			VK_GET_SYMBOL(vkDestroySurfaceKHR)(m_instance, m_surface, nullptr);
 			m_surface = VK_NULL_HANDLE;
 		}
+#endif
 
 		VK_GET_SYMBOL(vkDestroyInstance)(m_instance, nullptr);
 		m_instance = VK_NULL_HANDLE;
@@ -254,13 +265,25 @@ namespace vk
 		instance_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
 
-		if (VkResult result = VK_GET_SYMBOL(vkCreateInstance)(&instance_info, nullptr, &m_instance); result != VK_SUCCESS)
+		VkResult result = VK_GET_SYMBOL(vkCreateInstance)(&instance_info, nullptr, &m_instance);
+
+		if (result == VK_ERROR_LAYER_NOT_PRESENT && !layers.empty())
 		{
-			if (result == VK_ERROR_LAYER_NOT_PRESENT)
-			{
-				rsx_log.fatal("Could not initialize layer VK_LAYER_KHRONOS_validation");
+			// The only instance layer we request on a non-MoltenVK target is
+			// VK_LAYER_KHRONOS_validation, enabled by the "Debug output" video setting. That layer
+			// ships only with the Vulkan SDK / debug builds and is absent on essentially every
+			// release Android device, so its absence must NOT brick rendering. Drop the optional
+			// layer(s) and retry instead of failing with "No Vulkan device was created" - toggling
+			// Debug Output on such a device then simply runs without GPU validation.
+			rsx_log.warning("A requested Vulkan instance layer (Debug Output validation) is unavailable on this device; continuing without it.");
+			layers.clear();
+			instance_info.enabledLayerCount = 0;
+			instance_info.ppEnabledLayerNames = nullptr;
+			result = VK_GET_SYMBOL(vkCreateInstance)(&instance_info, nullptr, &m_instance);
 			}
 
+		if (result != VK_SUCCESS)
+		{
 			return false;
 		}
 
@@ -307,6 +330,19 @@ namespace vk
 		WSI_config surface_config{
 			.supports_automatic_wm_reports = true,
 		};
+
+#if !defined(ANDROID)
+		// Re-create on the same instance (desktop): release the previous surface
+		// before making a new one. On Android the surface lifetime is tracked
+		// globally (see swapchain_android.hpp) and released at instance teardown,
+		// so this instance never re-owns a surface to destroy here.
+		if (m_surface != VK_NULL_HANDLE)
+		{
+			VK_GET_SYMBOL(vkDestroySurfaceKHR)(m_instance, m_surface, nullptr);
+			m_surface = VK_NULL_HANDLE;
+		}
+#endif
+
 		m_surface = make_WSI_surface(m_instance, window_handle, &surface_config);
 
 		u32 device_queues = dev.get_queue_count();
@@ -415,7 +451,7 @@ namespace vk
 
 		color_space = surfFormats[0].colorSpace;
 
-		return new swapchain_WSI(dev, present_queue_idx, graphics_queue_idx, transfer_queue_idx, format, m_surface, color_space, !surface_config.supports_automatic_wm_reports);
+		return new swapchain_WSI(dev, present_queue_idx, graphics_queue_idx, transfer_queue_idx, format, m_surface, color_space, !surface_config.supports_automatic_wm_reports, window_handle);
 	}
 
 #ifdef ANDROID

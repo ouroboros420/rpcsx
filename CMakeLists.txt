@@ -131,7 +131,7 @@ endfunction()
 function(target_base_address target address)
     set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE off)
 
-    if(CMAKE_CXX_COMPILER_LINKER_ID MATCHES "^(LLD|MOLD)$")
+    if(CMAKE_CXX_COMPILER_LINKER_ID MATCHES "^(LLD|MOLD)$" OR MINGW)
         target_link_options(${target} PUBLIC "LINKER:--image-base=${address}")
     else()
         target_link_options(${target} PUBLIC "LINKER:-Ttext-segment,${address}")
@@ -149,6 +149,11 @@ option(WITHOUT_OPENGL "Disable OpenGL" OFF)
 option(WITHOUT_OPENGLEW "Disable OpenGLEW" OFF)
 option(WITHOUT_OPENAL "Disable OpenAL" OFF)
 option(COMPILE_FFMPEG "Compile FFmpeg" ON)
+option(USE_FS_GS_SYSCALL "Use the arch_prctl syscall to interact with fsbase and gsbase instead of x86 instructions. Used for compatibility with some systems, but comes at a performance cost." OFF)
+
+if(USE_FS_GS_SYSCALL)
+    add_definitions(-DUSE_FS_GS_SYSCALL)
+endif()
 
 if(APPLE OR WIN32)
     set(USE_SYSTEM_OPENAL_DEFAULT OFF)
@@ -282,6 +287,7 @@ include(CheckFunctionExists)
 
 add_subdirectory(3rdparty EXCLUDE_FROM_ALL)
 add_subdirectory(rx EXCLUDE_FROM_ALL)
+add_subdirectory(test)
 
 include(3rdparty/llvm/CMakeLists.txt)
 
@@ -319,4 +325,3 @@ if (WITH_PS3)
     add_subdirectory(rpcs3)
     add_subdirectory(ps3fw)
 endif()
-

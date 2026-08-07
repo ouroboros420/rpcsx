@@ -709,8 +709,28 @@ namespace rsx
 			state_signals[NV4097_SET_POINT_SIZE] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_ALPHA_FUNC] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_ALPHA_REF] = rsx::fragment_state_dirty;
+			// DELIBERATE DIVERGENCE FROM OUROBOROS - do not "resolve to theirs" on a later
+			// merge stage without reading this first.
+			// ALPHA_TEST_ENABLE / SHADER_PACKER / POLYGON_STIPPLE below are kept on
+			// fragment_program_state_dirty, which is upstream v0.0.42 (da21b1014). It is
+			// required for correctness: the fragment program is specialized on
+			// RSX_SHADER_CONTROL_ALPHA_TEST / _POLYGON_STIPPLE and on the packer mode, so
+			// toggling any of them MUST re-specialize the program - fragment_state_dirty
+			// alone leaves a stale program bound.
+			// Ouroboros pins these to fragment_state_dirty (their 0304a83f8 -> c6681c80d ->
+			// f5486e67c -> 6ad24457f5f) because on-device bisection on Turnip/Adreno tied
+			// re-specialization to a "missing torso" glitch plus shader-recompile stutter.
+			// We keep upstream because our tree has the real 0.0.42 Assembler decompiler and
+			// 0.0.42 GLSL snippets, i.e. their workaround masks a shader bug we may not have.
+			// IF QA REPORTS missing / see-through character torsos or vegetation, or heavy
+			// shader-recompile stutter: flipping these three lines to rsx::fragment_state_dirty
+			// is the first thing to try, and record the result here.
 			state_signals[NV4097_SET_ALPHA_TEST_ENABLE] = rsx::fragment_program_state_dirty;
-			state_signals[NV4097_SET_SHADER_PACKER] = rsx::fragment_program_state_dirty;
+			// NV4097_SET_ANTI_ALIASING_CONTROL intentionally has no signal here: it is a
+			// bound method handler (nv4097::set_aa_control) which raises the dirty bits
+			// itself. FIFO dispatch is method-OR-signal, so a signal would be dead and
+			// only trips the boot sanity-check warning. (ouroboros 101810385)
+			state_signals[NV4097_SET_SHADER_PACKER] = rsx::fragment_program_state_dirty; // see divergence note above
 			state_signals[NV4097_SET_SHADER_WINDOW] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_FOG_MODE] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_SCISSOR_HORIZONTAL] = rsx::scissor_config_state_dirty;
@@ -725,7 +745,7 @@ namespace rsx
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 0] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 1] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 2] = rsx::vertex_state_dirty;
-			state_signals[NV4097_SET_POLYGON_STIPPLE] = rsx::fragment_program_state_dirty;
+			state_signals[NV4097_SET_POLYGON_STIPPLE] = rsx::fragment_program_state_dirty; // see divergence note above
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 0] = rsx::polygon_stipple_pattern_dirty;
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 1] = rsx::polygon_stipple_pattern_dirty;
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 2] = rsx::polygon_stipple_pattern_dirty;

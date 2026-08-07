@@ -78,8 +78,7 @@ void process_multibyte(std::string_view s, F&& func)
 			continue;
 		}
 
-		const u32 extra_bytes = (code <= 0xDF) ? 1u : (code <= 0xEF) ? 2u :
-		                                                               3u;
+		const u32 extra_bytes = (code <= 0xDF) ? 1u : (code <= 0xEF) ? 2u : 3u;
 		if ((index + extra_bytes) > end)
 		{
 			// Malformed string, abort

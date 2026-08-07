@@ -114,8 +114,7 @@ struct rec_param
 			std::string scene_metadata_tags;
 			for (usz i = 0; i < tags.size(); i++)
 			{
-				if (i > 0)
-					scene_metadata_tags += ", ";
+				if (i > 0) scene_metadata_tags += ", ";
 				fmt::append(scene_metadata_tags, "'%s'", tags[i]);
 			}
 			return fmt::format("{ is_set=%d, type=%d, start_time=%d, end_time=%d, title='%s', tags=[ %s ] }", is_set, type, start_time, end_time, title, scene_metadata_tags);
@@ -127,8 +126,7 @@ struct rec_param
 		std::string priority;
 		for (usz i = 0; i < 8; i++)
 		{
-			if (i > 0)
-				priority += ", ";
+			if (i > 0) priority += ", ";
 			fmt::append(priority, "%d", spurs_param.priority[i]);
 		}
 		return fmt::format("ppu_thread_priority=%d, spu_thread_priority=%d, capture_priority=%d, use_system_spu=%d, fit_to_youtube=%d, "
@@ -934,8 +932,7 @@ error_code cellRecOpen(vm::cptr<char> pDirName, vm::cptr<char> pFileName, vm::cp
 
 	for (s32 i = 0; i < pParam->numOfOpt; i++)
 	{
-		if (i > 0)
-			options += ", ";
+		if (i > 0) options += ", ";
 		fmt::append(options, "%d", pParam->pOpt[i].option);
 	}
 
@@ -1855,6 +1852,7 @@ error_code cellRecSetInfo(s32 setInfo, u64 value)
 
 	return CELL_OK;
 }
+
 
 DECLARE(ppu_module_manager::cellRec)("cellRec", []()
 	{

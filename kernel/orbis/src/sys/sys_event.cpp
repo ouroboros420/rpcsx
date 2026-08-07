@@ -1,5 +1,6 @@
 #include "KernelAllocator.hpp"
 #include "KernelContext.hpp"
+#include "rx/format-base.hpp"
 #include "sys/sysproto.hpp"
 
 #include "thread/Process.hpp"
@@ -7,17 +8,108 @@
 #include <chrono>
 #include <list>
 #include <span>
+#include <utility>
+
+#ifdef __linux
 #include <sys/select.h>
+#endif
+
+static std::string filterToString(orbis::sshort filter) {
+  switch (filter) {
+  case orbis::kEvFiltRead:
+    return "Read";
+  case orbis::kEvFiltWrite:
+    return "Write";
+  case orbis::kEvFiltAio:
+    return "Aio";
+  case orbis::kEvFiltVnode:
+    return "Vnode";
+  case orbis::kEvFiltProc:
+    return "Proc";
+  case orbis::kEvFiltSignal:
+    return "Signal";
+  case orbis::kEvFiltTimer:
+    return "Timer";
+  case orbis::kEvFiltFs:
+    return "Fs";
+  case orbis::kEvFiltLio:
+    return "Lio";
+  case orbis::kEvFiltUser:
+    return "User";
+  case orbis::kEvFiltPolling:
+    return "Polling";
+  case orbis::kEvFiltDisplay:
+    return "Display";
+  case orbis::kEvFiltGraphicsCore:
+    return "GraphicsCore";
+  case orbis::kEvFiltHrTimer:
+    return "HrTimer";
+  case orbis::kEvFiltUvdTrap:
+    return "UvdTrap";
+  case orbis::kEvFiltVceTrap:
+    return "VceTrap";
+  case orbis::kEvFiltSdmaTrap:
+    return "SdmaTrap";
+  case orbis::kEvFiltRegEv:
+    return "RegEv";
+  case orbis::kEvFiltGpuException:
+    return "GpuException";
+  case orbis::kEvFiltGpuSystemException:
+    return "GpuSystemException";
+  case orbis::kEvFiltGpuDbgGcEv:
+    return "GpuDbgGcEv";
+  }
+
+  return "<invalid " + std::to_string(filter) + ">";
+}
+
+static std::string kqueue_toString(orbis::File *file) {
+  auto queue = static_cast<orbis::KQueue *>(file);
+
+  std::string result = "kqueue";
+
+  if (!queue->name.empty()) {
+    result += " \"";
+    result += queue->name;
+    result += "\"";
+  }
+
+  result += " {";
+
+  for (auto &note : queue->notes) {
+    result += " knote {";
+    result += filterToString(note.event.filter);
+
+    if (auto file = note.file) {
+      result += " ";
+      result += file->toString();
+    }
+
+    result += rx::format(
+        " ident {:#x}, flags {:#x} fflags {:#x}, data {:#x}, udata {}",
+        note.event.ident, note.event.flags, note.event.fflags, note.event.data,
+        note.event.udata);
+    result += "}";
+  }
+  result += " }";
+
+  return result;
+}
+
+static orbis::FileOps kqueueOps = {
+    .toString = kqueue_toString,
+};
 
 orbis::SysResult orbis::sys_kqueue(Thread *thread) {
   auto queue = knew<KQueue>();
   if (queue == nullptr) {
     return ErrorCode::NOMEM;
   }
+  queue->ops = &kqueueOps;
 
   auto fd = thread->tproc->fileDescriptors.insert(queue);
-  ORBIS_LOG_TODO(__FUNCTION__, fd);
-  thread->retval[0] = fd;
+  ORBIS_LOG_TODO(__FUNCTION__, (int)fd);
+  thread->retval[0] = std::to_underlying(fd);
   return {};
 }
 
@@ -32,31 +124,43 @@ orbis::SysResult orbis::sys_kqueueex(Thread *thread, ptr<char> name,
   if (name != nullptr) {
     queue->name = name;
   }
-  ORBIS_LOG_TODO(__FUNCTION__, name, flags, fd);
-  thread->retval[0] = fd;
+  queue->ops = &kqueueOps;
+  ORBIS_LOG_TODO(__FUNCTION__, name, flags, (int)fd);
+  thread->retval[0] = std::to_underlying(fd);
   return {};
 }
 
-static bool isReadEventTriggered(int hostFd) {
+static bool isReadEventTriggered(const rx::Mappable &hostFd) {
+#ifdef __linux
   fd_set fds{};
-  FD_SET(hostFd, &fds);
+  FD_SET(hostFd.native_handle(), &fds);
   timeval timeout{};
-  if (::select(hostFd + 1, &fds, nullptr, nullptr, &timeout) < 0) {
+  if (::select(hostFd.native_handle() + 1, &fds, nullptr, nullptr, &timeout) <
+      0) {
     return false;
   }
-
-  return FD_ISSET(hostFd, &fds);
+  return FD_ISSET(hostFd.native_handle(), &fds);
+#else
+#warning "Not implemented"
+  return false;
+#endif
 }
 
-static bool isWriteEventTriggered(int hostFd) {
+static bool isWriteEventTriggered(const rx::Mappable &hostFd) {
+#ifdef __linux
   fd_set fds{};
-  FD_SET(hostFd, &fds);
+  FD_SET(hostFd.native_handle(), &fds);
   timeval timeout{};
-  if (::select(hostFd + 1, nullptr, &fds, nullptr, &timeout) < 0) {
+  if (::select(hostFd.native_handle() + 1, nullptr, &fds, nullptr, &timeout) <
+      0) {
     return false;
   }
 
-  return FD_ISSET(hostFd, &fds);
+  return FD_ISSET(hostFd.native_handle(), &fds);
+#else
+#warning "Not implemented"
+  return false;
+#endif
 }
 
 namespace orbis {
@@ -107,7 +211,8 @@ static SysResult keventChange(KQueue *kq, KEvent &change, Thread *thread) {
         }
       } else if (change.filter == kEvFiltRead ||
                  change.filter == kEvFiltWrite) {
-        auto fd = thread->tproc->fileDescriptors.get(change.ident);
+        auto fd =
+            thread->tproc->fileDescriptors.get(FileDescriptor(change.ident));
 
         if (fd == nullptr) {
           return ErrorCode::BADF;
@@ -119,7 +224,7 @@ static SysResult keventChange(KQueue *kq, KEvent &change, Thread *thread) {
           eventEmitter->subscribe(&*nodeIt);
           nodeIt->triggered = true;
           kq->cv.notify_all(kq->mtx);
-        } else if (note.file->hostFd < 0) {
+        } else if (!note.file->hostFd) {
           ORBIS_LOG_ERROR("Unimplemented event emitter", change.ident);
         }
       } else if (change.filter == kEvFiltGraphicsCore ||
@@ -207,7 +312,7 @@ static orbis::ErrorCode ureadTimespec(orbis::timespec &ts,
 }
 } // namespace orbis
 
-orbis::SysResult orbis::sys_kevent(Thread *thread, sint fd,
+orbis::SysResult orbis::sys_kevent(Thread *thread, FileDescriptor fd,
                                    ptr<KEvent> changelist, sint nchanges,
                                    ptr<KEvent> eventlist, sint nevents,
                                    ptr<const timespec> timeout) {
@@ -226,7 +331,7 @@ orbis::SysResult orbis::sys_kevent(Thread *thread, sint fd,
         KEvent change;
         ORBIS_RET_ON_ERROR(uread(change, &changePtr));
         if (change.filter != kEvFiltUser) {
-          ORBIS_LOG_NOTICE(__FUNCTION__, fd, change.ident, change.filter,
+          ORBIS_LOG_NOTICE(__FUNCTION__, (int)fd, change.ident, change.filter,
                            change.flags, change.fflags, change.data,
                            change.udata);
         }
@@ -291,7 +396,7 @@ orbis::SysResult orbis::sys_kevent(Thread *thread, sint fd,
 
             if (!note.triggered) {
               if (note.event.filter == kEvFiltRead) {
-                if (note.file->hostFd >= 0) {
+                if (note.file->hostFd) {
                   if (isReadEventTriggered(note.file->hostFd)) {
                     note.triggered = true;
                   } else {
@@ -299,7 +404,7 @@ orbis::SysResult orbis::sys_kevent(Thread *thread, sint fd,
                   }
                 }
               } else if (note.event.filter == kEvFiltWrite) {
-                if (note.file->hostFd >= 0) {
+                if (note.file->hostFd) {
                   if (isWriteEventTriggered(note.file->hostFd)) {
                     note.triggered = true;
                   } else {
@@ -382,7 +487,7 @@ orbis::SysResult orbis::sys_kevent(Thread *thread, sint fd,
     }
   }
 
-  // ORBIS_LOG_TODO(__FUNCTION__, "kevent wakeup", fd);
+  // ORBIS_LOG_TODO(__FUNCTION__, "kevent wakeup", (int)fd);
 
   // for (auto evt : result) {
   //   ORBIS_LOG_TODO(__FUNCTION__,

@@ -9,6 +9,10 @@
 bool is_iso_file(const std::string& path, u64* size = nullptr, bool* is_raw_device = nullptr);
 
 void load_iso(const std::string& path);
+// Fork addition (Android SAF), their 3112e31e: mount an fd-backed ISO.
+// display_path is what games.yml/savestates record for this ISO (the content://
+// URI) - the app must resolve it back to a fresh fd on later boots.
+void load_iso(fs::file file, const std::string& display_path);
 void unload_iso();
 
 constexpr u64 ISO_SECTOR_SIZE = 2048;
@@ -119,6 +123,12 @@ public:
 	iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode = fs::read);
 	iso_file(const std::string& path, rx::EnumBitSet<fs::open_mode> mode, const iso_fs_node& node);
 
+	// Fork addition: adopt an already-open handle (e.g. an Android SAF fd wrapped
+	// via fs::file::from_native_handle). Plain/decrypted ISOs only - all reads are
+	// positionless read_at, so handles duplicated from one fd stay independent.
+	explicit iso_file(fs::file&& file);
+	iso_file(fs::file&& file, const iso_fs_node& node);
+
 	explicit operator bool() const { return m_file.operator bool(); }
 
 	fs::stat_t get_stat() override;
@@ -168,8 +178,21 @@ private:
 	iso_fs_node m_root {};
 	std::shared_ptr<iso_file_decryption> m_dec;
 
+	// Fork addition: owning handle for fd-backed archives (Android SAF). Empty
+	// for path-backed archives. Per-open views are dup()ed from it.
+	fs::file m_fd_file;
+
+	fs::file make_fd_view() const;
+
 public:
 	iso_archive(const std::string& path);
+
+	// Fork addition: fd-backed archive (Android SAF content URIs). Decrypted
+	// ISOs only - the sector-decryption key lookup is path-based.
+	explicit iso_archive(fs::file file);
+
+	// Fork addition: descriptor parse succeeded and a root directory exists.
+	explicit operator bool() const { return !m_root.metadata.extents.empty() || !m_root.children.empty(); }
 
 	const std::string& path() const { return m_path; }
 	const iso_fs_node& root() const { return m_root; }
@@ -196,6 +219,14 @@ public:
 
 	iso_device(const std::string& iso_path, const std::string& device_name = virtual_device_name)
 		: m_path(iso_path), m_archive(iso_path)
+	{
+		fs_prefix = device_name;
+	}
+
+	// Fork addition, their 3112e31e: fd-backed device (Android SAF); display_path
+	// is recorded as the loaded ISO identity (content:// URI).
+	iso_device(fs::file file, const std::string& display_path, const std::string& device_name = virtual_device_name)
+		: m_path(display_path), m_archive(std::move(file))
 	{
 		fs_prefix = device_name;
 	}

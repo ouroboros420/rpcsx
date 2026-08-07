@@ -53,9 +53,16 @@ sys_net_error convert_error(bool is_blocking, int native_error,
     ERROR_CASE(EPIPE);
 #endif
 
-    // TODO: We don't currently support EFAULT or EINTR
+    // EINTR: a blocking socket syscall (recvfrom/poll) was interrupted by a
+    // signal. This is normal on Android (signal-heavy, esp. during home-menu /
+    // rpcn-reload / shutdown) and must NOT be fatal - map it to SYS_NET_EINTR so
+    // the caller retries instead of throwing in the default: case below.
+    // ERROR_CASE expands to `case EINTR:`/`case WSAEINTR:` and sets
+    // result = SYS_NET_EINTR (defined = 4), name = "EINTR".
+    ERROR_CASE(EINTR);
+
+    // TODO: We don't currently support EFAULT
     // ERROR_CASE(EFAULT);
-    // ERROR_CASE(EINTR);
 
     ERROR_CASE(EBADF);
     ERROR_CASE(EACCES);

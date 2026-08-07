@@ -2,7 +2,11 @@
 
 #include "error/ErrorCode.hpp"
 #include "orbis-config.hpp"
+#include "rx/AddressRange.hpp"
+#include "rx/EnumBitSet.hpp"
 #include "rx/Rc.hpp"
+#include "rx/mem.hpp"
+#include "vmem.hpp"
 #include <bit>
 #include <type_traits>
 
@@ -27,11 +31,23 @@ enum OpenFlags {
 
 struct File;
 struct Thread;
-
+struct Process;
+struct Stat;
+struct StatFs;
 struct IoDevice : rx::RcBase {
+  rx::EnumBitSet<vmem::BlockFlags> blockFlags{};
+
   virtual ErrorCode open(rx::Ref<File> *file, const char *path,
                          std::uint32_t flags, std::uint32_t mode,
                          Thread *thread) = 0;
+
+  virtual ErrorCode statfs(const char *path, StatFs *sb, Thread *thread) {
+    return ErrorCode::NOTSUP;
+  }
+
+  virtual ErrorCode stat(const char *path, Stat *sb, Thread *thread) {
+    return ErrorCode::NOTSUP;
+  }
 
   virtual ErrorCode unlink(const char *path, bool recursive, Thread *thread) {
     return ErrorCode::NOTSUP;
@@ -54,8 +70,19 @@ struct IoDevice : rx::RcBase {
     return ErrorCode::NOTSUP;
   }
 
-  virtual ErrorCode ioctl(std::uint64_t request, orbis::ptr<void> argp,
+  virtual ErrorCode ioctl(std::uint64_t request, ptr<void> argp,
                           Thread *thread);
+
+  virtual ErrorCode map(rx::AddressRange range, std::int64_t offset,
+                        rx::EnumBitSet<vmem::Protection> protection, File *file,
+                        Process *process);
+
+  virtual std::pair<rx::AddressRange, orbis::MemoryType>
+  getPmemRange(std::uint64_t offset, File *file) {
+    return {};
+  }
+
+  [[nodiscard]] virtual std::string toString() const;
 };
 
 namespace ioctl {
@@ -75,6 +102,8 @@ constexpr std::uint32_t paramSize(std::uint32_t cmd) {
 }
 constexpr std::uint32_t group(std::uint32_t cmd) { return (cmd >> 8) & 0xff; }
 constexpr std::uint32_t id(std::uint32_t cmd) { return cmd & 0xff; }
+
+std::string groupToString(unsigned iocGroup);
 } // namespace ioctl
 
 struct IoctlHandlerEntry;
@@ -101,7 +130,7 @@ template <int Group> struct IoDeviceWithIoctl : IoDevice {
   void addIoctl(ErrorCode (*handler)(Thread *thread, InstanceT *device,
                                      T &arg)) {
     constexpr auto id = ioctl::id(Cmd);
-    assert(ioctlTable[id].handler == unhandledIoctl);
+    assert(ioctlTable[id].handler == nullptr);
 
     IoctlHandlerEntry &entry = ioctlTable[id];
 
@@ -132,7 +161,7 @@ template <int Group> struct IoDeviceWithIoctl : IoDevice {
 
   void addIoctl(ErrorCode (*handler)(Thread *thread, InstanceT *device)) {
     constexpr auto id = ioctl::id(Cmd);
-    assert(ioctlTable[id].handler == unhandledIoctl);
+    assert(ioctlTable[id].handler == nullptr);
 
     IoctlHandlerEntry &entry = ioctlTable[id];
 
@@ -156,7 +185,7 @@ template <int Group> struct IoDeviceWithIoctl : IoDevice {
   void addIoctl(std::pair<ErrorCode, T> (*handler)(Thread *thread,
                                                    InstanceT *device)) {
     constexpr auto id = ioctl::id(Cmd);
-    assert(ioctlTable[id].handler == unhandledIoctl);
+    assert(ioctlTable[id].handler == nullptr);
 
     IoctlHandlerEntry &entry = ioctlTable[id];
 
@@ -180,6 +209,10 @@ template <int Group> struct IoDeviceWithIoctl : IoDevice {
     }
 
     return ioctlTable[id].handler(thread, argp, this, ioctlTable[id].impl);
+  }
+
+  [[nodiscard]] std::string toString() const override {
+    return ioctl::groupToString(Group) + " " + IoDevice::toString();
   }
 };
 } // namespace orbis

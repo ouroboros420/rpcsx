@@ -39,9 +39,16 @@ static auto setContext = [] {
 
 static __attribute__((no_stack_protector)) void
 handleSigSys(int sig, siginfo_t *info, void *ucontext) {
+#ifndef USE_FS_GS_SYSCALL
   if (auto hostFs = _readgsbase_u64()) {
     _writefsbase_u64(hostFs);
   }
+#else
+  uint64_t hostFs = 0;
+  if (syscall(SYS_arch_prctl, ARCH_GET_GS, &hostFs) == 0 && hostFs) {
+    syscall(SYS_arch_prctl, ARCH_SET_FS, hostFs);
+  }
+#endif
 
   // rx::printStackTrace(reinterpret_cast<ucontext_t *>(ucontext),
   // rx::thread::g_current, 1);
@@ -58,7 +65,11 @@ handleSigSys(int sig, siginfo_t *info, void *ucontext) {
 
   thread = orbis::g_currentThread;
   thread->context = prevContext;
+#ifndef USE_FS_GS_SYSCALL
   _writefsbase_u64(thread->fsBase);
+#else
+  syscall(SYS_arch_prctl, ARCH_SET_FS, thread->fsBase);
+#endif
 }
 
 __attribute__((no_stack_protector)) static void
@@ -129,7 +140,7 @@ handleSigUser(int sig, siginfo_t *info, void *ucontext) {
     ORBIS_LOG_WARNING(__FUNCTION__, "handled signal", guestSignal, inGuestCode,
                       ::getpid(), thread->tid);
 
-    if (!rx::thread::invokeSignalHandler(thread, guestSignal,
+    if (!rx::thread::invokeSignalHandler(thread, info, guestSignal,
                                          inGuestCode ? context : nullptr)) {
       // no handler, mark signal as delivered
       std::uint32_t prevValue = 1;
@@ -149,7 +160,11 @@ handleSigUser(int sig, siginfo_t *info, void *ucontext) {
   }
 
   if (inGuestCode) {
+#ifndef USE_FS_GS_SYSCALL
     _writefsbase_u64(thread->fsBase);
+#else
+    syscall(SYS_arch_prctl, ARCH_SET_FS, thread->fsBase);
+#endif
   }
 }
 
@@ -159,8 +174,8 @@ std::size_t rx::thread::getSigAltStackSize() {
   return sigStackSize;
 }
 
-bool rx::thread::invokeSignalHandler(orbis::Thread *thread, int guestSignal,
-                                     ucontext_t *context) {
+bool rx::thread::invokeSignalHandler(orbis::Thread *thread, siginfo_t *siginfo,
+                                     int guestSignal, ucontext_t *context) {
   auto it = thread->tproc->sigActions.find(guestSignal);
 
   if (it == thread->tproc->sigActions.end()) {
@@ -187,7 +202,8 @@ bool rx::thread::invokeSignalHandler(orbis::Thread *thread, int guestSignal,
   auto &sigFrame = *std::bit_cast<orbis::SigFrame *>(rsp);
   sigFrame = {};
 
-  rx::thread::copyContext(thread, sigFrame.context, *guestContext);
+  rx::thread::copyContext(thread, sigFrame.context, *guestContext,
+                          std::bit_cast<std::uint64_t>(siginfo->si_addr));
   sigFrame.info.signo = guestSignal;
   sigFrame.handler = handlerPtr;
 
@@ -204,7 +220,8 @@ bool rx::thread::invokeSignalHandler(orbis::Thread *thread, int guestSignal,
   return true;
 }
 
-void rx::thread::copyContext(orbis::MContext &dst, const mcontext_t &src) {
+void rx::thread::copyContext(orbis::MContext &dst, const mcontext_t &src,
+                             std::uint64_t addr) {
   // dst.onstack = src.gregs[REG_ONSTACK];
   dst.rdi = src.gregs[REG_RDI];
   dst.rsi = src.gregs[REG_RSI];
@@ -224,7 +241,7 @@ void rx::thread::copyContext(orbis::MContext &dst, const mcontext_t &src) {
   dst.trapno = src.gregs[REG_TRAPNO];
   dst.fs = src.gregs[REG_CSGSFS] & 0xffff;
   dst.gs = (src.gregs[REG_CSGSFS] >> 16) & 0xffff;
-  // dst.addr = src.gregs[REG_ADDR];
+  dst.addr = addr;
   // dst.flags = src.gregs[REG_FLAGS];
   // dst.es = src.gregs[REG_ES];
   // dst.ds = src.gregs[REG_DS];
@@ -249,19 +266,19 @@ void rx::thread::copyContext(orbis::MContext &dst, const mcontext_t &src) {
 }
 
 void rx::thread::copyContext(orbis::Thread *thread, orbis::UContext &dst,
-                             const ucontext_t &src) {
+                             const ucontext_t &src, std::uint64_t addr) {
   dst = {};
   dst.stack.sp = thread->stackStart;
   dst.stack.size = (char *)thread->stackEnd - (char *)thread->stackStart;
   dst.stack.align = 16;
   dst.sigmask = thread->sigMask;
-  copyContext(dst.mcontext, src.uc_mcontext);
+  copyContext(dst.mcontext, src.uc_mcontext, addr);
 }
 
 void rx::thread::setContext(orbis::Thread *thread, const orbis::UContext &src) {
   auto &context = *std::bit_cast<ucontext_t *>(thread->context);
   thread->stackStart = src.stack.sp;
-  thread->stackEnd = (char *)thread->stackStart + src.stack.size;
+  thread->stackEnd = thread->stackStart + src.stack.size;
   thread->setSigMask(src.sigmask);
 
   // dst.onstack = src.gregs[REG_ONSTACK];
@@ -389,6 +406,7 @@ void rx::thread::setupThisThread() {
 void rx::thread::invoke(orbis::Thread *thread) {
   orbis::g_currentThread = thread;
 
+#ifndef USE_FS_GS_SYSCALL
   std::uint64_t hostFs = _readfsbase_u64();
   _writegsbase_u64(hostFs);
 
@@ -397,4 +415,15 @@ void rx::thread::invoke(orbis::Thread *thread) {
 
   ::setContext(context->uc_mcontext);
   _writefsbase_u64(hostFs);
+#else
+  std::uint64_t hostFs;
+  syscall(SYS_arch_prctl, ARCH_GET_FS, &hostFs);
+  syscall(SYS_arch_prctl, ARCH_SET_GS, hostFs);
+
+  syscall(SYS_arch_prctl, ARCH_SET_FS, thread->fsBase);
+  auto context = reinterpret_cast<ucontext_t *>(thread->context);
+
+  ::setContext(context->uc_mcontext);
+  syscall(SYS_arch_prctl, ARCH_SET_FS, hostFs);
+#endif
 }

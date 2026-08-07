@@ -5,6 +5,8 @@
 #include "stdafx.h"
 #include "util/StrUtil.h"
 
+#include <cmath>
+
 #include "cellAudioIn.h"
 #include "cellAudioOut.h"
 #include "cellMic.h"

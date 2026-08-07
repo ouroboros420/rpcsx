@@ -143,6 +143,7 @@ struct vertex
 	}
 };
 
+
 template <typename T>
 struct vector3_base : public position3_base<T>
 {

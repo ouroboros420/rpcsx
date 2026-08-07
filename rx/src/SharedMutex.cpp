@@ -1,12 +1,11 @@
 #include "SharedMutex.hpp"
 #include "asm.hpp"
-#include <syscall.h>
-#include <unistd.h>
+#include "die.hpp"
 
 namespace rx {
 void shared_mutex::impl_lock_shared(unsigned val) {
   if (val >= c_err)
-    std::abort(); // "shared_mutex underflow"
+    rx::die("shared_mutex underflow");
 
   // Try to steal the notification bit
   unsigned _old = val;
@@ -37,7 +36,7 @@ void shared_mutex::impl_lock_shared(unsigned val) {
   }
 
   if ((old % c_sig) + c_one >= c_sig)
-    std::abort(); // "shared_mutex overflow"
+    rx::die("shared_mutex overflow");
 
   while (impl_wait() != std::errc{}) {
   }
@@ -45,7 +44,7 @@ void shared_mutex::impl_lock_shared(unsigned val) {
 }
 void shared_mutex::impl_unlock_shared(unsigned old) {
   if (old - 1 >= c_err)
-    std::abort(); // "shared_mutex underflow"
+    rx::die("shared_mutex underflow");
 
   // Check reader count, notify the writer if necessary
   if ((old - 1) % c_one == 0) {
@@ -81,7 +80,7 @@ void shared_mutex::impl_signal() {
 }
 void shared_mutex::impl_lock(unsigned val) {
   if (val >= c_err)
-    std::abort(); // "shared_mutex underflow"
+    rx::die("shared_mutex underflow");
 
   // Try to steal the notification bit
   unsigned _old = val;
@@ -112,13 +111,14 @@ void shared_mutex::impl_lock(unsigned val) {
   }
 
   if ((old % c_sig) + c_one >= c_sig)
-    std::abort(); // "shared_mutex overflow"
+    rx::die("shared_mutex overflow");
+
   while (impl_wait() != std::errc{}) {
   }
 }
 void shared_mutex::impl_unlock(unsigned old) {
   if (old - c_one >= c_err)
-    std::abort(); // "shared_mutex underflow"
+    rx::die("shared_mutex underflow");
 
   // 1) Notify the next writer if necessary
   // 2) Notify all readers otherwise if necessary (currently indistinguishable
@@ -140,7 +140,7 @@ void shared_mutex::impl_lock_upgrade() {
   const unsigned old = m_value.fetch_add(c_one - 1);
 
   if ((old % c_sig) + c_one - 1 >= c_sig)
-    std::abort(); // "shared_mutex overflow"
+    rx::die("shared_mutex overflow");
 
   if (old % c_one == 1) {
     return;

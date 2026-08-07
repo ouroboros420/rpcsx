@@ -5,7 +5,6 @@
 #include "utils/Logs.hpp"
 #include <chrono>
 #include <span>
-#include <sys/mman.h>
 
 orbis::ErrorCode orbis::ipmiCreateClient(Process *proc, void *clientImpl,
                                          const char *name,
@@ -322,7 +321,7 @@ orbis::SysResult orbis::sysIpmiSendConnectResult(Thread *thread,
 
   if (client == nullptr) {
     ORBIS_LOG_FATAL(__FUNCTION__);
-    std::abort();
+    rx::die("client is null");
   }
 
   sint status;

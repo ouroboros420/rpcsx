@@ -188,9 +188,13 @@ namespace rsx
 					std::function<void()> on_input_loop_enter,
 					std::function<void(s32)> on_input_loop_exit,
 					std::function<s32()> input_loop_override)
-					: name(name), target(iface), input_loop_prologue(on_input_loop_enter), input_loop_epilogue(on_input_loop_exit), input_loop_override(input_loop_override), prologue_completed(false)
-				{
-				}
+					: name(name)
+					, target(iface)
+					, input_loop_prologue(on_input_loop_enter)
+					, input_loop_epilogue(on_input_loop_exit)
+					, input_loop_override(input_loop_override)
+					, prologue_completed(false)
+				{}
 
 				// Attributes
 				std::string_view name;
@@ -211,5 +215,5 @@ namespace rsx
 			std::shared_ptr<named_thread<overlay_input_thread>> m_input_thread;
 			void input_thread_loop();
 		};
-	} // namespace overlays
-} // namespace rsx
+	}
+}

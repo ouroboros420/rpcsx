@@ -3,6 +3,7 @@
 rx::Version rx::getVersion() {
   return {
       .raw = RX_RAW_VERSION,
+      .rawTime = RX_RAW_TIME,
       .tag = static_cast<VersionTag>(RX_TAG),
       .tagVersion = RX_TAG_VERSION,
       .gitTag = RX_GIT_REV,

@@ -363,6 +363,11 @@ namespace fs
 	{
 	}
 
+	device_base::device_base(std::string prefix)
+		: fs_prefix(std::move(prefix))
+	{
+	}
+
 	device_base::~device_base()
 	{
 	}
@@ -716,7 +721,11 @@ namespace fs
 			// Loop because (huge?) read can be processed partially
 			while (auto r = ::read(m_fd, buffer, count))
 			{
+				if (r < 0)
+				{
+					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
 				ensure(r > 0); // "file::read"
+				}
 				count -= r;
 				result += r;
 				buffer = static_cast<u8*>(buffer) + r;
@@ -734,7 +743,11 @@ namespace fs
 			// For safety; see read()
 			while (auto r = ::pread(m_fd, buffer, count, offset))
 			{
+				if (r < 0)
+				{
+					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
 				ensure(r > 0); // "file::read_at"
+				}
 				count -= r;
 				offset += r;
 				result += r;
@@ -753,7 +766,11 @@ namespace fs
 			// For safety; see read()
 			while (auto r = ::write(m_fd, buffer, count))
 			{
+				if (r < 0)
+				{
+					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
 				ensure(r > 0); // "file::write"
+				}
 				count -= r;
 				result += r;
 				buffer = static_cast<const u8*>(buffer) + r;
@@ -771,7 +788,11 @@ namespace fs
 			// For safety; see read()
 			while (auto r = ::pwrite(m_fd, buffer, count, offset))
 			{
+				if (r < 0)
+				{
+					if (errno == EINTR) continue; // interrupted slow syscall (e.g. FUSE storage); retry
 				ensure(r > 0); // "file::write"
+				}
 				count -= r;
 				offset += r;
 				result += r;
@@ -1886,7 +1907,18 @@ fs::file::file(const std::string& path, rx::EnumBitSet<open_mode> mode)
 		perm = 0;
 	}
 
-	const int fd = ::open(path.c_str(), flags, perm);
+	// Retry on EINTR: on Android the dev_hdd0 tree lives on FUSE/emulated external
+	// storage, where open() routes through a userspace daemon and can be interrupted
+	// by a signal (frequent on Android: ART/GC, the JIT helper threads). The bare
+	// open() inherited from upstream does not retry, so an interrupted open left the
+	// fs::file invalid -> e.g. psf::load_object(PARAM.SFO) returned an empty registry
+	// -> cellSaveData reported isNewData and games looped on save load. Desktop local
+	// filesystems never block in open() so this never bit there.
+	int fd;
+	do
+	{
+		fd = ::open(path.c_str(), flags, perm);
+	} while (fd == -1 && errno == EINTR);
 
 	if (fd == -1)
 	{

@@ -176,12 +176,19 @@ namespace vk
 		PFN_vkQueuePresentKHR _vkQueuePresentKHR = nullptr;
 
 		bool m_wm_reports_flag = false;
+		// Last frame-rate hint pushed via ANativeWindow_setFrameRate (Android), snapped to whole
+		// fps, so the hint is re-applied only when the cadence changes (see swapchain_WSI::present).
+		float m_last_frame_rate_hint = 0.0f;
+		// Debounce state for the above: the candidate cadence and how many consecutive flips it has
+		// held. The raw per-flip period is noisy, so we only push a cadence once it is stable.
+		float m_pending_frame_rate_hint = 0.0f;
+		u32 m_frame_rate_hint_stable_count = 0;
 
 	protected:
 		void init_swapchain_images(render_device& dev, u32 preferred_count = 0) override;
 
 	public:
-		swapchain_WSI(vk::physical_device& gpu, u32 present_queue, u32 graphics_queue, u32 transfer_queue, VkFormat format, VkSurfaceKHR surface, VkColorSpaceKHR color_space, bool force_wm_reporting_off);
+		swapchain_WSI(vk::physical_device& gpu, u32 present_queue, u32 graphics_queue, u32 transfer_queue, VkFormat format, VkSurfaceKHR surface, VkColorSpaceKHR color_space, bool force_wm_reporting_off, display_handle_t window);
 
 		~swapchain_WSI() override = default;
 

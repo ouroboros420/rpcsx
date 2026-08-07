@@ -91,6 +91,11 @@ public:
 	atomic_t<u8> cached = false;
 	atomic_t<u8> logged = false;
 
+	// ARM64 interpret-first async path (theirs 270dfed4): set once when this block has been
+	// handed to the background compile worker, so concurrent/repeat dispatch() misses of the
+	// same block enqueue it exactly once while it is being interpreted.
+	atomic_t<u8> queued = false;
+
 	spu_item(spu_program&& data)
 		: data(std::move(data))
 	{
@@ -109,6 +114,12 @@ class spu_runtime
 
 	// Debug module output location
 	std::string m_cache_path;
+
+	// Persistent SPU LLVM object-cache directory (ARM64, theirs 8430a655). Version+config+cpu-keyed
+	// (built in the spu_runtime ctor) so a stale object can never load after a codegen change; the
+	// key is the entire safety mechanism since the ObjectCache validates the module name only.
+	// Empty when unavailable/disabled (treated as "no cache" -> in-memory JIT only).
+	std::string m_obj_cache_path;
 
 public:
 	// Trampoline to spu_recompiler_base::dispatch
@@ -133,6 +144,13 @@ public:
 	const std::string& get_cache_path() const
 	{
 		return m_cache_path;
+	}
+
+	// Persistent, version+config+cpu-keyed SPU object-cache dir. Empty when unavailable
+	// (treat as "no cache" -> in-memory JIT only).
+	const std::string& get_object_cache_path() const
+	{
+		return m_obj_cache_path;
 	}
 
 	// Rebuild ubertrampoline for given identifier (first instruction)

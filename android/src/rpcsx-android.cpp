@@ -4,6 +4,8 @@
 #include "Emu/Audio/Null/NullAudioBackend.h"
 #include "Emu/Cell/PPUAnalyser.h"
 #include "Emu/Cell/SPURecompiler.h"
+#include "util/bin_patch.h"
+#include <set>
 #include "Emu/IdManager.h"
 #include "Emu/Io/KeyboardHandler.h"
 #include "Emu/Io/Null/NullKeyboardHandler.h"
@@ -12,6 +14,9 @@
 #include "Emu/Io/Null/null_camera_handler.h"
 #include "Emu/Io/Null/null_music_handler.h"
 #include "Emu/Io/pad_config_types.h"
+#include "Emu/NP/rpcn_client.h"
+#include "Emu/NP/rpcn_config.h"
+#include "Emu/NP/rpcn_types.h"
 #include "Emu/RSX/Null/NullGSRender.h"
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/Overlays/overlay_save_dialog.h"
@@ -30,12 +35,15 @@
 #include "Input/hid_pad_handler.h"
 #include "Input/pad_thread.h"
 #include "Input/virtual_pad_handler.h"
+// Their 822c1174d/3112e31e0: dev/iso.hpp + dev/block_dev.hpp are gone; the ISO
+// reader now lives in Loader/ISO.h (streaming, encrypted-ISO aware) with a
+// metadata cache so repeated game-list scans do not re-walk the ISO tree.
+#include "Loader/ISO.h"
 #include "Loader/PSF.h"
 #include "Loader/PUP.h"
 #include "Loader/TAR.h"
+#include "Loader/iso_cache.h"
 #include "cellos/sys_sync.h"
-#include "dev/block_dev.hpp"
-#include "dev/iso.hpp"
 #include "hidapi_libusb.h"
 #include "libusb.h"
 #include "rpcs3_version.h"
@@ -60,15 +68,19 @@
 #include <rpcsx/fw/ps3/cellSaveData.h>
 #include <rpcsx/fw/ps3/sceNpTrophy.h>
 #include <rx/Version.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
+#include <fcntl.h>
 #include <filesystem>
 #include <functional>
 #include <iterator>
@@ -78,6 +90,7 @@
 #include <string>
 #include <sys/resource.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #pragma GCC diagnostic push
@@ -94,6 +107,12 @@ static std::atomic<ANativeWindow *> g_native_window;
 extern std::string g_android_executable_dir;
 extern std::string g_android_config_dir;
 extern std::string g_android_cache_dir;
+
+// App-internal filesDir (/data/data/<pkg>/files). NOT exposed over MTP/USB and
+// not readable by other apps. Used only for the RPCN secret file (rpcn.yml);
+// cfg_rpcn::get_path() in Emu/NP/rpcn_config.cpp declares and reads this
+// (their fb4c0980 / d06913b8), so this definition must exist for it to link.
+std::string g_android_internal_config_dir;
 
 static std::mutex g_virtual_pad_mutex;
 static std::shared_ptr<Pad> g_virtual_pad;
@@ -258,7 +277,35 @@ void jit_announce(uptr, usz, std::string_view);
 
 void qt_events_aware_op(int repeat_duration_ms,
                         std::function<bool()> wrapped_op) {
-  /// ?????
+  // Their 97e0b0a2a. The core uses this as its synchronous "wait until done"
+  // primitive during Emu stop/kill (the predicate checks e.g. m_state ==
+  // stopped). On desktop it pumps the Qt event loop while polling; on Android
+  // there is no such loop on the calling thread, so just poll the predicate.
+  //
+  // This was previously an empty stub ("/// ?????"), so every synchronous stop
+  // wait returned immediately without actually waiting, letting callers proceed
+  // while emulation teardown was still in flight (shutdown races / ordering).
+  //
+  // These waits run on emulation/background threads (game-side process_exit ->
+  // GracefulShutdown), never the UI thread, so blocking here is safe. A generous
+  // total cap keeps a genuinely stalled teardown from blocking the caller
+  // forever (it then just returns, no worse than the old stub).
+  if (!wrapped_op) {
+    return;
+  }
+
+  constexpr int max_wait_ms = 30'000;
+  const int step_ms = repeat_duration_ms > 0 ? repeat_duration_ms : 1;
+
+  for (int waited_ms = 0; !wrapped_op(); waited_ms += step_ms) {
+    if (waited_ms >= max_wait_ms) {
+      rpcsx_android.error(
+          "qt_events_aware_op: operation did not complete within %dms",
+          max_wait_ms);
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
+  }
 }
 
 static std::string unwrap(JNIEnv *env, jstring string) {
@@ -317,8 +364,15 @@ static FileType getFileType(const fs::file &file) {
     return FileType::Rap;
   }
 
-  if (iso_dev::open(std::make_unique<file_view_block_dev>(file))) {
-    return FileType::Iso;
+  {
+    // Their c381a2d4c. ISO9660 volume-descriptor probe (sector 16). Works for
+    // plain AND redump-encrypted ISOs (region 0 is unencrypted), unlike the old
+    // iso_dev full-directory-parse sniff which also walked the whole tree.
+    char vd[6]{};
+    if (file.read_at(0x8000, vd, sizeof(vd)) == sizeof(vd) &&
+        std::memcmp(vd + 1, "CD001", 5) == 0) {
+      return FileType::Iso;
+    }
   }
 
   return FileType::Unknown;
@@ -378,12 +432,16 @@ static std::pair<std::string, std::u32string> g_strings[] = {
     MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE, "Select Message To Send"),
     MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_INVITE, "Send Invite"),
     MAKE_STRING(CELL_NP_SENDMESSAGE_DIALOG_TITLE_ADD_FRIEND, "Add Friend"),
+    MAKE_STRING(CELL_NP_MESSAGE_INVITE_RECEIVED, "Received an invite from %0"),
+    MAKE_STRING(CELL_NP_MESSAGE_OTHER_RECEIVED, "Received a message from %0"),
     MAKE_STRING(RECORDING_ABORTED, "Recording aborted!"),
     MAKE_STRING(RPCN_NO_ERROR, "RPCN: No Error"),
     MAKE_STRING(RPCN_ERROR_INVALID_INPUT,
                 "RPCN: Invalid Input (Wrong Host/Port)"),
     MAKE_STRING(RPCN_ERROR_WOLFSSL, "RPCN Connection Error: WolfSSL Error"),
     MAKE_STRING(RPCN_ERROR_RESOLVE, "RPCN Connection Error: Resolve Error"),
+    MAKE_STRING(RPCN_ERROR_BINDING,
+                "RPCN Connection Error: Failed to bind to given binding IP"),
     MAKE_STRING(RPCN_ERROR_CONNECT, "RPCN Connection Error"),
     MAKE_STRING(RPCN_ERROR_LOGIN_ERROR,
                 "RPCN Login Error: Identification Error"),
@@ -415,6 +473,8 @@ static std::pair<std::string, std::u32string> g_strings[] = {
     MAKE_STRING(HOME_MENU_SETTINGS, "Settings"),
     MAKE_STRING(HOME_MENU_SETTINGS_SAVE, "Save custom configuration?"),
     MAKE_STRING(HOME_MENU_SETTINGS_SAVE_BUTTON, "Save"),
+    MAKE_STRING(HOME_MENU_SETTINGS_RESET_BUTTON, "To default"),
+    MAKE_STRING(HOME_MENU_TOGGLE_FULLSCREEN, "Toggle Fullscreen"),
     MAKE_STRING(HOME_MENU_SETTINGS_DISCARD,
                 "Discard the current settings' changes?"),
     MAKE_STRING(HOME_MENU_SETTINGS_DISCARD_BUTTON, "Discard"),
@@ -593,6 +653,12 @@ struct GameInfo {
   std::string name;
   std::string iconPath;
   int flags = 0;
+  std::string version;
+  std::string titleId;
+  // PARAM.SFO CATEGORY (e.g. "DG" disc game, "HG" HDD game, "GD" disc-game
+  // update). The app uses it to de-duplicate the same title across sources:
+  // a full installed game beats a raw .iso, which beats a bare "GD" update.
+  std::string category;
 };
 
 class Progress {
@@ -650,9 +716,34 @@ static void sendGameInfo(JNIEnv *env, jlong progressId,
       gameRepositoryClass, "add", "([Lnet/rpcsx/GameInfo;J)V"));
   auto gameClass = ensure(env->FindClass("net/rpcsx/GameInfo"));
 
-  jmethodID gameConstructor = ensure(env->GetMethodID(
+  // Their 70e9f53c4 / 9db53732c / fc2f8672b. Prefer the 7-arg constructor (adds
+  // CATEGORY), then the 6-arg one (version + title id), then the legacy 4-arg
+  // one - so a new core keeps working against an older app that lacks the newer
+  // fields (JNI ABI skew rule: add-only, never change an existing signature).
+  jmethodID gameConstructorV3 = env->GetMethodID(
       gameClass, "<init>",
-      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V"));
+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/"
+      "String;Ljava/lang/String;Ljava/lang/String;)V");
+  if (gameConstructorV3 == nullptr) {
+    env->ExceptionClear();
+  }
+
+  jmethodID gameConstructorV2 =
+      gameConstructorV3
+          ? nullptr
+          : env->GetMethodID(gameClass, "<init>",
+                             "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/"
+                             "String;ILjava/lang/String;Ljava/lang/String;)V");
+  if (gameConstructorV2 == nullptr && gameConstructorV3 == nullptr) {
+    env->ExceptionClear();
+  }
+
+  jmethodID gameConstructor =
+      (gameConstructorV3 || gameConstructorV2)
+          ? nullptr
+          : ensure(env->GetMethodID(
+                gameClass, "<init>",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V"));
 
   std::vector<jobject> objects;
   objects.reserve(infos.size());
@@ -663,10 +754,23 @@ static void sendGameInfo(JNIEnv *env, jlong progressId,
       path.resize(path.size() - 1);
     }
 
-    objects.push_back(env->NewObject(
-        gameClass, gameConstructor, wrap(env, path), wrap(env, info.name),
-        wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
-        jint(info.flags)));
+    if (gameConstructorV3) {
+      objects.push_back(env->NewObject(
+          gameClass, gameConstructorV3, wrap(env, path), wrap(env, info.name),
+          wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
+          jint(info.flags), wrap(env, info.version), wrap(env, info.titleId),
+          wrap(env, info.category)));
+    } else if (gameConstructorV2) {
+      objects.push_back(env->NewObject(
+          gameClass, gameConstructorV2, wrap(env, path), wrap(env, info.name),
+          wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
+          jint(info.flags), wrap(env, info.version), wrap(env, info.titleId)));
+    } else {
+      objects.push_back(env->NewObject(
+          gameClass, gameConstructor, wrap(env, path), wrap(env, info.name),
+          wrap(env, Emu.GetCallbacks().resolve_path(info.iconPath)),
+          jint(info.flags)));
+    }
   }
 
   auto result = env->NewObjectArray(objects.size(), gameClass, nullptr);
@@ -713,12 +817,26 @@ static bool tryUnlockGame(const psf::registry &psf) {
   return false;
 }
 
+static bool hasIsoExtension(const std::filesystem::path &p) {
+  auto ext = p.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return ext == ".iso";
+}
+
 static void collectGamePaths(std::vector<std::string> &paths,
                              const std::string &rootDir) {
   std::error_code ec;
   std::vector<std::filesystem::path> workList;
   workList.reserve(32);
   if (!std::filesystem::is_directory(rootDir)) {
+    // Their 43a86c047: a dropped/added .iso is a game entry by itself (played
+    // in place, no extraction).
+    if (hasIsoExtension(rootDir)) {
+      paths.push_back(rootDir);
+      return;
+    }
+
     auto rootPath = std::filesystem::path(rootDir).parent_path();
     if (rootPath.filename() == "USRDIR") {
       rootPath = rootPath.parent_path();
@@ -747,6 +865,12 @@ static void collectGamePaths(std::vector<std::string> &paths,
 
       if (entry.is_regular_file() && entry.path().filename() == "PARAM.SFO") {
         paths.push_back(entry.path().parent_path().string());
+        continue;
+      }
+
+      // Direct-play ISO entries (no extraction) - their 43a86c047.
+      if (entry.is_regular_file() && hasIsoExtension(entry.path())) {
+        paths.push_back(entry.path().string());
         continue;
       }
     }
@@ -802,6 +926,10 @@ fetchGameInfo(const psf::registry &psf,
   auto name = std::string(psf::get_string(psf, "TITLE"));
   auto bootable = psf::get_integer(psf, "BOOTABLE", 0);
   auto category = psf::get_string(psf, "CATEGORY");
+  // Their 70e9f53c4: game version for display - APP_VER (patched version) wins
+  // over the disc VERSION.
+  auto version = std::string(
+      psf::get_string(psf, "APP_VER", psf::get_string(psf, "VERSION", "")));
 
   if (!bootable || titleId.empty()) {
     return {};
@@ -881,11 +1009,30 @@ fetchGameInfo(const psf::registry &psf,
     }
   }
 
+  // Their 9db53732c: prefer an installed game update's version
+  // (dev_hdd0/game/<id>/PARAM.SFO) over the disc/base version - that's the
+  // effective version the game runs at once an update is installed. For HDD
+  // games this is the same file (no-op).
+  if (!titleId.empty()) {
+    const auto updateSfo =
+        rpcs3::utils::get_hdd0_dir() + "game/" + titleId + "/PARAM.SFO";
+    if (fs::is_file(updateSfo)) {
+      auto upd = psf::load_object(updateSfo);
+      auto updVer = std::string(psf::get_string(upd, "APP_VER", ""));
+      if (!updVer.empty()) {
+        version = std::move(updVer);
+      }
+    }
+  }
+
   return GameInfo{
       .path = std::move(path),
       .name = std::move(name),
       .iconPath = std::move(iconPath),
       .flags = flags,
+      .version = std::move(version),
+      .titleId = std::move(titleId),
+      .category = std::string(category),
   };
 }
 
@@ -920,6 +1067,73 @@ static void collectGameInfo(JNIEnv *env, jlong progressId,
   for (auto &&path : paths) {
     processed++;
 
+    // Their 43a86c047. Direct-play ISO entry: metadata comes from inside the
+    // archive, served through the iso_cache so repeated list scans never
+    // re-walk the ISO tree (prohibitive on FUSE/SAF storage).
+    if (!std::filesystem::is_directory(path) && hasIsoExtension(path)) {
+      if (!is_iso_file(path)) {
+        rpcsx_android.warning("collectGameInfo: '%s' is not a readable ISO "
+                              "(encrypted without key, or not ISO9660)",
+                              path);
+        continue;
+      }
+
+      iso_metadata_cache_entry entry;
+
+      if (!iso_cache::load(path, path, entry)) {
+        iso_archive archive(path);
+
+        if (!archive) {
+          continue;
+        }
+
+        const psf::registry iso_psf = archive.open_psf("PS3_GAME/PARAM.SFO");
+
+        if (iso_psf.empty()) {
+          rpcsx_android.warning(
+              "collectGameInfo: no PS3_GAME/PARAM.SFO in '%s'", path);
+          continue;
+        }
+
+        entry.psf_data = psf::save_object(iso_psf);
+        entry.icon_path = "PS3_GAME/ICON0.PNG";
+
+        if (auto icon = archive.open(entry.icon_path)) {
+          std::vector<u8> data(icon->size());
+          if (icon->read(data.data(), data.size()) == data.size()) {
+            entry.icon_data = std::move(data);
+          }
+        }
+
+        if (fs::stat_t st{}; fs::get_stat(path, st)) {
+          entry.mtime = st.mtime;
+        }
+
+        iso_cache::save(path, path, entry);
+      }
+
+      const psf::registry psf =
+          psf::load_object(fs::make_stream(std::move(entry.psf_data)), path);
+
+      rpcsx_android.notice("collectGameInfo: iso sfo from %s", path);
+
+      if (auto gameInfo = fetchGameInfo(psf, path)) {
+        // Boot target and icon live at host paths for ISO entries
+        gameInfo->path = path;
+        gameInfo->iconPath =
+            entry.icon_data.empty() ? std::string()
+                                    : iso_cache::get_icon_file_path(path);
+
+        gameInfos.push_back(std::move(*gameInfo));
+
+        if (gameInfos.size() >= 10) {
+          submit();
+        }
+      }
+
+      continue;
+    }
+
     if (!std::filesystem::is_regular_file(path + "/PARAM.SFO")) {
       continue;
     }
@@ -946,8 +1160,22 @@ class MainThreadProcessor {
   std::mutex mutex;
   std::condition_variable cv;
   std::deque<std::pair<std::function<void(JNIEnv *)>, atomic_t<u32> *>> queue;
+  std::atomic<std::thread::id> processorThreadId{};
+  std::atomic<JNIEnv *> processorEnv{nullptr};
 
 public:
+  // Their 9b2b593f6. True when called from the thread that runs process() (the
+  // dedicated main thread). Used to invoke a queued callback inline instead of
+  // deadlocking on a re-entrant/blocking dispatch back to ourselves.
+  bool onProcessorThread() const {
+    return processorThreadId.load() == std::this_thread::get_id();
+  }
+
+  // The JNIEnv bound to the processor thread. Only meaningful (and only ever
+  // used) when onProcessorThread() is true - a JNIEnv is per-thread and must
+  // never be handed to another thread.
+  JNIEnv *getProcessorEnv() const { return processorEnv.load(); }
+
   void push(std::function<void(JNIEnv *)> cb, atomic_t<u32> *wakeUp = nullptr) {
     std::lock_guard lock(mutex);
     queue.push_back({std::move(cb), wakeUp});
@@ -959,6 +1187,8 @@ public:
   }
 
   void process(JNIEnv *env) {
+    processorThreadId = std::this_thread::get_id();
+    processorEnv = env;
     while (true) {
       std::function<void(JNIEnv *)> cb;
       atomic_t<u32> *wakeUp = nullptr;
@@ -991,6 +1221,17 @@ static void invokeAsync(std::function<void(JNIEnv *)> cb) {
 }
 
 static void invokeSync(std::function<void(JNIEnv *)> cb) {
+  // Since 9b2b593f6 routed Emu's call_from_main_thread through this processor,
+  // Emu callbacks (e.g. system_progress.cpp's dlg->Create/SetMsg/
+  // ProgressBarSetValue/Close) run ON the processor thread. Queueing here and
+  // then blocking would stall the only thread that can drain the queue - a hard
+  // self-deadlock that would hang the boot-time PPU compile dialog. Run inline
+  // instead; the callback would have executed on this very thread anyway.
+  if (g_mainThreadProcessor.onProcessorThread()) {
+    cb(g_mainThreadProcessor.getProcessorEnv());
+    return;
+  }
+
   atomic_t<u32> wakeup{false};
   g_mainThreadProcessor.push(std::move(cb), &wakeup);
 
@@ -1011,7 +1252,10 @@ struct ProgressMessageDialog : MsgDialogBase {
     max = 100;
     invokeSync([this, &msg](JNIEnv *env) {
       Progress progress(env, progressId);
-      progress.report(0, 0, msg);
+      // Their bb4c78dc6: determinate from the start (max != 0) so the long
+      // compile shows a real percentage instead of an indeterminate spinner.
+      // The progress server then drives 0..100 via ProgressBarSetValue.
+      progress.report(0, max, msg);
     });
   }
 
@@ -1023,7 +1267,9 @@ struct ProgressMessageDialog : MsgDialogBase {
     rpcsx_android.warning("ProgressMessageDialog::Close(%s)", success);
     invokeSync([this](JNIEnv *env) {
       Progress progress(env, progressId);
-      progress.report(0, 0);
+      // Their bb4c78dc6: report complete instead of resetting to an
+      // indeterminate (0, 0).
+      progress.report(max, max);
     });
 
     //   Progress progress(env, progressId);
@@ -1284,7 +1530,9 @@ public:
   }
 
   void push(Progress &progress, std::string path) {
-    progress.report(0, 0);
+    // Their bb4c78dc6: keep the bar determinate (0%, queued) until the compile
+    // dialog drives it, rather than flipping it to an indeterminate spinner.
+    progress.report(0, 100);
 
     push({
         .progressId = progress.getProgressId(),
@@ -1345,9 +1593,28 @@ private:
 
     bool is_vsh = workload.path.ends_with("/vsh.self");
 
-    Emu.SetState(system_state::running);
+    // Their faf9bc91c. SetTestMode (not SetState(running)): this is an
+    // install-time precompile, NOT a real game. It forces m_state=running for
+    // the PPU/memory managers, but also raises IsTestMode() so the persistent
+    // RPCN thread stays off g_fxo while the g_fxo reset() and init<>() below
+    // tear down / rebuild the p2p_context. SetState(stopped) at the end clears
+    // test mode again. (Fixes the install-finished native crash: RPCN thread
+    // locking a torn-down shared_mutex - mutex.cpp imp_lock underflow.)
+    Emu.SetTestMode();
 
     MessageDialog::pushPendingProgressId(workload.progressId);
+
+    // Their 9c30f4774. If a previous game boot was killed, Emu.Kill() ->
+    // g_fxo->clear() leaves the fixed-object map torn down (m_order/m_info
+    // nulled). The single-type init<>() calls below do `*m_order++ = obj`,
+    // which segfaults on a null m_order (write to 0x0). reset() reallocates the
+    // bookkeeping arrays so the precompile gets a clean fxo - mirroring
+    // upstream's precompile path (Emulator::Load), where Emu.Init()/reset()
+    // always runs before these inits. Guarded so we do not tear down an fxo
+    // that is already live (e.g. a game sitting in the ready state).
+    if (!g_fxo->is_init()) {
+      g_fxo->reset();
+    }
 
     g_fxo->init<named_thread<progress_dialog_server>>();
     g_fxo->init<main_ppu_module<lv2_obj>>();
@@ -1408,24 +1675,34 @@ private:
       }
     }
 
-    std::vector<ppu_module<lv2_obj> *> mod_list;
-    rpcsx_android.error("Going to analyze executable");
+    // Their 9db53732c: honor the "LLVM Precompilation" toggle for the
+    // install-time precompile too (it already gates the boot-time one). With it
+    // off, installing - incl. batch folder installs - skips the long up-front
+    // compile; code is then compiled lazily on first boot instead. Nothing is
+    // lost, only deferred.
+    if (g_cfg.core.llvm_precompilation) {
+      std::vector<ppu_module<lv2_obj> *> mod_list;
+      rpcsx_android.error("Going to analyze executable");
 
-    // FIXME: split states
-    if (!is_vsh) {
-      if (_main.analyse(0, _main.elf_entry, _main.seg0_code_end,
-                        _main.applied_patches, std::vector<u32>{})) {
-        Emu.ConfigurePPUCache();
-        Emu.SetTestMode();
-        rpcsx_android.error("Going to precompile main PPU module");
-        ppu_initialize(_main);
-        mod_list.emplace_back(&_main);
+      // FIXME: split states
+      if (!is_vsh) {
+        if (_main.analyse(0, _main.elf_entry, _main.seg0_code_end,
+                          _main.applied_patches, std::vector<u32>{})) {
+          Emu.ConfigurePPUCache();
+          Emu.SetTestMode();
+          rpcsx_android.error("Going to precompile main PPU module");
+          ppu_initialize(_main);
+          mod_list.emplace_back(&_main);
+        }
       }
-    }
 
-    // false = upstream's non-fast path: precompile everything rather than
-    // stopping early, which is what this batch precompile step wants.
-    ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list, false);
+      // false = upstream's non-fast path: precompile everything rather than
+      // stopping early, which is what this batch precompile step wants.
+      ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list, false);
+    } else {
+      rpcsx_android.error(
+          "Skipping install-time precompile (LLVM Precompilation disabled)");
+    }
 
     rpcsx_android.error("Finalization");
     g_fxo->reset();
@@ -1441,9 +1718,27 @@ static void setupCallbacks() {
   Emu.SetCallbacks({
       .call_from_main_thread =
           [](std::function<void()> cb, atomic_t<u32> *wake_up) {
-            cb();
-            if (wake_up) {
-              *wake_up = true;
+            // Their 9b2b593f6. Run deferred Emu callbacks on the dedicated
+            // main-thread processor, never inline on the calling (often
+            // emulation/worker) thread. The Emu stop "join thread" hands its
+            // final teardown to CallFromMainThread, and that teardown drops the
+            // last reference to the join thread itself; running it inline made
+            // the thread join itself in its named_thread destructor and
+            // deadlock - this was the shutdown hang (log: "Thread [Emulation
+            // Join Thread] is too sleepy" emitted by the Emulation Join
+            // Thread). Dispatching to the processor makes that destructor run
+            // on a different thread, joining the now-finished join thread
+            // cleanly. If we are already on the processor thread, run inline to
+            // avoid a self-deadlock on re-entrant blocking calls (matches the
+            // desktop "already on main thread" fast path).
+            if (g_mainThreadProcessor.onProcessorThread()) {
+              cb();
+              if (wake_up) {
+                *wake_up = true;
+                wake_up->notify_all();
+              }
+            } else {
+              g_mainThreadProcessor.push(std::move(cb), wake_up);
             }
           },
       .on_run = [](auto...) {},
@@ -1582,7 +1877,23 @@ static void setupCallbacks() {
         }
         return U"";
       },
-      .get_localized_setting = [](auto...) { return ""; },
+      .get_localized_setting =
+          [](const cfg::_base *node, u32 enum_index) -> std::string {
+        // Their 9c30f4774. The home-menu dropdowns build their option list by
+        // calling this once per enum index. Returning "" (the old stub) left
+        // every dropdown blank. We have no translation table on Android, so
+        // surface the config enum's own token (e.g. "Vulkan", "Mega",
+        // "Automatic") via to_list(), which is already human-readable. Falls
+        // back to "" only for out-of-range/non-enum nodes.
+        if (!node) {
+          return "";
+        }
+        const std::vector<std::string> list = node->to_list();
+        if (enum_index < list.size()) {
+          return list[enum_index];
+        }
+        return "";
+      },
       .play_sound = [](auto...) {},
       .get_image_info = [](auto...) { return false; },
       .get_scaled_image = [](auto...) { return false; },
@@ -1723,6 +2034,23 @@ extern "C" bool _rpcsx_overlayPadData(int digital1, int digital2,
   return true;
 }
 
+// Their fb4c0980 / d06913b8. Optional, additive entry point: hand the core the
+// app-private (internal) storage dir so secrets like rpcn.yml can live off the
+// MTP/USB-visible and cloud-backed-up external storage. Kept SEPARATE from
+// _rpcsx_initialize so the app<->core ABI of the critical init path never
+// changes: an old app simply never calls this (the core falls back to
+// external), and an old core simply lacks the symbol (the app's dlsym yields
+// null and skips the call). Either way nothing crashes on version skew.
+extern "C" void _rpcsx_setRpcnConfigDir(std::string_view internalDir) {
+  if (internalDir.empty()) {
+    return;
+  }
+
+  auto internalDirStr = fix_dir_path(std::string(internalDir));
+  g_android_internal_config_dir = internalDirStr + "config/";
+  std::filesystem::create_directories(g_android_internal_config_dir);
+}
+
 extern "C" bool _rpcsx_initialize(std::string_view rootDir,
                                   std::string_view user) {
   auto rootDirStr = fix_dir_path(std::string(rootDir));
@@ -1743,6 +2071,15 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
   }
 
   g_initialized = true;
+
+#if defined(ARCH_ARM64)
+  // Their ac3678749. Calibrate busy_wait() to this device's hardware timer
+  // frequency before any emulation spins. Without this, busy waits sized in
+  // x86-equivalent cycles ran ~100x too long on phone timers (~19MHz vs the
+  // assumed ~3GHz). rx::init_arm_timer_scale() already exists in rx/asm.hpp;
+  // only the call site was missing here.
+  rx::init_arm_timer_scale();
+#endif
 
   if (int r = libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
                                 nullptr);
@@ -1777,8 +2114,60 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
                                         stats.avail_free / 4);
   }
 
+  // Their 0bcd2eb0c. Capture native stderr (fd 2) into a side file. LLVM's
+  // unhandled-error paths write their last words to fd 2 before abort() (e.g.
+  // "LLVM ERROR: out of memory" from report_bad_alloc_error) - an Android app
+  // otherwise discards fd 2 entirely, which made the compile-OOM death
+  // completely silent. Kept separate from RPCSX.log so raw writes cannot
+  // interleave with the buffered file listener. O_APPEND keeps each write
+  // atomic. Normally this file stays empty.
+  {
+    std::error_code ec;
+    std::filesystem::remove(fs::get_log_dir() + "RPCSX.stderr.old.log", ec);
+    std::filesystem::rename(fs::get_log_dir() + "RPCSX.stderr.log",
+                            fs::get_log_dir() + "RPCSX.stderr.old.log", ec);
+
+    if (const int fd = ::open((fs::get_log_dir() + "RPCSX.stderr.log").c_str(),
+                              O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        fd >= 0) {
+      ::dup2(fd, 2);
+      if (fd != 2) {
+        ::close(fd);
+      }
+    }
+  }
+
+  // Their 08a64ed4d. Release logging budget: a handful of high-volume HLE /
+  // recompiler channels emit thousands of per-call / per-block trace lines (SPU
+  // block dumps + loop analysis, sys_* syscall traces, module export/import
+  // dumps, unavailable-perf-counter spam) that bloat the on-device log
+  // enormously with no end-user value - one session was ~29 MB / 194k lines.
+  // Raise those channels so only genuine warnings/errors survive. RSX is kept at
+  // warning to preserve the texture cache-miss perf signal.
+  //
+  // NOTE: these raw calls only cover the pre-boot window. Emulator::Load() runs
+  // rpcs3::utils::configure_logs(), which calls logs::reset() (EVERY channel back
+  // to _default) before applying g_cfg.log - so the budget is undone the moment a
+  // game boots unless it also lives in the config. It is seeded into g_cfg.log
+  // below, after Emu.Init() has loaded config.yml.
+  logs::set_level("SPU", logs::level::error);
+  logs::set_level("sys_fs", logs::level::error);
+  logs::set_level("sys_event", logs::level::error);
+  logs::set_level("sys_spu", logs::level::error);
+  logs::set_level("sys_process", logs::level::error);
+  logs::set_level("sys_net", logs::level::error);
+  logs::set_level("ppu_loader", logs::level::warning);
+  logs::set_level("PERF", logs::level::warning);
+  logs::set_level("RSX", logs::level::warning);
+
   logs::stored_message ver{rpcsx_android.always()};
-  ver.text = fmt::format("RPCSX-ps3-android v%s", rx::getVersion().toString());
+  // The user-facing name is the ordered date-time (see Version::toString); keep
+  // the exact git revision here in the log so a report still pins the commit.
+  const auto rxVer = rx::getVersion();
+  const auto rxRev = rxVer.gitRev();
+  ver.text = rxRev.empty()
+                 ? fmt::format("RPCSX-ps3-android v%s", rxVer.toString())
+                 : fmt::format("RPCSX-ps3-android v%s (%s)", rxVer.toString(), rxRev);
 
   // Write System information
   logs::stored_message sys{rpcsx_android.always()};
@@ -1799,6 +2188,23 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
     rlimit64 rlim{};
     if (getrlimit64(resource, &rlim) != 0) {
       rpcsx_android.error("failed to get rlimit for %d", resource);
+      return;
+    }
+
+    // Try to raise the hard limit too, not just the soft limit. Android's
+    // default RLIMIT_MEMLOCK hard cap is small, so only bumping the soft limit
+    // up to it (the previous behaviour) still left vm::lock_sudo failing and the
+    // RSX/main/stack guest memory unpinned ("Failed to lock sudo memory" in the
+    // log). Never lower an already-higher hard limit; fall back to the soft-only
+    // bump if the kernel refuses to raise the hard limit.
+    // (Raising RLIMIT_MEMLOCK to RLIM_INFINITY follows aps3e, by aenu.)
+    rlimit64 want{};
+    want.rlim_max = std::max<std::uint64_t>(rlim.rlim_max, limit);
+    want.rlim_cur = std::min<std::uint64_t>(want.rlim_max, limit);
+
+    if (setrlimit64(resource, &want) == 0) {
+      rpcsx_android.notice("rlimit[%d] = %u (max %u)", resource, want.rlim_cur,
+                           want.rlim_max);
       return;
     }
 
@@ -1827,7 +2233,40 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
   g_cfg_input.player1.device.from_string("Virtual");
   g_cfg_input.save("", g_cfg_input_configs.default_config);
 
-  g_cfg.core.llvm_cpu.from_string("cortex-a34");
+  // Their 6964625 / 17eec602f. Leave the LLVM target CPU empty so the JIT
+  // auto-detects the real chip via our MIDR table (jit_compiler::cpu ->
+  // aarch64::get_cpu_name), which ranks by scheduler capacity and picks the
+  // prime/big core (e.g. cortex-a720) and tunes PPU/SPU codegen for it. The old
+  // port hard-coded "cortex-a34" - a tiny in-order ARMv8.0 core - which defeated
+  // that detection and scheduled all generated code for the weakest possible
+  // microarchitecture. Force-clear it (not just default) so devices that already
+  // persisted "cortex-a34" in config.yml get re-detected on next launch. CPU
+  // features stay pinned separately via setMAttrs, so the target name only
+  // affects scheduling/cost; worst case is "generic", never worse than a34.
+  g_cfg.core.llvm_cpu.from_string("");
+
+  // Log the resolved target so every report shows which core codegen was tuned
+  // for, instead of the empty auto-detect setting.
+  rpcsx_android.notice("LLVM target CPU resolved to: %s",
+                       jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
+
+  // Persist the release log-volume budget set above into the config, because
+  // Emulator::Load() -> configure_logs() resets every channel to _default and
+  // then applies ONLY g_cfg.log. Seeded once - if the user (or the settings UI)
+  // has already put anything in the Log map, theirs wins and we do not touch it.
+  if (g_cfg.log.get_map().empty()) {
+    g_cfg.log.set_map({
+        {"SPU", logs::level::error},
+        {"sys_fs", logs::level::error},
+        {"sys_event", logs::level::error},
+        {"sys_spu", logs::level::error},
+        {"sys_process", logs::level::error},
+        {"sys_net", logs::level::error},
+        {"ppu_loader", logs::level::warning},
+        {"PERF", logs::level::warning},
+        {"RSX", logs::level::warning},
+    });
+  }
 
   // v0.0.41 added the boot-sequence music overlay, defaulting ON. It reaches
   // ensure(Emu.GetCallbacks().make_video_source()) in
@@ -1872,11 +2311,71 @@ extern "C" int _rpcsx_boot(std::string_view path_) {
     path.pop_back();
   }
 
-  // NOTE: upstream v0.0.41 renamed cfg_mode::global to cfg_mode::database_config.
-  // RPCSX installs no get_database_config callback, so this falls back to the
-  // global config exactly like the old cfg_mode::global did.
-  return static_cast<int>(
-      Emu.BootGame(path, "", false, cfg_mode::database_config));
+  // Their b29d1cc05. cfg_mode::custom makes the emulator load a per-game custom
+  // config (config/custom_configs/config_<title_id>.yml) when one exists,
+  // falling back to the global config otherwise - mirroring desktop RPCS3, and
+  // required for the _rpcsx_customConfig* JNI below to have any effect.
+  // (This supersedes our earlier cfg_mode::database_config: upstream v0.0.41
+  // renamed cfg_mode::global to database_config, and since RPCSX installs no
+  // get_database_config callback that mode was just "global with extra steps".)
+  return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::custom));
+}
+
+// ADD-ONLY ABI (JNI skew rule), their 3112e31e0: boot an ISO from an Android SAF
+// fd without any real filesystem path. The app owns the URI permission and must
+// pass a FRESH detached fd on every boot (provider fds do not survive provider
+// restarts). display_path (the content:// URI) is what games.yml/savestates
+// record. Decrypted ISOs only (sector-key lookup is path-based).
+extern "C" int _rpcsx_bootIsoFd(int fd, std::string_view display_path) {
+  auto file = fs::file::from_native_handle(fd);
+
+  if (!file || !file.size()) {
+    return static_cast<int>(game_boot_result::invalid_file_or_folder);
+  }
+
+  {
+    // Validate before mounting so a bad fd never leaves a half-registered device
+    iso_archive probe(fs::file::from_native_handle(::dup(fd)));
+    if (!probe) {
+      return static_cast<int>(game_boot_result::invalid_file_or_folder);
+    }
+  }
+
+  load_iso(std::move(file), std::string(display_path));
+
+  std::string path = iso_device::virtual_device_name + "/";
+
+  // Install discs have no USRDIR/EBOOT.BIN - boot the archive root then
+  if (fs::is_file(path + "PS3_GAME/USRDIR/EBOOT.BIN")) {
+    path += "PS3_GAME/USRDIR/EBOOT.BIN";
+  }
+
+  Emu.SetForceBoot(true);
+  return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::custom));
+}
+
+// ADD-ONLY ABI, their 3112e31e0: game metadata (title id, name, version) for an
+// ISO given a SAF fd, so the app can list content:// ISOs without extraction.
+// Returns a "titleId|name|version" packed string or null.
+extern "C" jstring _rpcsx_getIsoGameInfoFd(JNIEnv *env, int fd) {
+  iso_archive archive(fs::file::from_native_handle(fd));
+
+  if (!archive) {
+    return nullptr;
+  }
+
+  const psf::registry sfo = archive.open_psf("PS3_GAME/PARAM.SFO");
+  const auto title_id = psf::get_string(sfo, "TITLE_ID");
+
+  if (title_id.empty()) {
+    return nullptr;
+  }
+
+  const auto name = psf::get_string(sfo, "TITLE");
+  const auto version =
+      psf::get_string(sfo, "APP_VER", psf::get_string(sfo, "VERSION", ""));
+
+  return wrap(env, fmt::format("%s|%s|%s", title_id, name, version));
 }
 
 extern "C" int _rpcsx_getState() {
@@ -1902,11 +2401,30 @@ extern "C" bool _rpcsx_surfaceEvent(JNIEnv *env, jobject surface, jint event) {
       ANativeWindow_release(prevWindow);
     }
 
-    if (auto padThread = pad::get_pad_thread()) {
-      padThread->open_home_menu();
-    }
+    // Their 31d1425bc. surfaceDestroyed runs on the Android UI/main thread. Both
+    // open_home_menu() and Emu.Pause() can block for many seconds during a
+    // first-boot bulk PPU precompile (the guest main thread is parked waiting
+    // for modules to finish compiling). That froze the UI -> ANR -> force close
+    // whenever the user backgrounded a still-compiling first boot. The native
+    // window is already released above - the only step the SurfaceHolder
+    // contract requires - so hand the pause and home-menu off to a detached
+    // worker and return immediately.
+    std::thread([] {
+      // Their 5ae74aed2. relaxed: the surface can be lost while no pad thread
+      // exists (during emulation shutdown, or before boot); a non-relaxed
+      // get_pad_thread() would ensure()-abort on the null handle and kill the
+      // process.
+      if (auto padThread = pad::get_pad_thread(true)) {
+        padThread->open_home_menu();
+      }
 
-    Emu.Pause();
+      // Only pause if the surface is still gone. A quick destroy->recreate (a
+      // rotation or a transient focus loss) fires event 0 -> Emu.Resume(); that
+      // resume must win the race, not this deferred pause.
+      if (g_native_window.load() == nullptr) {
+        Emu.Pause();
+      }
+    }).detach();
   } else {
     auto newWindow = ANativeWindow_fromSurface(env, surface);
 
@@ -2047,8 +2565,14 @@ static bool installPup(JNIEnv *env, fs::file &&pup_f, jlong progressId) {
   }
 
   if (static_cast<pup_error>(pup) != pup_error::ok) {
-    rpcsx_android.fatal("installFw: invalid PUP");
-    progress.failure("Firmware update file is broken");
+    // Their 02f5b82d8: surface the real PUP error instead of a generic "broken".
+    const std::string &pup_detail = pup.get_formatted_error();
+    rpcsx_android.fatal("installFw: invalid PUP (%s)",
+                        pup_detail.empty() ? "unknown error" : pup_detail);
+    progress.failure(pup_detail.empty()
+                         ? std::string("Firmware update file is broken")
+                         : fmt::format("Firmware update file is broken: %s",
+                                       pup_detail));
     return false;
   }
 
@@ -2205,7 +2729,9 @@ static bool installPkg(JNIEnv *env, fs::file &&file, jlong progressId) {
       return false;
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // Their 9db53732c: poll PKG extraction every 200ms instead of 2s for a
+    // smoother progress bar.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
   if (worker()) {
@@ -2330,27 +2856,27 @@ static bool installRap(JNIEnv *env, fs::file &&file, jlong progressId,
 }
 
 static bool installIso(JNIEnv *env, fs::file &&file, jlong progressId) {
-  auto optIso = iso_dev::open(std::make_unique<file_view_block_dev>(file));
+  // Their 822c1174d. Streaming extraction over the Loader/ISO reader: every copy
+  // runs in bounded chunks (the old dev/iso path materialized each file TWICE -
+  // whole extent + to_vector - which OOM-killed installs of ISOs with large
+  // inner files). Direct play needs no extraction at all; this is the fallback.
+  // dev/iso.hpp no longer exists in this tree, so this rewrite is mandatory.
+  //
+  // Adapted to ours: theirs moved `file` straight into the archive, which makes
+  // the archive own and close the caller's JNI fd. Every other install*() here
+  // keeps that fd owned by the app (the caller's AtExit calls release_handle()).
+  // Hand the archive a dup instead so that contract is preserved and the fd is
+  // not closed twice - same trick their own _rpcsx_bootIsoFd probe uses.
+  iso_archive archive(fs::file::from_native_handle(::dup(file.get_handle())));
   Progress progress(env, progressId);
 
-  if (!optIso) {
-    progress.failure("Failed to read ISO");
+  if (!archive) {
+    progress.failure("Failed to read ISO (not ISO9660, or encrypted)");
     return false;
   }
 
-  auto iso = std::move(*optIso);
-  auto sfo_raw_file = iso.open("PS3_GAME/PARAM.SFO", fs::read);
-
-  if (!sfo_raw_file) {
-    progress.failure("Failed to locate PARAM.SFO in ISO");
-    return false;
-  }
-
-  fs::file sfo_file;
-  sfo_file.reset(std::move(sfo_raw_file));
-
-  auto sfo = psf::load_object(sfo_file, "iso://PS3_GAME/PARAM.SFO");
-  auto title_id = psf::get_string(sfo, "TITLE_ID");
+  const psf::registry sfo = archive.open_psf("PS3_GAME/PARAM.SFO");
+  const auto title_id = psf::get_string(sfo, "TITLE_ID");
 
   if (title_id.empty()) {
     progress.failure("Failed to fetch TITLE_ID from PARAM.SFO in ISO");
@@ -2361,103 +2887,109 @@ static bool installIso(JNIEnv *env, fs::file &&file, jlong progressId) {
     sendGameInfo(env, progressId, {{*gameInfo}});
   }
 
-  std::filesystem::path destinationPath =
+  const std::filesystem::path destinationPath =
       fs::get_config_dir() + "games/" + std::string(title_id);
-  std::size_t filesCount = 0;
 
-  auto roots = [&] {
-    std::vector<std::filesystem::path> result;
-    std::vector<std::filesystem::path> workList;
-    workList.push_back({});
-    result.push_back({});
+  // Collect all files (relative iso paths) up front for progress accounting
+  struct PendingFile {
+    std::string isoPath;
+    const iso_fs_node *node;
+  };
+
+  std::vector<PendingFile> files;
+  std::vector<std::string> dirs;
+
+  {
+    struct WorkItem {
+      const iso_fs_node *node;
+      std::string path;
+    };
+
+    std::vector<WorkItem> workList;
+    workList.push_back({&archive.root(), {}});
 
     while (!workList.empty()) {
-      auto path = std::move(workList.back());
+      auto [node, path] = std::move(workList.back());
       workList.pop_back();
 
-      fs::dir dir;
-      dir.reset(iso.open_dir(path));
+      for (const auto &child : node->children) {
+        const auto &name = child->metadata.name;
 
-      for (auto &entry : dir) {
-        if (entry.name == "." || entry.name == "..") {
+        if (name == "." || name == "..") {
           continue;
         }
-        if (entry.name == "PS3_UPDATE" && path.empty()) {
+        if (path.empty() && name == "PS3_UPDATE") {
           continue;
         }
 
-        if (entry.is_directory) {
-          result.push_back(path / entry.name);
-          workList.push_back(path / entry.name);
+        std::string childPath = path.empty() ? name : path + "/" + name;
+
+        if (child->metadata.is_directory) {
+          dirs.push_back(childPath);
+          workList.push_back({child.get(), std::move(childPath)});
         } else {
-          filesCount++;
+          files.push_back({std::move(childPath), child.get()});
         }
       }
-    }
-
-    return result;
-  }();
-
-  progress.report(0, filesCount);
-
-  std::size_t processedFiles = 0;
-  std::error_code ec;
-
-  for (auto &root : roots) {
-    auto rootDestPath = root.empty() ? destinationPath : destinationPath / root;
-
-    std::filesystem::create_directories(rootDestPath, ec);
-    if (ec) {
-      progress.failure(fmt::format("Failed to create dir %s: %s",
-                                   rootDestPath.string(), ec.message()));
-      return false;
-    }
-
-    fs::dir dir;
-    dir.reset(iso.open_dir(root));
-
-    for (auto &entry : dir) {
-      if (entry.name == "." || entry.name == "..") {
-        continue;
-      }
-
-      auto entryDestPath = rootDestPath / entry.name;
-
-      if (entry.is_directory) {
-        std::filesystem::create_directories(entryDestPath, ec);
-        if (ec) {
-          progress.failure(fmt::format("Failed to create dir %s: %s",
-                                       entryDestPath.string(), ec.message()));
-          return false;
-        }
-
-        continue;
-      }
-      auto raw_file = iso.open(root / entry.name, fs::read);
-
-      if (!raw_file) {
-        progress.failure(fmt::format("Failed to open file in ISO: %s",
-                                     (root / entry.name).string()));
-        return false;
-      }
-
-      fs::file file;
-      file.reset(std::move(raw_file));
-
-      if (!fs::write_file(entryDestPath,
-                          fs::open_mode::create + fs::open_mode::trunc,
-                          file.to_vector<std::uint8_t>())) {
-        progress.failure(fmt::format("Failed to write file: %s, dest %s",
-                                     entryDestPath.string(),
-                                     destinationPath.string()));
-        return false;
-      }
-
-      progress.report(processedFiles++, filesCount);
     }
   }
 
-  collectGameInfo(env, -1, {destinationPath});
+  progress.report(0, files.size());
+
+  std::error_code ec;
+  std::filesystem::create_directories(destinationPath, ec);
+
+  for (const auto &dir : dirs) {
+    std::filesystem::create_directories(destinationPath / dir, ec);
+    if (ec) {
+      progress.failure(fmt::format("Failed to create dir %s: %s",
+                                   (destinationPath / dir).string(),
+                                   ec.message()));
+      return false;
+    }
+  }
+
+  std::size_t processedFiles = 0;
+  std::vector<u8> buffer(1u << 20);
+
+  for (const auto &pending : files) {
+    auto src = archive.open(pending.isoPath);
+
+    if (!src) {
+      progress.failure(
+          fmt::format("Failed to open file in ISO: %s", pending.isoPath));
+      return false;
+    }
+
+    const auto destPath = destinationPath / pending.isoPath;
+    fs::file out(destPath.string(), fs::rewrite);
+
+    if (!out) {
+      progress.failure(fmt::format("Failed to create file: %s, dest %s",
+                                   destPath.string(),
+                                   destinationPath.string()));
+      return false;
+    }
+
+    u64 remaining = src->size();
+
+    while (remaining) {
+      const u64 chunk = std::min<u64>(buffer.size(), remaining);
+
+      if (src->read(buffer.data(), chunk) != chunk ||
+          out.write(buffer.data(), chunk) != chunk) {
+        progress.failure(fmt::format("Failed to copy file: %s (%s left)",
+                                     pending.isoPath, remaining));
+        return false;
+      }
+
+      remaining -= chunk;
+    }
+
+    progress.report(processedFiles++, files.size());
+  }
+
+  collectGameInfo(env, -1, {destinationPath.string()});
   auto ebootPath = locateEbootPath(destinationPath.string());
   g_compilationQueue.push(progress, std::move(ebootPath));
   return true;
@@ -2543,11 +3075,425 @@ extern "C" bool _rpcsx_installKey(JNIEnv *env, int fd, long progressId,
   return false;
 }
 
+// ---- Patch manager bridge ----------------------------------------------
+// The core patch_engine (util/bin_patch) already loads patches/patch.yml and
+// applies enabled patches per game-hash on boot. patch_engine::load() also
+// merges the user's patch_config.yml enabled state into the map, so after a
+// load() the map reflects the effective enabled state. We expose enough to let
+// the app list patches and flip their enabled flag (persisted via save_config).
+
+static void patch_json_escape(std::string &out, std::string_view s) {
+  for (char c : s) {
+    switch (c) {
+    case '"': out += "\\\""; break;
+    case '\\': out += "\\\\"; break;
+    case '\n': out += "\\n"; break;
+    case '\r': out += "\\r"; break;
+    case '\t': out += "\\t"; break;
+    default:
+      if (static_cast<unsigned char>(c) < 0x20) {
+        fmt::append(out, "\\u%04x",
+                    static_cast<unsigned>(static_cast<unsigned char>(c)));
+      } else {
+        out += c;
+      }
+    }
+  }
+}
+
+extern "C" std::string _rpcsx_patchEngineVersion() {
+  return patch_engine_version;
+}
+
+// Returns a JSON array: [{hash,name,author,version,notes,serials:[...],enabled}]
+extern "C" std::string _rpcsx_patchesList() {
+  patch_engine::patch_map patches;
+  patch_engine::load(patches, patch_engine::get_patches_path() + "patch.yml");
+  patch_engine::load(patches, patch_engine::get_imported_patch_path());
+
+  std::string out = "[";
+  bool first = true;
+
+  for (const auto &[hash, container] : patches) {
+    for (const auto &[description, info] : container.patch_info_map) {
+      bool enabled = false;
+      std::set<std::string> serials;
+      // Their 40bdd4d3a: expose the human-readable game titles so the app's
+      // Patch Manager can search/label by game name, not just serial.
+      std::set<std::string> titles;
+
+      for (const auto &[title, serial_map] : info.titles) {
+        if (!title.empty()) {
+          titles.insert(title);
+        }
+        for (const auto &[serial, version_map] : serial_map) {
+          serials.insert(serial);
+          for (const auto &[version, cfg] : version_map) {
+            if (cfg.enabled) {
+              enabled = true;
+            }
+          }
+        }
+      }
+
+      if (!first) {
+        out += ",";
+      }
+      first = false;
+
+      out += "{\"hash\":\"";
+      patch_json_escape(out, hash);
+      out += "\",\"name\":\"";
+      patch_json_escape(out, description);
+      out += "\",\"author\":\"";
+      patch_json_escape(out, info.author);
+      out += "\",\"version\":\"";
+      patch_json_escape(out, info.patch_version);
+      out += "\",\"notes\":\"";
+      patch_json_escape(out, info.notes);
+      out += "\",\"serials\":[";
+      bool sfirst = true;
+      for (const auto &s : serials) {
+        if (!sfirst) {
+          out += ",";
+        }
+        sfirst = false;
+        out += "\"";
+        patch_json_escape(out, s);
+        out += "\"";
+      }
+      out += "],\"titles\":[";
+      bool tfirst = true;
+      for (const auto &t : titles) {
+        if (!tfirst) {
+          out += ",";
+        }
+        tfirst = false;
+        out += "\"";
+        patch_json_escape(out, t);
+        out += "\"";
+      }
+      out += "],\"enabled\":";
+      out += enabled ? "true" : "false";
+      out += "}";
+    }
+  }
+
+  out += "]";
+  return out;
+}
+
+// Enable/disable a patch (all of its serials/versions) and persist to
+// patch_config.yml. Returns false if the patch was not found.
+extern "C" bool _rpcsx_patchSetEnabled(std::string_view hash,
+                                       std::string_view description,
+                                       bool enabled) {
+  patch_engine::patch_map patches;
+  patch_engine::load(patches, patch_engine::get_patches_path() + "patch.yml");
+  patch_engine::load(patches, patch_engine::get_imported_patch_path());
+
+  const auto hash_it = patches.find(std::string(hash));
+  if (hash_it == patches.end()) {
+    return false;
+  }
+
+  const auto desc_it =
+      hash_it->second.patch_info_map.find(std::string(description));
+  if (desc_it == hash_it->second.patch_info_map.end()) {
+    return false;
+  }
+
+  for (auto &[title, serial_map] : desc_it->second.titles) {
+    for (auto &[serial, version_map] : serial_map) {
+      for (auto &[version, cfg] : version_map) {
+        cfg.enabled = enabled;
+      }
+    }
+  }
+
+  patch_engine::save_config(patches);
+  return true;
+}
+
+static cfg::_base *find_cfg_node(cfg::_base *root, std::string_view path);
+
+// --- Per-game custom configuration -----------------------------------------
+// Mirrors desktop RPCS3's per-title configs (config/custom_configs/
+// config_<serial>.yml). _rpcsx_boot uses cfg_mode::custom, so a config created
+// here is applied automatically when that game boots, with the global config as
+// fallback. The serial is the game's title id (the install-folder name).
+
+// True if a custom config file exists for this game.
+extern "C" bool _rpcsx_customConfigExists(std::string_view serial) {
+  if (serial.empty()) {
+    return false;
+  }
+  return fs::is_file(rpcs3::utils::get_custom_config_path(std::string(serial)));
+}
+
+// Their 6bca0c69a. fs::pending_file (used by Emulator::SaveSettings) creates its
+// temporary file inside the target directory and fails with "Not found" if that
+// directory does not exist yet. Ensure custom_configs/ is present before saving
+// a per-game config, otherwise the very first per-game/community config write
+// silently fails and nothing is persisted.
+static void ensure_custom_config_dir() {
+  fs::create_path(rpcs3::utils::get_custom_config_dir());
+}
+
+// Create a custom config for a game. Their 5d14942b7: write an EMPTY config, not
+// a snapshot of the globals. Boot overlays the custom file over the live global
+// config (System.cpp), so an empty file means "inherit everything" - only fields
+// the user later edits get pinned. A full snapshot froze ALL settings at creation
+// time, silently masking any later global tuning ("same settings run slower with
+// a custom config").
+extern "C" bool _rpcsx_customConfigCreate(std::string_view serial) {
+  if (serial.empty()) {
+    return false;
+  }
+  ensure_custom_config_dir();
+  Emulator::SaveSettings("{}\n", std::string(serial));
+  return _rpcsx_customConfigExists(serial);
+}
+
+// Remove a game's custom config; subsequent boots fall back to the global one.
+extern "C" bool _rpcsx_customConfigDelete(std::string_view serial) {
+  if (serial.empty()) {
+    return false;
+  }
+  return fs::remove_file(
+      rpcs3::utils::get_custom_config_path(std::string(serial)));
+}
+
+// Loads the effective per-game config view into cfg: the global config overlaid
+// with the game's custom file (if any) - exactly what boot will apply. Filled by
+// reference because cfg_root is non-copyable/non-movable.
+static void load_effective_custom_cfg(cfg_root &cfg, std::string_view serial) {
+  cfg.from_string(g_cfg.to_string());
+  if (!serial.empty()) {
+    if (fs::file f{rpcs3::utils::get_custom_config_path(std::string(serial))}) {
+      cfg.from_string(f.to_string());
+    }
+  }
+}
+
+// Read a settings node for a game (same JSON shape as _rpcsx_settingsGet).
+extern "C" std::string _rpcsx_customConfigGet(std::string_view serial,
+                                              std::string_view path) {
+  cfg_root cfg;
+  load_effective_custom_cfg(cfg, serial);
+  auto node = find_cfg_node(&cfg, path);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  return node->to_json().dump(4);
+}
+
+// Set a settings node for a game and persist it to the custom config file.
+// Creates the file on first edit (seeded from the global config).
+extern "C" bool _rpcsx_customConfigSet(std::string_view serial,
+                                       std::string_view path,
+                                       std::string_view valueString) {
+  if (serial.empty()) {
+    return false;
+  }
+
+  nlohmann::json value;
+  try {
+    value = nlohmann::json::parse(valueString);
+  } catch (...) {
+    rpcsx_android.error(
+        "customConfigSet: node %s passed with invalid json '%s'", path,
+        valueString);
+    return false;
+  }
+
+  cfg_root cfg;
+  load_effective_custom_cfg(cfg, serial);
+  auto node = find_cfg_node(&cfg, path);
+  if (node == nullptr) {
+    rpcsx_android.error("customConfigSet: node %s not found", path);
+    return false;
+  }
+
+  if (!node->from_json(value, false)) {
+    rpcsx_android.error("customConfigSet: node %s not accepts value '%s'", path,
+                        value.dump());
+    return false;
+  }
+
+  // Their 5d14942b7: persist ONLY the edited node. Untouched settings stay
+  // absent from the custom file and keep inheriting the live global config at
+  // boot. Saving the full effective snapshot here would pin every setting at its
+  // current value.
+  YAML::Node yaml_root;
+
+  if (fs::file f{rpcs3::utils::get_custom_config_path(std::string(serial))}) {
+    try {
+      yaml_root = YAML::Load(f.to_string());
+    } catch (...) {
+      rpcsx_android.error(
+          "customConfigSet: existing custom config unreadable, recreating");
+    }
+  }
+
+  if (!yaml_root.IsMap()) {
+    yaml_root = YAML::Node(YAML::NodeType::Map);
+  }
+
+  {
+    const auto pathList = fmt::split(path, {"@@"});
+    YAML::Node cur;
+    cur.reset(yaml_root);
+
+    for (usz i = 0; i < pathList.size(); i++) {
+      if (i + 1 == pathList.size()) {
+        // Leaf: store the validated scalar (enum/string as-is; bool/number via
+        // their JSON spelling, which matches the YAML scalar form).
+        if (value.is_string()) {
+          cur[pathList[i]] = value.get<std::string>();
+        } else {
+          cur[pathList[i]] = value.dump();
+        }
+        break;
+      }
+
+      YAML::Node next = cur[pathList[i]];
+      if (!next.IsMap()) {
+        cur[pathList[i]] = YAML::Node(YAML::NodeType::Map);
+        next.reset(cur[pathList[i]]);
+      }
+      cur.reset(next);
+    }
+  }
+
+  ensure_custom_config_dir();
+  Emulator::SaveSettings(YAML::Dump(yaml_root) + "\n", std::string(serial));
+  return true;
+}
+
+// Import a community/recommended config (a sparse YAML string) as a game's
+// custom config. Their bb4c78dc6: the preset specifies only the keys it changes;
+// we persist ONLY those keys (each validated against the schema) so every
+// unmentioned setting keeps inheriting the user's live globals at boot - exactly
+// like manual per-game edits. A full snapshot would pin every setting and make
+// community configs perform worse than setting the same options by hand.
+extern "C" bool _rpcsx_customConfigImport(std::string_view serial,
+                                          std::string_view yaml) {
+  if (serial.empty()) {
+    return false;
+  }
+
+  YAML::Node incoming;
+  try {
+    incoming = YAML::Load(std::string(yaml));
+  } catch (...) {
+    rpcsx_android.error("customConfigImport: unparseable YAML for %s", serial);
+    return false;
+  }
+  if (!incoming.IsMap()) {
+    rpcsx_android.error("customConfigImport: top-level YAML is not a map for %s",
+                        serial);
+    return false;
+  }
+
+  // Merge into any existing custom file so re-importing does not drop prior
+  // sparse edits (matches customConfigSet).
+  YAML::Node yaml_root;
+  if (fs::file f{rpcs3::utils::get_custom_config_path(std::string(serial))}) {
+    try {
+      yaml_root = YAML::Load(f.to_string());
+    } catch (...) {
+      rpcsx_android.error(
+          "customConfigImport: existing custom config unreadable, recreating");
+    }
+  }
+  if (!yaml_root.IsMap()) {
+    yaml_root = YAML::Node(YAML::NodeType::Map);
+  }
+
+  // Validate each leaf against the live schema (seeded from globals so enum/
+  // range checks match what boot uses). Only validated keys get written.
+  cfg_root validator;
+  validator.from_string(g_cfg.to_string());
+
+  bool wrote_any = false;
+
+  std::function<void(const YAML::Node &, const std::string &)> walk =
+      [&](const YAML::Node &node, const std::string &prefix) {
+        if (!node.IsMap()) {
+          return;
+        }
+        for (const auto &kv : node) {
+          if (!kv.first.IsScalar()) {
+            continue;
+          }
+          const std::string key = kv.first.Scalar();
+          const std::string path = prefix.empty() ? key : prefix + "@@" + key;
+
+          if (kv.second.IsMap()) {
+            walk(kv.second, path);
+            continue;
+          }
+          if (!kv.second.IsScalar()) {
+            continue;
+          }
+
+          auto schema = find_cfg_node(&validator, path);
+          if (schema == nullptr) {
+            rpcsx_android.error("customConfigImport: unknown key '%s' skipped",
+                                path);
+            continue;
+          }
+
+          const std::string scalar = kv.second.Scalar();
+          if (!schema->from_string(scalar, false)) {
+            rpcsx_android.error(
+                "customConfigImport: value '%s' rejected for key '%s'", scalar,
+                path);
+            continue;
+          }
+
+          // Write the validated scalar into the sparse output tree.
+          const auto pathList = fmt::split(path, {"@@"});
+          YAML::Node cur;
+          cur.reset(yaml_root);
+          for (usz i = 0; i < pathList.size(); i++) {
+            if (i + 1 == pathList.size()) {
+              cur[pathList[i]] = scalar;
+              break;
+            }
+            YAML::Node next = cur[pathList[i]];
+            if (!next.IsMap()) {
+              cur[pathList[i]] = YAML::Node(YAML::NodeType::Map);
+              next.reset(cur[pathList[i]]);
+            }
+            cur.reset(next);
+          }
+          wrote_any = true;
+        }
+      };
+
+  walk(incoming, "");
+
+  if (!wrote_any) {
+    rpcsx_android.error("customConfigImport: no valid keys in preset for %s",
+                        serial);
+    return false;
+  }
+
+  ensure_custom_config_dir();
+  Emulator::SaveSettings(YAML::Dump(yaml_root) + "\n", std::string(serial));
+  return _rpcsx_customConfigExists(serial);
+}
+
 extern "C" std::string _rpcsx_systemInfo() {
   std::string result;
 
+  // Their 17eec602f: show the CPU the JIT actually targets (resolved from the
+  // now-empty config via MIDR detection), not the raw empty setting, so it is
+  // clear which core codegen is tuned for.
   fmt::append(result, "%s\n\nLLVM CPU: %s\n\n", utils::get_system_info(),
-              fallback_cpu_detection());
+              jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string()));
 
   {
     vk::instance device_enum_context;
@@ -2646,8 +3592,434 @@ extern "C" bool _rpcsx_settingsSet(std::string_view path,
   return true;
 }
 
+// --- Android power / thermal / performance-hint bridge ----------------------
+// All add-only JNI entry points (their f7851ac47, 1018103856, ad937b86e,
+// 54abf07bd, a9583d69d, 603aaa2ce, d40ffcb7c, bd79dbef3, 7013a4bd8, 6b38bc665,
+// b666063e2). The core-side state they drive already exists in
+// Emu/system_utils.hpp, rx/asm.hpp and thread_ctrl.
+
+// Android low-RAM guard. Caps concurrent LLVM compile threads at the effective
+// thread-pool level (see rpcs3::utils::get_compile_thread_cap), so it survives
+// per-game custom configs that the global "Max LLVM Compile Threads" cannot. The
+// app derives the value from device RAM. 0 (or <=0) disables the cap.
+extern "C" void _rpcsx_setMaxCompileThreads(int count) {
+  rpcs3::utils::set_compile_thread_cap(count > 0 ? static_cast<u32>(count) : 0u);
+}
+
+// Android LLVM compile MEMORY budget in bytes (the concurrent-compile RAM
+// ceiling the PPU compiler uses instead of the unreliable get_total_memory()/3).
+// The app derives a device-scaled, usable figure from ActivityManager. <=0 =
+// unset (core falls back to its corrected internal cap).
+extern "C" void _rpcsx_setCompileMemoryBudget(long long bytes) {
+  rpcs3::utils::set_compile_memory_budget(bytes > 0 ? static_cast<u64>(bytes)
+                                                    : 0ull);
+  rpcsx_android.notice("Compile memory budget set to %lld bytes", bytes);
+}
+
+// Android battery-saver toggle (see rpcs3::utils::get_power_save_mode).
+extern "C" void _rpcsx_setPowerSaveMode(int on) {
+  rpcs3::utils::set_power_save_mode(on != 0);
+  rpcsx_android.notice("Power: battery-saver mode %s", on ? "ON" : "off");
+}
+
+// Android thermal throttle: frame-rate cap (fps) when the SoC is hot; 0 = none.
+extern "C" void _rpcsx_setThermalFrameCap(float fps) {
+  rpcs3::utils::set_thermal_frame_cap(fps);
+  rpcsx_android.notice("Power: thermal frame cap %.0f fps", fps);
+}
+
+// Android ADPF feed (read side): the presenting RSX thread's OS tid (0 until the
+// RSX thread has flipped once) and this frame's actual CPU work in nanoseconds.
+// The app polls these to drive a PerformanceHintManager session. Advisory only.
+extern "C" int _rpcsx_getRsxThreadTid() {
+  return rpcs3::utils::get_rsx_thread_tid();
+}
+
+extern "C" long long _rpcsx_getFrameWorkNanos() {
+  return static_cast<long long>(rpcs3::utils::get_frame_work_ns());
+}
+
+extern "C" long long _rpcsx_getFramePeriodNanos() {
+  return static_cast<long long>(rpcs3::utils::get_frame_period_ns());
+}
+
+// Android experimental: bias PPU/SPU/RSX onto the big CPU cluster.
+extern "C" void _rpcsx_setCpuAffinityMode(int on) {
+  thread_ctrl::set_android_affinity(on != 0);
+  rpcsx_android.notice("Power: big-cluster CPU affinity %s", on ? "ON" : "off");
+}
+
+// Android experimental: low-power WFE waiting (RSX semaphore park).
+extern "C" void _rpcsx_setWfeMode(int on) {
+  rx::set_wfe_mode(on != 0);
+  rpcsx_android.notice("Power: low-power WFE waiting %s", on ? "ON" : "off");
+}
+
+extern "C" void _rpcsx_setSmoothShaders(int on) {
+  rpcs3::utils::set_smooth_shaders(on != 0);
+  rpcsx_android.notice("Video: smooth shaders (async interpreter) %s",
+                       on ? "ON" : "off");
+}
+
+// Android GPU turbo (max Adreno clocks). The KGSL ioctl is app-only
+// (adrenotools), so the core stores the flag and calls back into an
+// app-registered handler. This lets the in-game home-menu toggle drive the exact
+// same path as the app's startup apply.
+extern "C" void _rpcsx_setGpuTurbo(int on) {
+  rpcs3::utils::set_gpu_turbo(on != 0);
+  rpcsx_android.notice("GPU: turbo (max clocks) %s", on ? "ON" : "off");
+}
+
+extern "C" void _rpcsx_registerGpuTurboHandler(void (*handler)(bool)) {
+  rpcs3::utils::set_gpu_turbo_handler(handler);
+}
+
 extern "C" std::string _rpcsx_getVersion() {
   return rx::getVersion().toString();
+}
+
+// ---------------------------------------------------------------------------
+// RPCN JNI bridge (their f153a5066, f52b6c534, 52ba13982, 3e8b545e4, 3656ec8f9,
+// 988d34fac, c1d86e9e4). The app drives the PSN/RPCN account + host
+// configuration through these. Network-blocking calls (create account, resend
+// token, test connection) are invoked off the UI thread by the app side.
+// ---------------------------------------------------------------------------
+
+namespace {
+// Minimal JSON string escaper for the config getters. npid/host/token rarely
+// contain quotes or backslashes, but escape them to keep the JSON well-formed.
+static std::string rpcn_json_escape(std::string_view in) {
+  std::string out;
+  out.reserve(in.size() + 2);
+  for (char c : in) {
+    switch (c) {
+    case '\\':
+      out += "\\\\";
+      break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      out += c;
+      break;
+    }
+  }
+  return out;
+}
+
+// Human-readable text for an RPCN account/login ErrorType. Mirrors the upstream
+// error_to_explanation table (rpcn_client.cpp), which is not exported.
+static std::string rpcn_error_to_string(rpcn::ErrorType error) {
+  switch (error) {
+  case rpcn::ErrorType::NoError:
+    return "";
+  case rpcn::ErrorType::Malformed:
+    return "Sent packet was malformed.";
+  case rpcn::ErrorType::Invalid:
+    return "Sent command was invalid.";
+  case rpcn::ErrorType::InvalidInput:
+    return "Sent data was invalid.";
+  case rpcn::ErrorType::TooSoon:
+    return "Request happened too soon, please wait before retrying.";
+  case rpcn::ErrorType::LoginError:
+    return "Unknown login error.";
+  case rpcn::ErrorType::LoginAlreadyLoggedIn:
+    return "User is already logged in.";
+  case rpcn::ErrorType::LoginInvalidUsername:
+    return "Login error: invalid username.";
+  case rpcn::ErrorType::LoginInvalidPassword:
+    return "Login error: invalid password.";
+  case rpcn::ErrorType::LoginInvalidToken:
+    return "Login error: invalid token.";
+  case rpcn::ErrorType::CreationError:
+    return "Error creating an account.";
+  case rpcn::ErrorType::CreationExistingUsername:
+    return "An account with that username already exists.";
+  case rpcn::ErrorType::CreationBannedEmailProvider:
+    return "This email provider is banned.";
+  case rpcn::ErrorType::CreationExistingEmail:
+    return "An account with that email already exists.";
+  case rpcn::ErrorType::DbFail:
+    return "A database query failed on the server.";
+  case rpcn::ErrorType::EmailFail:
+    return "An email action failed on the server.";
+  case rpcn::ErrorType::NotFound:
+    return "Requested object was not found.";
+  case rpcn::ErrorType::Unauthorized:
+    return "Unauthorized operation.";
+  default:
+    return "RPCN error.";
+  }
+}
+} // namespace
+
+// Return current RPCN config as JSON {host, npid, password, token}.
+extern "C" std::string _rpcsx_rpcnGetConfig() {
+  g_cfg_rpcn.load();
+  std::string out = "{\"host\":\"";
+  out += rpcn_json_escape(g_cfg_rpcn.get_host());
+  out += "\",\"npid\":\"";
+  out += rpcn_json_escape(g_cfg_rpcn.get_npid());
+  out += "\",\"password\":\"";
+  // Their 52ba13982 - intentionally empty: the stored password is a derived hash
+  // (PBKDF2-SHA3), not the raw password. Returning it would let the UI re-submit
+  // and re-derive it (double hash -> login fails), and needlessly echoes the
+  // secret hash back.
+  out += "\",\"token\":\"";
+  out += rpcn_json_escape(g_cfg_rpcn.get_token());
+  out += "\"}";
+  return out;
+}
+
+extern "C" void _rpcsx_rpcnSetCredentials(std::string_view npid,
+                                          std::string_view password,
+                                          std::string_view token) {
+  g_cfg_rpcn.set_npid(npid);
+  // Their f52b6c534: derive the password client-side (PBKDF2-SHA3) before
+  // storing/sending; the RPCN server only accepts the derived form. An empty
+  // password means the user did not retype it, so keep the existing stored
+  // (already-derived) value.
+  if (!password.empty()) {
+    g_cfg_rpcn.set_password(rpcn::derive_password(password));
+  }
+  g_cfg_rpcn.set_token(token);
+  g_cfg_rpcn.save();
+}
+
+// Return host list as JSON [{description, host}].
+extern "C" std::string _rpcsx_rpcnGetHosts() {
+  g_cfg_rpcn.load();
+  const auto hosts = g_cfg_rpcn.get_hosts();
+  std::string out = "[";
+  bool first = true;
+  for (const auto &[description, host] : hosts) {
+    if (!first) {
+      out += ",";
+    }
+    first = false;
+    out += "{\"description\":\"";
+    out += rpcn_json_escape(description);
+    out += "\",\"host\":\"";
+    out += rpcn_json_escape(host);
+    out += "\"}";
+  }
+  out += "]";
+  return out;
+}
+
+extern "C" bool _rpcsx_rpcnAddHost(std::string_view description,
+                                   std::string_view host) {
+  const bool added = g_cfg_rpcn.add_host(description, host);
+  if (added) {
+    g_cfg_rpcn.save();
+  }
+  return added;
+}
+
+extern "C" bool _rpcsx_rpcnRemoveHost(std::string_view host) {
+  auto hosts = g_cfg_rpcn.get_hosts();
+  // Never remove the last/only entry: RPCN always needs a server to point at.
+  if (hosts.size() <= 1) {
+    return false;
+  }
+
+  // set_hosts is private; del_host removes by (description, host) pair.
+  bool removed = false;
+  for (const auto &[description, h] : hosts) {
+    if (h == host) {
+      if (g_cfg_rpcn.del_host(description, h)) {
+        removed = true;
+      }
+    }
+  }
+  if (removed) {
+    g_cfg_rpcn.save();
+  }
+  return removed;
+}
+
+extern "C" void _rpcsx_rpcnSetActiveHost(std::string_view host) {
+  g_cfg_rpcn.set_host(host);
+  g_cfg_rpcn.save();
+  // Their f52b6c534: drop any live connection so the next test/sign-in
+  // reconnects to the NEW host instead of silently reusing the cached
+  // connection to the old one.
+  if (auto client = rpcn::rpcn_client::get_instance(0)) {
+    client->server_infos_updated();
+  }
+}
+
+extern "C" std::string _rpcsx_rpcnGetActiveHost() {
+  g_cfg_rpcn.load();
+  return g_cfg_rpcn.get_host();
+}
+
+// Create an RPCN account. Returns "" on success, else a human error string.
+// The country arg is collected by the UI for future use; create_user has no
+// country parameter so it is intentionally not forwarded.
+extern "C" std::string _rpcsx_rpcnCreateAccount(std::string_view npid,
+                                                std::string_view password,
+                                                std::string_view online_name,
+                                                std::string_view email,
+                                                std::string_view country) {
+  (void)country;
+  g_cfg_rpcn.load();
+
+  auto client = rpcn::rpcn_client::get_instance(0);
+  if (!client) {
+    return "Failed to obtain RPCN client instance.";
+  }
+  // clear any stale failure so this attempt reconnects
+  client->clear_failure_state();
+
+  if (auto state = client->wait_for_connection();
+      state != rpcn::rpcn_state::failure_no_failure) {
+    return rpcn::rpcn_state_to_string(state);
+  }
+
+  // Derive once; create_user and the stored credential must use the same value.
+  const std::string derived = rpcn::derive_password(password);
+  // Their 988d34fac: match upstream rpcs3qt and send the default avatar URL, not
+  // an empty string, so the create packet is identical to the validated desktop
+  // client.
+  const auto error = client->create_user(
+      npid, derived, online_name,
+      "https://rpcs3.net/cdn/netplay/DefaultAvatar.png", email);
+  if (error != rpcn::ErrorType::NoError) {
+    return rpcn_error_to_string(error);
+  }
+
+  // Persist credentials (derived password) so the user can verify the token.
+  g_cfg_rpcn.set_npid(npid);
+  g_cfg_rpcn.set_password(derived);
+  g_cfg_rpcn.save();
+  return "";
+}
+
+// Resend the account verification token. Returns "" on success, else an error.
+extern "C" std::string _rpcsx_rpcnResendToken() {
+  g_cfg_rpcn.load();
+  const std::string npid = g_cfg_rpcn.get_npid();
+  const std::string password = g_cfg_rpcn.get_password();
+
+  auto client = rpcn::rpcn_client::get_instance(0);
+  if (!client) {
+    return "Failed to obtain RPCN client instance.";
+  }
+  client->clear_failure_state();
+
+  if (auto state = client->wait_for_connection();
+      state != rpcn::rpcn_state::failure_no_failure) {
+    return rpcn::rpcn_state_to_string(state);
+  }
+
+  const auto error = client->resend_token(npid, password);
+  if (error != rpcn::ErrorType::NoError) {
+    return rpcn_error_to_string(error);
+  }
+  return "";
+}
+
+// Their 988d34fac. Persistent strong ref to the RPCN client. The singleton is
+// held via a weak_ptr, so without a strong ref it is destroyed the instant a JNI
+// call returns - which is why the live status read "offline" even right after a
+// successful connection (the connected client was already gone). Holding a ref
+// while online is enabled keeps the authenticated connection alive for the
+// status poll, and lets a subsequently-booted game's NP handler reuse it.
+static std::mutex g_rpcn_persistent_mutex;
+static std::shared_ptr<rpcn::rpcn_client> g_rpcn_persistent;
+
+static void rpcn_hold(std::shared_ptr<rpcn::rpcn_client> client) {
+  std::lock_guard lock(g_rpcn_persistent_mutex);
+  g_rpcn_persistent = std::move(client);
+}
+
+static void rpcn_release() {
+  std::lock_guard lock(g_rpcn_persistent_mutex);
+  g_rpcn_persistent.reset();
+}
+
+// Test the RPCN connection + authentication. Returns "" if both succeed, else
+// the human string for the failing state. On success the connection is held
+// alive so the status indicator reflects it (and a later game reuses it) instead
+// of dropping immediately.
+extern "C" std::string _rpcsx_rpcnTestConnection() {
+  auto client = rpcn::rpcn_client::get_instance(0);
+  if (!client) {
+    return "Failed to obtain RPCN client instance.";
+  }
+  client->clear_failure_state();
+
+  if (auto state = client->wait_for_connection();
+      state != rpcn::rpcn_state::failure_no_failure) {
+    return rpcn::rpcn_state_to_string(state);
+  }
+
+  if (auto state = client->wait_for_authentified();
+      state != rpcn::rpcn_state::failure_no_failure) {
+    return rpcn::rpcn_state_to_string(state);
+  }
+
+  // keep the now-connected client alive for the live status indicator
+  rpcn_hold(client);
+  return "";
+}
+
+// Enable/disable RPCN. Enable sets PSN=RPCN and Internet=enabled; disable sets
+// both offline. Persisted via the same path the settings JNI uses.
+extern "C" void _rpcsx_rpcnSetEnabled(int enabled) {
+  if (enabled) {
+    g_cfg.net.psn_status.set(np_psn_status::psn_rpcn);
+    g_cfg.net.net_active.set(np_internet_status::enabled);
+    // create + hold a live client (the app then connects it)
+    rpcn_hold(rpcn::rpcn_client::get_instance(0));
+  } else {
+    // Their c1d86e9e4: disable both PSN and Internet so the live config is fully
+    // offline (symmetric with the enable path), and gracefully tear down any
+    // live session so disabling takes effect immediately instead of only at the
+    // next game boot. NOTE: a per-game custom config that pins net status still
+    // overrides the global config at game boot, so a game set online via its
+    // per-game config keeps reconnecting until that per-game online setting is
+    // also cleared (global-authoritative-over-per-game is a separate change).
+    g_cfg.net.psn_status.set(np_psn_status::disabled);
+    g_cfg.net.net_active.set(np_internet_status::disabled);
+    rpcn::rpcn_client::terminate_active_session();
+    // drop the persistent ref so the offline client is fully torn down
+    rpcn_release();
+  }
+  Emulator::SaveSettings(g_cfg.to_string(), "");
+  rpcsx_android.notice("RPCN: %s", enabled ? "enabled" : "disabled");
+}
+
+extern "C" bool _rpcsx_rpcnIsEnabled() {
+  return g_cfg.net.psn_status.get() == np_psn_status::psn_rpcn;
+}
+
+// Their 3656ec8f9. Passive, non-blocking RPCN connection status for a live
+// indicator. Reads the state of an existing session WITHOUT creating a client or
+// reconnecting (unlike _rpcsx_rpcnTestConnection). Returns "online" (connected +
+// authenticated), "connecting" (socket up, not yet authed), or "offline".
+extern "C" std::string _rpcsx_rpcnLiveStatus() {
+  auto client = rpcn::rpcn_client::get_active_instance();
+  if (!client) {
+    return "offline";
+  }
+  if (client->is_authentified()) {
+    return "online";
+  }
+  if (client->is_connected()) {
+    return "connecting";
+  }
+  return "offline";
 }
 
 extern "C" void *_rpcsx_setCustomDriver(void *driverHandle) {

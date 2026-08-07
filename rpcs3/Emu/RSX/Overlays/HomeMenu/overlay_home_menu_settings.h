@@ -314,6 +314,41 @@ namespace rsx
 						return page_navigation::stay;
 					});
 			}
+
+			// Android fork: toggle one of our live runtime flags (battery saver, WFE,
+			// smooth shaders, E-core affinity) straight from the in-game home menu.
+			// These are not cfg settings, so they are driven by getter/setter callbacks
+			// instead of add_checkbox's cfg::_bool binding.
+			void add_clanker_checkbox(std::function<bool()> getter, std::function<void(bool)> setter, const std::string& text)
+			{
+				std::unique_ptr<overlay_element> elem = std::make_unique<home_menu_clanker_checkbox>(getter, text);
+				elem->set_size(this->w, menu_entry_height);
+
+				add_item(elem, [this, getter, setter](pad_button btn) -> page_navigation
+				{
+					if (!getter || !setter)
+					{
+						return page_navigation::stay;
+					}
+
+					switch (btn)
+					{
+					case pad_button::cross:
+					case pad_button::select:
+					{
+						const bool value = !getter();
+						setter(value);
+						rsx_log.notice("User toggled Clanker checkbox in '%s' to %d", title, value);
+						refresh();
+						break;
+					}
+					default:
+						break;
+					}
+
+					return page_navigation::stay;
+				});
+			}
 		};
 
 		struct home_menu_settings_audio : public home_menu_settings_page
@@ -349,6 +384,11 @@ namespace rsx
 		struct home_menu_settings_debug : public home_menu_settings_page
 		{
 			home_menu_settings_debug(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+		};
+
+		struct home_menu_settings_clanker : public home_menu_settings_page
+		{
+			home_menu_settings_clanker(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
 		};
 	} // namespace overlays
 } // namespace rsx

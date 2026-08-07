@@ -171,6 +171,7 @@ void GLVertexDecompilerThread::insertMainStart(std::stringstream& OS)
 	glsl::shader_properties properties2{};
 	properties2.domain = glsl::glsl_vertex_program;
 	properties2.require_lit_emulation = properties.has_lit_op;
+	properties2.require_clip_plane_functions = true;
 	properties2.emulate_zclip_transform = true;
 	properties2.emulate_depth_clip_only = dev_caps.NV_depth_buffer_float_supported;
 	properties2.low_precision_tests = dev_caps.vendor_NVIDIA;

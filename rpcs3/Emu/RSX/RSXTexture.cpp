@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "RSXTexture.h"
+#include "Common/TextureUtils.h"
 
 #include "rsx_utils.h"
 #include "Common/TextureUtils.h"

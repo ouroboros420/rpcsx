@@ -1,4 +1,5 @@
 #include "KernelContext.hpp"
+#include "rx/print.hpp"
 #include "sys/sysproto.hpp"
 #include "thread/Process.hpp"
 #include "thread/Thread.hpp"
@@ -77,7 +78,7 @@ SysResult kern_sysctl(Thread *thread, ptr<sint> name, uint namelen,
 
   enum sysctl_vm_budgets_ {
     mlock_total = 1000,
-    mlock_avail = 1000,
+    mlock_avail,
   };
 
   struct ProcInfo {
@@ -749,9 +750,8 @@ SysResult kern_sysctl(Thread *thread, ptr<sint> name, uint namelen,
           return ErrorCode::INVAL;
         }
 
-        std::printf("Reporting stack at %p\n", thread->stackEnd);
-        *(ptr<void> *)old = thread->stackEnd;
-        return {};
+        rx::println(stderr, "Reporting stack at {:x}", thread->stackEnd);
+        return uwrite(ptr<uint64_t>(old), thread->stackEnd);
       }
 
       case sysctl_kern::smp_cpus:

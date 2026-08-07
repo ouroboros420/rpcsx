@@ -29,6 +29,13 @@ namespace rsx
 
 	extern atomic_t<u64> g_rsx_shared_tag;
 
+	// Lightweight per-interval perf counters surfaced in the throttled Perf log to attribute
+	// frame hitches to their sync source (ZCULL occlusion readbacks vs texture/WCB readback
+	// faults). Incremented at the readback sites, read+reset each interval by the perf
+	// overlay. Cheap relaxed atomics; only meaningful when the overlay runs. (ouroboros 116133fbf)
+	inline atomic_t<u32> g_perf_zcull_readbacks{0};
+	inline atomic_t<u32> g_perf_texture_readbacks{0};
+
 	enum class problem_severity : u8
 	{
 		low,

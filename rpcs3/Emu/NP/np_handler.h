@@ -20,7 +20,8 @@
 
 namespace np
 {
-	constexpr usz MAX_SceNpMatchingAttr_list_SIZE = ((SCE_NP_MATCHING_ATTR_ID_MAX * 2) * sizeof(SceNpMatchingAttr)) + (SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_BIG) +
+	constexpr usz MAX_SceNpMatchingAttr_list_SIZE = ((SCE_NP_MATCHING_ATTR_ID_MAX * 2) * sizeof(SceNpMatchingAttr))
+		+ (SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_BIG) +
 	                                                +((SCE_NP_MATCHING_ATTR_ID_MAX - SCE_NP_MATCHING_ATTR_BIN_BIG_SIZE_ID_MAX) * SCE_NP_MATCHING_ATTR_BIN_MAX_SIZE_SMALL);
 	constexpr usz MAX_MEMBERS_PER_ROOM = 64;
 	constexpr usz MAX_ROOMS_PER_GET_ROOM_LIST = 20;

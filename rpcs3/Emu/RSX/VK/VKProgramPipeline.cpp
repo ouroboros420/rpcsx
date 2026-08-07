@@ -265,17 +265,26 @@ namespace vk
 			create_pipeline_layout();
 			ensure(m_pipeline_layout);
 
+			// Shared, disk-backed driver pipeline cache (see render_device::load_pipeline_cache).
+			// Upstream-of-this-fork the create calls lived in VKPipelineCompiler.cpp; here they moved
+			// into program::link, so the cache has to be consumed from this site or it is inert.
+			// VK_NULL_HANDLE is the legal "no cache" value and is exactly what was passed before,
+			// so a failed/absent cache degrades to the previous behavior. The cache is created
+			// WITHOUT VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT, so the driver
+			// internally synchronizes it against the parallel pipe_compiler worker threads.
+			const VkPipelineCache pipeline_cache = g_render_device ? g_render_device->get_pipeline_cache() : VK_NULL_HANDLE;
+
 			if (is_graphics_pipe)
 			{
 				VkGraphicsPipelineCreateInfo create_info = *p_graphics_info;
 				create_info.layout = m_pipeline_layout;
-				CHECK_RESULT(VK_GET_SYMBOL(vkCreateGraphicsPipelines)(m_device, nullptr, 1, &create_info, nullptr, &m_pipeline));
+				CHECK_RESULT(VK_GET_SYMBOL(vkCreateGraphicsPipelines)(m_device, pipeline_cache, 1, &create_info, nullptr, &m_pipeline));
 			}
 			else
 			{
 				VkComputePipelineCreateInfo create_info = *p_compute_info;
 				create_info.layout = m_pipeline_layout;
-				CHECK_RESULT(VK_GET_SYMBOL(vkCreateComputePipelines)(m_device, nullptr, 1, &create_info, nullptr, &m_pipeline));
+				CHECK_RESULT(VK_GET_SYMBOL(vkCreateComputePipelines)(m_device, pipeline_cache, 1, &create_info, nullptr, &m_pipeline));
 			}
 
 			m_linked = true;

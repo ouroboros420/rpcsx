@@ -32,11 +32,11 @@ struct Thread final {
   uint64_t retval[2]{};
   void *context{};
   kvector<void *> altStack;
-  ptr<void> stackStart;
-  ptr<void> stackEnd;
+  uint64_t stackStart;
+  uint64_t stackEnd;
   uint64_t fsBase{};
   uint64_t gsBase{};
-  rx::StaticString<32> name;
+  rx::StaticString<31> name;
 
   cpuset affinity{~0u};
   SigSet sigMask = {0x7fff'ffff, ~0u, ~0u, ~0u};
@@ -97,6 +97,7 @@ struct Thread final {
 };
 
 Thread *createThread(Process *process, std::string_view name);
+uintptr_t getCallerAddress(Thread *thread);
 
 extern thread_local Thread *g_currentThread;
 

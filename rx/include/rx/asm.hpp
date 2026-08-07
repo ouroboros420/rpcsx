@@ -267,7 +267,9 @@ constexpr u32 clz128(u128 arg) {
 
 inline void pause() {
 #if defined(ARCH_ARM64)
-  __asm__ volatile("yield");
+  // 'isb' actually stalls the pipeline on the in-order/low-SMT cores in phones,
+  // unlike 'yield' which is close to a no-op there. Matches upstream.
+  __asm__ volatile("isb" ::: "memory");
 #elif defined(_M_X64)
   _mm_pause();
 #elif defined(ARCH_X64)
@@ -299,13 +301,70 @@ inline void wait_for_event() {
 
 inline void yield() { std::this_thread::yield(); }
 
+// The hardware clock on many arm timers runs south of 100MHz, while RPCS3's
+// busy waits were written assuming an x86 timer around 3GHz. On e.g. the
+// Snapdragon 8 Gen 2 cntvct_el0 ticks at 19.2MHz, so a busy_wait sized in
+// "x86 cycles" spun for tens to hundreds of microseconds instead of nanoseconds
+// - pathological under contention and far worse on slower phones. Scale the
+// cycle count to the actual timer frequency (see init_arm_timer_scale).
+#if defined(ARCH_ARM64)
+inline u64 arm_timer_scale = 1;
+
+inline void init_arm_timer_scale() {
+  u64 freq = 0;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+
+  // Scale the hardware timer toward a 3GHz-equivalent baseline.
+  u64 timer_scale = freq / 30000000;
+  if (timer_scale)
+    arm_timer_scale = timer_scale;
+}
+#endif
+
 // Synchronization helper (cache-friendly busy waiting)
 inline void busy_wait(usz cycles = 3000) {
+#if defined(ARCH_ARM64)
+  const u64 stop = get_tsc() + ((cycles / 100) * arm_timer_scale);
+#else
   const u64 stop = get_tsc() + cycles;
+#endif
   do
     pause();
   while (get_tsc() < stop);
 }
+
+#if defined(ARCH_ARM64)
+// Opt-in low-power waiting (Android battery/thermal). Off by default.
+inline std::atomic<bool> g_use_wfe{false};
+inline void set_wfe_mode(bool on) { g_use_wfe.store(on, std::memory_order_relaxed); }
+inline bool wfe_enabled() { return g_use_wfe.load(std::memory_order_relaxed); }
+
+// Park the core on a 4-byte cacheline (ARMv8.0 ldaxr+wfe) until a write to that
+// line from any core clears the exclusive monitor, or a spurious event wakes WFE.
+// ONE park per call - the caller's loop must re-check the real condition and any
+// timeout afterwards (so recovery/test_stopped paths still run). Lost-wakeup-free:
+// it re-loads under the monitor and bails immediately if the line already changed
+// from `keep` (the raw 32-bit value the caller last observed). Compared as raw
+// bytes, so endianness is irrelevant - we only detect "did the line change".
+inline void wfe_park(const u32* addr, u32 keep)
+{
+  u32 v;
+  __asm__ volatile("ldaxr %w0, [%1]" : "=r"(v) : "r"(addr) : "memory");
+  if (v != keep)
+    return;
+  __asm__ volatile("wfe" ::: "memory");
+}
+
+// Broadcast an event to every core, waking any thread parked in wfe_park. WFE
+// sleeps on a watched cacheline, not on a thread's stop/state word, so a parked
+// thread won't observe a stop request on its own; the stop path SEVs so the
+// thread wakes, re-checks its loop condition (incl. test_stopped) and can exit.
+inline void send_event() { __asm__ volatile("sev" ::: "memory"); }
+#else
+inline void set_wfe_mode(bool /*on*/) {}
+inline bool wfe_enabled() { return false; }
+inline void send_event() {}
+#endif
 
 // Align to power of 2
 template <typename T, typename U>

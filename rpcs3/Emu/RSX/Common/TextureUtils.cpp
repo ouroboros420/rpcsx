@@ -8,7 +8,8 @@
 #include "rx/asm.hpp"
 #include "rx/align.hpp"
 
-// Unaligned u128 alias
+// Unaligned u128 alias: lets DXT block decoders read source data that is
+// not naturally u128-aligned without faulting on ARM.
 union x128
 {
 	u8 _u8[16];
@@ -236,43 +237,43 @@ namespace
 			if (std::is_same_v<T, U> && dst_pitch_in_block == width_in_block && words_per_block == 1 && !border)
 			{
 				rsx::convert_linear_swizzle_3d<T>(src.data(), dst.data(), width_in_block, row_count, depth);
-			return;
+				return;
 			}
 
-				u32 padded_width, padded_height;
-				if (border)
-				{
-					padded_width = rsx::next_pow2(width_in_block + border + border);
-					padded_height = rsx::next_pow2(row_count + border + border);
-				}
-				else
-				{
-					padded_width = width_in_block;
-					padded_height = row_count;
-				}
-
-				const u32 size_in_block = padded_width * padded_height * depth * 2;
-		rsx::simple_array<U, sizeof(u128)> tmp(size_in_block * words_per_block);
-
-		switch (const u16 block_size = words_per_block * sizeof(T))
-					{
-		case 1:
-			rsx::convert_linear_swizzle_3d<u8>(src.data(), tmp.data(), padded_width, padded_height, depth);
-			break;
-		case 2:
-			rsx::convert_linear_swizzle_3d<u16>(src.data(), tmp.data(), padded_width, padded_height, depth);
-			break;
-					case 4:
-					case 8:
-					case 16:
-			// Maximum block size on RSX is 4 bytes. Wider blocks are stored as multiple texels.
-			rsx::convert_linear_swizzle_3d<u32>(src.data(), tmp.data(), padded_width * (block_size / 4), padded_height, depth);
-						break;
-				}
-
-				std::span<const U> src_span = tmp;
-				copy_unmodified_block::copy_mipmap_level(dst, src_span, words_per_block, width_in_block, row_count, depth, border, dst_pitch_in_block, padded_width);
+			u32 padded_width, padded_height;
+			if (border)
+			{
+				padded_width = rsx::next_pow2(width_in_block + border + border);
+				padded_height = rsx::next_pow2(row_count + border + border);
 			}
+			else
+			{
+				padded_width = width_in_block;
+				padded_height = row_count;
+			}
+
+			const u32 size_in_block = padded_width * padded_height * depth * 2;
+			rsx::simple_array<U, sizeof(u128)> tmp(size_in_block * words_per_block);
+
+			switch (const u16 block_size = words_per_block * sizeof(T))
+			{
+			case 1:
+				rsx::convert_linear_swizzle_3d<u8>(src.data(), tmp.data(), padded_width, padded_height, depth);
+				break;
+			case 2:
+				rsx::convert_linear_swizzle_3d<u16>(src.data(), tmp.data(), padded_width, padded_height, depth);
+				break;
+			case 4:
+			case 8:
+			case 16:
+				// Maximum block size on RSX is 4 bytes. Wider blocks are stored as multiple texels.
+				rsx::convert_linear_swizzle_3d<u32>(src.data(), tmp.data(), padded_width * (block_size / 4), padded_height, depth);
+				break;
+			}
+
+			std::span<const U> src_span = tmp;
+			copy_unmodified_block::copy_mipmap_level(dst, src_span, words_per_block, width_in_block, row_count, depth, border, dst_pitch_in_block, padded_width);
+		}
 	};
 
 	struct copy_unmodified_block_vtc
@@ -521,14 +522,14 @@ namespace
 
 	struct copy_decoded_bc2_block
 	{
-	static void copy_mipmap_level(std::span<u32> dst, std::span<const x128> src, u16 width_in_block, u32 row_count, u16 depth, u32 dst_pitch_in_block, u32 src_pitch_in_block)
+		static void copy_mipmap_level(std::span<u32> dst, std::span<const x128> src, u16 width_in_block, u32 row_count, u16 depth, u32 dst_pitch_in_block, u32 src_pitch_in_block)
 		{
 			u32 src_offset = 0, dst_offset = 0, destinationPitch = dst_pitch_in_block * 4;
 			for (u32 row = 0; row < row_count * depth; row++)
 			{
 				for (u32 col = 0; col < width_in_block; col++)
 				{
-				const u8* compressedBlock = src[src_offset + col]._u8;
+					const u8* compressedBlock = src[src_offset + col]._u8;
 					u8* decompressedBlock = reinterpret_cast<u8*>(&dst[dst_offset + col * 4]);
 					bcdec_bc2(compressedBlock, decompressedBlock, destinationPitch);
 				}
@@ -541,14 +542,14 @@ namespace
 
 	struct copy_decoded_bc3_block
 	{
-	static void copy_mipmap_level(std::span<u32> dst, std::span<const x128> src, u16 width_in_block, u32 row_count, u16 depth, u32 dst_pitch_in_block, u32 src_pitch_in_block)
+		static void copy_mipmap_level(std::span<u32> dst, std::span<const x128> src, u16 width_in_block, u32 row_count, u16 depth, u32 dst_pitch_in_block, u32 src_pitch_in_block)
 		{
 			u32 src_offset = 0, dst_offset = 0, destinationPitch = dst_pitch_in_block * 4;
 			for (u32 row = 0; row < row_count * depth; row++)
 			{
 				for (u32 col = 0; col < width_in_block; col++)
 				{
-				const u8* compressedBlock = src[src_offset + col]._u8;
+					const u8* compressedBlock = src[src_offset + col]._u8;
 					u8* decompressedBlock = reinterpret_cast<u8*>(&dst[dst_offset + col * 4]);
 					bcdec_bc3(compressedBlock, decompressedBlock, destinationPitch);
 				}
@@ -825,6 +826,16 @@ std::vector<rsx::subresource_layout> get_subresources_layout_impl(const RsxTextu
 	const auto [h, depth, layer] = get_height_depth_layer(texture);
 	const u32 texaddr = rsx::get_address(texture.offset(), texture.location());
 
+	// Their 62d46f10f1ff: a stale/garbage draw (FIFO desync) can bind a texture with a bad
+	// offset. Skip it (empty layout -> upload skipped) if the source is unmapped, rather than
+	// reading from unmapped memory and faulting the RSX thread.
+	if (!texaddr || !vm::check_addr(texaddr, vm::page_readable)) [[unlikely]]
+	{
+		rsx_log.error("Skipped texture with out-of-bounds offset (addr=0x%x, fmt=0x%x, %ux%u, pitch=%u)",
+			texaddr, texture.format(), texture.width(), h, texture.pitch());
+		return {};
+	}
+
 	return get_subresources_layout_impl(
 		vm::_ptr<const std::byte>(texaddr),
 		texture.format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN),
@@ -1096,7 +1107,7 @@ namespace rsx
 				break;
 			}
 
-				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u64>(), src_layout.data.as_span<const u64>(), 1, w, h, depth, 0, get_row_pitch_in_block<u64>(w, caps.alignment), src_layout.pitch_in_block);
+			copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u64>(), src_layout.data.as_span<const u64>(), 1, w, h, depth, 0, get_row_pitch_in_block<u64>(w, caps.alignment), src_layout.pitch_in_block);
 			break;
 		}
 
@@ -1125,11 +1136,13 @@ namespace rsx
 				// PS3 uses the Nvidia VTC memory layout for compressed 3D textures.
 				// This is only supported using Nvidia OpenGL.
 				// Remove the VTC tiling to support ATI and Vulkan.
+				// Their 37821f3f6b94: the u128 span cast asserts natural alignment; a PS3 mip that is
+				// not 16-byte aligned must go through the byte-aligned x128 alias instead (ARM).
 				if (src_layout.data.is_naturally_aligned<u128>())
 				{
-				copy_unmodified_block_vtc::copy_mipmap_level(dst_buffer.as_span<u128>(), src_layout.data.as_span<const u128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
+					copy_unmodified_block_vtc::copy_mipmap_level(dst_buffer.as_span<u128>(), src_layout.data.as_span<const u128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
 					break;
-			}
+				}
 
 				copy_unmodified_block_vtc::copy_mipmap_level(dst_buffer.as_span<x128>(), src_layout.data.as_span<const x128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
 				break;
@@ -1141,9 +1154,9 @@ namespace rsx
 				// We need to compress the 2D-planar DXT input into a VTC output
 				if (src_layout.data.is_naturally_aligned<u128>())
 				{
-				copy_linear_block_to_vtc::copy_mipmap_level(dst_buffer.as_span<u128>(), src_layout.data.as_span<const u128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
+					copy_linear_block_to_vtc::copy_mipmap_level(dst_buffer.as_span<u128>(), src_layout.data.as_span<const u128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
 					break;
-			}
+				}
 
 				copy_linear_block_to_vtc::copy_mipmap_level(dst_buffer.as_span<x128>(), src_layout.data.as_span<const x128>(), w, h, depth, get_row_pitch_in_block<u128>(w, caps.alignment), src_layout.pitch_in_block);
 				break;
@@ -1173,63 +1186,63 @@ namespace rsx
 		if (!word_size)
 		{
 			return result;
-				}
+		}
 
-				result.element_size = word_size;
-				result.block_length = words_per_block;
+		result.element_size = word_size;
+		result.block_length = words_per_block;
 
-				bool require_cpu_swizzle = !caps.supports_hw_deswizzle && is_swizzled;
+		bool require_cpu_swizzle = !caps.supports_hw_deswizzle && is_swizzled;
 		bool require_cpu_byteswap = word_size > 1 && !caps.supports_byteswap;
 
-				if (is_swizzled && caps.supports_hw_deswizzle)
-				{
-						result.require_deswizzle = true;
-					}
+		if (is_swizzled && caps.supports_hw_deswizzle)
+		{
+			result.require_deswizzle = true;
+		}
 
-				if (!require_cpu_byteswap && !require_cpu_swizzle)
-				{
+		if (!require_cpu_byteswap && !require_cpu_swizzle)
+		{
 			result.require_swap = (word_size > 1);
 
-					if (caps.supports_zero_copy)
-					{
-						result.require_upload = true;
-						result.deferred_cmds = build_transfer_cmds(src_layout.data.data(), word_size * words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
-					}
+			if (caps.supports_zero_copy)
+			{
+				result.require_upload = true;
+				result.deferred_cmds = build_transfer_cmds(src_layout.data.data(), word_size * words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
+			}
 			else if (word_size == 1)
 			{
 				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u8>(), src_layout.data.as_span<const u8>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
 			}
-					else if (word_size == 2)
-					{
-						copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const u16>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
-					}
-					else if (word_size == 4)
-					{
-						copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const u32>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
-					}
+			else if (word_size == 2)
+			{
+				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const u16>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
+			}
+			else if (word_size == 4)
+			{
+				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const u32>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
+			}
 
 			return result;
-				}
+		}
 
 		if (word_size == 1)
-				{
+		{
 			ensure(is_swizzled);
 			copy_unmodified_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u8>(), src_layout.data.as_span<const u8>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block);
 		}
 		else if (word_size == 2)
-					{
-						if (is_swizzled)
-							copy_unmodified_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block);
-						else
-							copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
-					}
-					else if (word_size == 4)
-					{
-						if (is_swizzled)
-							copy_unmodified_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u32>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block);
-						else
-							copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u32>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
-					}
+		{
+			if (is_swizzled)
+				copy_unmodified_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block);
+			else
+				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u16>(), src_layout.data.as_span<const be_t<u16>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
+		}
+		else if (word_size == 4)
+		{
+			if (is_swizzled)
+				copy_unmodified_block_swizzled::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u32>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block);
+			else
+				copy_unmodified_block::copy_mipmap_level(dst_buffer.as_span<u32>(), src_layout.data.as_span<const be_t<u32>>(), words_per_block, w, h, depth, src_layout.border, dst_pitch_in_block, src_layout.pitch_in_block);
+		}
 
 		return result;
 	}

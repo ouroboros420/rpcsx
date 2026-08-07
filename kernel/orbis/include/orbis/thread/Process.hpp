@@ -7,8 +7,9 @@
 #include "../evf.hpp"
 #include "../ipmi.hpp"
 #include "../osem.hpp"
-#include "../thread/Thread.hpp"
-#include "../thread/types.hpp"
+#include "Thread.hpp"
+#include "rx/StaticString.hpp"
+#include "types.hpp"
 #include "ProcessState.hpp"
 #include "cpuset.hpp"
 #include "orbis/AppInfo.hpp"
@@ -20,6 +21,7 @@
 #include "rx/Serializer.hpp"
 #include "rx/SharedMutex.hpp"
 #include <optional>
+#include <type_traits>
 
 namespace orbis {
 class KernelContext;
@@ -93,6 +95,7 @@ struct Process final {
   std::optional<sint> exitStatus;
 
   std::uint32_t sdkVersion = 0;
+  bool allowDmemAliasing = false;
   std::uint64_t nextTlsSlot = 1;
   std::uint64_t lastTlsOffset = 0;
 
@@ -100,18 +103,16 @@ struct Process final {
   rx::RcIdMap<Semaphore, sint, 4097, 1> semMap;
   rx::RcIdMap<Module, ModuleHandle> modulesMap;
   rx::RcIdMap<Thread, lwpid_t> threadsMap;
-  rx::RcIdMap<orbis::File, sint> fileDescriptors;
+  rx::RcIdMap<orbis::File, FileDescriptor> fileDescriptors;
+
+  rx::AddressRange libkernelRange;
 
   // Named objects for debugging
   rx::shared_mutex namedObjMutex;
-  kmap<void *, kstring> namedObjNames;
+  kmap<void *, rx::StaticString<32>> namedObjNames;
   rx::OwningIdMap<NamedObjInfo, uint, 65535, 1> namedObjIds;
 
   kmap<std::int32_t, SigAction> sigActions;
-
-  // Named memory ranges for debugging
-  rx::shared_mutex namedMemMutex;
-  kmap<NamedMemoryRange, kstring> namedMem;
 
   // FIXME: implement process destruction
   void incRef() {}
@@ -126,6 +127,53 @@ struct Process final {
           ref) {
     return ref.get(storage);
   }
+
+  rx::StaticString<32> getNameOfObject(ptr<const void> addr);
+  Budget *getBudget() const;
+
+  template <typename Cb>
+    requires(alignof(Cb) <= 8 && sizeof(Cb) <= 64) &&
+            (std::is_same_v<std::invoke_result_t<Cb>, void> ||
+             (alignof(std::invoke_result_t<Cb>) <= 8 &&
+              sizeof(std::invoke_result_t<Cb>) <= 64))
+  std::invoke_result_t<Cb> invoke(Cb &&fn) {
+    auto constructObject = [](void *to, void *from) {
+      new (to) Cb(std::move(*reinterpret_cast<Cb *>(from)));
+    };
+
+    auto destroyObject = [](void *object) {
+      reinterpret_cast<Cb *>(object)->~Cb();
+    };
+
+    if constexpr (std::is_same_v<std::invoke_result_t<Cb>, void>) {
+      invokeImpl(
+          nullptr, nullptr, &fn, constructObject, destroyObject,
+          [](void *, void *fnPtr) { (*reinterpret_cast<Cb *>(fnPtr))(); });
+    } else {
+      alignas(std::invoke_result_t<Cb>) char
+          result[sizeof(std::invoke_result_t<Cb>)];
+      invokeImpl(
+          &result,
+          [](void *to, void *from) {
+            new (to) std::invoke_result_t<Cb>(
+                std::move(*reinterpret_cast<std::invoke_result_t<Cb> *>(from)));
+          },
+          &fn, constructObject, destroyObject,
+          [](void *result, void *fnPtr) {
+            new (result)
+                std::invoke_result_t<Cb>((*reinterpret_cast<Cb *>(fnPtr))());
+          });
+      return std::move(*reinterpret_cast<std::invoke_result_t<Cb> *>(result));
+    }
+  }
+
+  void invokeAsync(void (*fn)());
+
+private:
+  void invokeImpl(void *returnValue, void (*copyResult)(void *to, void *from),
+                  void *fnPtr, void (*constructObject)(void *to, void *from),
+                  void (*destroyObject)(void *to),
+                  void (*invokeImpl)(void *returnValue, void *fnPtr));
 };
 
 pid_t allocatePid();

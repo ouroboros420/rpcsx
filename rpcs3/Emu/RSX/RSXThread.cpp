@@ -15,6 +15,7 @@
 #include "RSXDisAsm.h"
 
 #include "Emu/System.h"
+#include "Emu/system_utils.hpp"
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/timers.hpp"
 #include "cellos/sys_event.h"
@@ -33,6 +34,10 @@
 #include <span>
 #include <thread>
 #include <unordered_set>
+
+#ifdef __ANDROID__
+#include <unistd.h> // ::gettid() for the ADPF performance-hint feed
+#endif
 
 class GSRender;
 
@@ -1108,7 +1113,9 @@ namespace rsx
 		// Raise priority above other threads
 		thread_ctrl::scoped_priority high_prio(+1);
 
-		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os)
+		// Android big-cluster affinity (opt-in) also needs the mask applied even when the
+		// scheduler mode is "os" - matches the CPUThread/RSXOffload gates (their 54abf07bd).
+		if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os || thread_ctrl::android_affinity_enabled())
 		{
 			thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
 		}
@@ -2204,6 +2211,32 @@ namespace rsx
 			// Set high word of the control mask to store point sprite control
 			current_fragment_program.texcoord_control_mask |= u32(m_ctx->register_state->point_sprite_control_mask()) << 16;
 		}
+
+#ifdef __ANDROID__
+		// Do not run the fragment alpha test / alpha-to-coverage in depth-only (shadow caster)
+		// passes. Both read col0, which is not reliably resolved for a depth-only pass
+		// (mrt_buffers_count == 0) in our fragment pipeline, so the test discards shadow-caster
+		// geometry that should have written depth - dropping the cast shadow of alpha-tested
+		// character parts (arms, weapon, shield, head/legs) while the opaque torso, which never
+		// alpha-tests, casts normally. The ROP rework that enabled alpha-tested vegetation is
+		// what started running this test in depth-only passes. Trade-off: alpha-tested geometry
+		// casts a solid (rather than cut-out) shadow. Color passes are untouched, so vegetation
+		// and all alpha-tested color rendering are unaffected. Validated on-device by the fork
+		// (Adreno/Turnip, their c1d86e9e4); gated to Android since desktop is unaffected.
+		//
+		// Premise re-verified against OUR base (real v0.0.42 Assembler decompiler), not just theirs:
+		// get_fragment_program_output_set(ctrl, mrt_count) in FragmentProgramDecompiler.cpp returns an
+		// EMPTY set when mrt_count == 0 and there is no depth export, so the ROP block gets no col0
+		// entry in its input_list and RegisterDependencyPass inserts no dependency barrier for r0/h0 -
+		// yet RSXROPEpilogue.glsl still reads col0.a under _ENABLE_ALPHA_TEST and
+		// _ENABLE_ALPHA_TO_COVERAGE_TEST. col0 really is unresolved here on this base too.
+		// Proper fix (NOT done here, wants on-device validation): seed that output set with col0 when
+		// ctrl carries the alpha-test / a2c bits, which would keep cut-out shadows instead of solid.
+		if (current_fragment_program.mrt_buffers_count == 0)
+		{
+			current_fragment_program.ctrl &= ~(RSX_SHADER_CONTROL_ALPHA_TEST | RSX_SHADER_CONTROL_ALPHA_TO_COVERAGE);
+		}
+#endif
 
 		// Check if framebuffer is actually an XRGB format and not a WZYX format
 		switch (m_ctx->register_state->surface_color())
@@ -3397,6 +3430,63 @@ namespace rsx
 			ensure(m_queued_flip.pop(buffer));
 		}
 
+#ifdef __ANDROID__
+		// ADPF feed (their 3d4ba6060): publish this frame's actual CPU work (wall interval
+		// minus the idle/limiter sleep), the flip-to-flip period and the presenting thread's
+		// OS tid so the app can drive Android's PerformanceHintManager. Measured at a fixed
+		// per-iteration point, so the previous iteration's frame-limiter sleep is captured in
+		// the idle delta and excluded.
+		//
+		// NOT purely advisory in this tree - do not delete as dead code. Consumers:
+		//   * rpcs3::utils::get_rsx_thread_tid / get_frame_work_ns - read over JNI by the app
+		//     (android/src/rpcsx-android.cpp) to size the PerformanceHintManager session.
+		//   * rpcs3::utils::get_frame_period_ns - read IN-CORE by the Android VK swapchain
+		//     (Emu/RSX/VK/vkutils/swapchain.cpp, the ANativeWindow_setFrameRate hint). That
+		//     path is gated on period_ns != 0, so before this producer existed it was inert;
+		//     with it live, a sustained cadence is pushed to SurfaceFlinger and can change the
+		//     negotiated panel refresh rate. Presentation-side behaviour change, Android only.
+		// The upstream fork's "publish only, reads nothing back" description predates that
+		// swapchain consumer - it does not hold here.
+		{
+			static thread_local u64 s_adpf_last_now = 0;
+			static thread_local u64 s_adpf_last_idle = 0;
+			static thread_local int s_adpf_tid = 0;
+			if (s_adpf_tid == 0)
+			{
+				s_adpf_tid = static_cast<int>(::gettid());
+			}
+			// Republish every flip (cheap relaxed store) so a recreated RSX thread overwrites a
+			// stale tid instead of leaving the app's hint session pointed at a dead thread.
+			rpcs3::utils::set_rsx_thread_tid(s_adpf_tid);
+			const u64 now_us = get_system_time();
+			const u64 idle_us = performance_counters.idle_time.load();
+			if (s_adpf_last_now != 0 && now_us > s_adpf_last_now)
+			{
+				const u64 wall = now_us - s_adpf_last_now;
+				// period = the flip-to-flip deadline (e.g. ~33.3ms when 30fps-locked). The app uses
+				// it as the ADPF target so a 30fps game is not judged against a fixed 60fps target
+				// (which would over-boost = more heat). Always valid.
+				rpcs3::utils::report_frame_period_ns(wall * 1000);
+
+				// work = the CPU busy time (wall minus idle) the scheduler must finish in time.
+				// performance_counters.idle_time is reset to 0 every ~30 frames by get_load(), so an
+				// idle delta that went backwards is a reset, not a real frame - skip it. Also skip
+				// when idle >= wall (idle accrues from FIFO/semaphore paths that can exceed the wall
+				// window). Reporting work=wall there would feed a bogus "fully busy" sample and
+				// over-boost the scheduler; skipping leaves the app's last good sample in place.
+				if (idle_us >= s_adpf_last_idle)
+				{
+					if (const u64 idle = idle_us - s_adpf_last_idle; idle < wall)
+					{
+						rpcs3::utils::report_frame_work_ns((wall - idle) * 1000);
+					}
+				}
+			}
+			s_adpf_last_now = now_us;
+			s_adpf_last_idle = idle_us;
+		}
+#endif
+
 		double limit = 0.;
 		const auto frame_limit = g_disable_frame_limit ? frame_limit_type::none : g_cfg.video.frame_limit;
 
@@ -3419,6 +3509,13 @@ namespace rsx
 		{
 			// Apply a second limit
 			limit = limit2;
+		}
+
+		// Android thermal throttle (their ad937b86e): when the SoC is hot, cap the frame rate
+		// so the pipeline does less work and the device can cool. 0 = no cap (default).
+		if (const double tcap = static_cast<double>(rpcs3::utils::get_thermal_frame_cap()); tcap >= 1.0 && (tcap < limit || !limit))
+		{
+			limit = tcap;
 		}
 
 		if (limit)

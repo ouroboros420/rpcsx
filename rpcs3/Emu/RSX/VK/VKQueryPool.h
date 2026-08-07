@@ -1,6 +1,7 @@
 #pragma once
 #include "VulkanAPI.h"
 #include <deque>
+#include <vector>
 
 namespace vk
 {
@@ -68,6 +69,17 @@ namespace vk
 		bool check_query_status(u32 index);
 		u32 get_query_result(u32 index);
 		void get_query_result_indirect(vk::command_buffer& cmd, u32 index, u32 count, VkBuffer dst, VkDeviceSize dst_offset);
+
+		// Batched readback: GPU-copy each query result in `indices` order to `dst` (4-byte word at
+		// offset = position in the list), coalescing contiguous index runs that share a pool into single
+		// vkCmdCopyQueryPoolResults calls. Pool-aware so a numeric run spanning a pool reallocation
+		// boundary is never copied from the wrong pool. Ends any open renderpass first (TBDR requirement).
+		void copy_query_results(vk::command_buffer& cmd, const std::vector<u32>& indices, VkBuffer dst);
+
+		// Prime a slot's cached result from a host-read value (no GPU call) so a subsequent
+		// get_query_result returns it with no WAIT_BIT. Only valid for an allocated slot whose result was
+		// already waited (e.g. via the WAIT_BIT copy above).
+		void prime_query_result(u32 index, u32 value);
 
 		u32 allocate_query(vk::command_buffer& cmd);
 		void free_query(vk::command_buffer& /*cmd*/, u32 index);

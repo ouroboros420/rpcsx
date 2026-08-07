@@ -99,10 +99,12 @@ enum CellAdecError : u32
 	CELL_ADEC_ERROR_M4AAC_SBR_NOT_INITIALIZED = 0x8061248c,
 	CELL_ADEC_ERROR_M4AAC_SBR_INVALID_ENVELOPE = 0x8061248d,
 
+
 	CELL_ADEC_ERROR_AC3_BUSY = 0x80612500,
 	CELL_ADEC_ERROR_AC3_EMPTY = 0x80612501,
 	CELL_ADEC_ERROR_AC3_PARAM = 0x80612502,
 	CELL_ADEC_ERROR_AC3_FRAME = 0x80612503,
+
 
 	CELL_ADEC_ERROR_AT3_OFFSET = 0x80612100,
 	CELL_ADEC_ERROR_AT3_OK = 0x80612100,
@@ -110,11 +112,13 @@ enum CellAdecError : u32
 	CELL_ADEC_ERROR_AT3_EMPTY = 0x80612165,
 	CELL_ADEC_ERROR_AT3_ERROR = 0x80612180,
 
+
 	CELL_ADEC_ERROR_LPCM_FATAL = 0x80612001,
 	CELL_ADEC_ERROR_LPCM_SEQ = 0x80612002,
 	CELL_ADEC_ERROR_LPCM_ARG = 0x80612003,
 	CELL_ADEC_ERROR_LPCM_BUSY = 0x80612004,
 	CELL_ADEC_ERROR_LPCM_EMPTY = 0x80612005,
+
 
 	CELL_ADEC_ERROR_MP3_OFFSET = 0x80612700U,
 	CELL_ADEC_ERROR_MP3_OK = 0x80612700,
@@ -139,6 +143,7 @@ enum CellAdecError : u32
 	CELL_ADEC_ERROR_MP3_STEREO_PROCESSING = 0x8061279c,
 	CELL_ADEC_ERROR_MP3_JS_BOUND = 0x8061279d,
 	CELL_ADEC_ERROR_MP3_PCMOUT = 0x8061279e,
+
 
 	CELL_ADEC_ERROR_M2BC_FATAL = 0x80612b01,
 	CELL_ADEC_ERROR_M2BC_SEQ = 0x80612b02,
@@ -450,18 +455,9 @@ struct AdecCmdQueue
 		size++;
 	}
 
-	void peek(T& cmd) const
-	{
-		return pop<true>(cmd);
-	}
-	bool empty() const
-	{
-		return size == 0;
-	}
-	bool full() const
-	{
-		return size >= 4;
-	}
+	void peek(T& cmd) const { return pop<true>(cmd); }
+	bool empty() const { return size == 0; }
+	bool full() const { return size >= 4; }
 };
 
 struct AdecFrame
@@ -510,7 +506,8 @@ class AdecOutputQueue
 		be_t<s32> state;      // 0xff = empty, 0x10 = filled
 		vm::bptr<CellAdecPcmItem> pcm_item;
 		be_t<s32> pcm_handle;
-	} entries[4];
+	}
+	entries[4];
 
 	be_t<s32> front;
 	be_t<s32> back;
@@ -667,6 +664,7 @@ struct AdecContext // CellAdecHandle = AdecContext*
 
 static_assert(std::is_standard_layout_v<AdecContext> && std::is_trivial_v<AdecContext>);
 CHECK_SIZE_ALIGN(AdecContext, 0x530, 8);
+
 
 enum : u32
 {
@@ -1026,14 +1024,17 @@ struct CellAdecParamM4Aac
 		struct
 		{
 			be_t<u32> programNumber;
-		} adifConfig;
+		}
+		adifConfig;
 
 		struct
 		{
 			be_t<s32> samplingFreqIndex; // MPEG4AAC_SamplingFreq
 			be_t<u32> profile;           // LC profile (1)
-		} rawDataBlockConfig;
-	} configInfo;
+		}
+		rawDataBlockConfig;
+	}
+	configInfo;
 
 	be_t<u32> enableDownmix; // enable downmix to 2.0 (if (enableDownmix))
 };
@@ -1065,7 +1066,8 @@ struct alignas(16) CellAdecM4AacInfo
 			be_t<u32> bitrate;
 			be_t<u32> numberOfProgramConfigElements;
 			be_t<u32> bufferFullness;
-		} adif;
+		}
+		adif;
 
 		struct mp8
 		{
@@ -1084,15 +1086,18 @@ struct alignas(16) CellAdecM4AacInfo
 			be_t<u32> bufferFullness;
 			be_t<u32> numberOfRawDataBlocks;
 			be_t<u32> crcCheck;
-		} adts;
-	} bsi;
+		}
+		adts;
+	}
+	bsi;
 
 	struct
 	{
 		be_t<u32> matrixMixdownPresent;
 		be_t<u32> mixdownIndex;
 		be_t<u32> pseudoSurroundEnable;
-	} matrixMixdown;
+	}
+	matrixMixdown;
 
 	be_t<u32> reserved;
 };

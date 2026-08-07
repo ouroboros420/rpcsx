@@ -7,7 +7,8 @@
 #include "cellPng.h"
 #include "cellPngDec.h"
 
-#if PNG_LIBPNG_VER_MAJOR >= 1 && (PNG_LIBPNG_VER_MINOR < 5 || (PNG_LIBPNG_VER_MINOR == 5 && PNG_LIBPNG_VER_RELEASE < 7))
+#if PNG_LIBPNG_VER_MAJOR >= 1 && (PNG_LIBPNG_VER_MINOR < 5 \
+|| (PNG_LIBPNG_VER_MINOR == 5 && PNG_LIBPNG_VER_RELEASE < 7))
 #define PNG_ERROR_ACTION_NONE 1
 #define PNG_RGB_TO_GRAY_DEFAULT (-1)
 #endif
@@ -125,8 +126,7 @@ void pngDecRowCallback(png_structp png_ptr, png_bytep new_row, png_uint_32 row_n
 			stream->cbDispInfo->scanPassCount = pass;
 			stream->cbDispInfo->nextOutputStartY = row_num;
 		}
-		else
-		{
+		else {
 			stream->cbDispInfo->scanPassCount = 0;
 			stream->cbDispInfo->nextOutputStartY = 0;
 		}
@@ -616,24 +616,28 @@ error_code pngDecSetParameter(PStream stream, PInParam in_param, POutParam out_p
 
 		// Handle gray<->rgb colorspace conversions
 		// rgb output
-		if (in_param->outputColorSpace == CELL_PNGDEC_ARGB || in_param->outputColorSpace == CELL_PNGDEC_RGBA || in_param->outputColorSpace == CELL_PNGDEC_RGB)
+		if (in_param->outputColorSpace == CELL_PNGDEC_ARGB
+			|| in_param->outputColorSpace == CELL_PNGDEC_RGBA
+			|| in_param->outputColorSpace == CELL_PNGDEC_RGB)
 		{
 
 			if (stream->info.colorSpace == CELL_PNGDEC_PALETTE)
 				png_set_palette_to_rgb(stream->png_ptr);
-			if ((stream->info.colorSpace == CELL_PNGDEC_GRAYSCALE || stream->info.colorSpace == CELL_PNGDEC_GRAYSCALE_ALPHA) && stream->info.bitDepth < 8)
+			if ((stream->info.colorSpace == CELL_PNGDEC_GRAYSCALE || stream->info.colorSpace == CELL_PNGDEC_GRAYSCALE_ALPHA)
+				&& stream->info.bitDepth < 8)
 				png_set_expand_gray_1_2_4_to_8(stream->png_ptr);
 		}
 		// grayscale output
 		else
 		{
-			if (stream->info.colorSpace == CELL_PNGDEC_ARGB || stream->info.colorSpace == CELL_PNGDEC_RGBA || stream->info.colorSpace == CELL_PNGDEC_RGB)
+			if (stream->info.colorSpace == CELL_PNGDEC_ARGB
+				|| stream->info.colorSpace == CELL_PNGDEC_RGBA
+				|| stream->info.colorSpace == CELL_PNGDEC_RGB)
 			{
 
 				png_set_rgb_to_gray(stream->png_ptr, PNG_ERROR_ACTION_NONE, PNG_RGB_TO_GRAY_DEFAULT, PNG_RGB_TO_GRAY_DEFAULT);
 			}
-			else
-			{
+			else {
 				// not sure what to do here
 				cellPngDec.error("Grayscale / Palette to Grayscale / Palette conversion currently unsupported.");
 			}

@@ -163,6 +163,7 @@ void cellDaisyScatterGatherInterlock_proceedSequenceNumber(vm::ptr<ScatterGather
 	cellDaisy.todo("cellDaisyScatterGatherInterlock_proceedSequenceNumber(_this=*0x%x)", _this);
 }
 
+
 DECLARE(ppu_module_manager::cellDaisy)("cellDaisy", []()
 	{
 		REG_FNID(cellDaisy, "_ZN4cell5Daisy17LFQueue2PushCloseEPNS0_8LFQueue2EPFiPvjE", cellDaisyLFQueue2PushClose);

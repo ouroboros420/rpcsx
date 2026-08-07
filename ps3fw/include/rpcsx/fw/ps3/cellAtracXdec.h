@@ -266,7 +266,12 @@ struct AtracXdecContext
 
 	AtracXdecContext(vm::ptr<AdecNotifyAuDone> notifyAuDone, vm::ptr<void> notifyAuDoneArg, vm::ptr<AdecNotifyPcmOut> notifyPcmOut, vm::ptr<void> notifyPcmOutArg,
 		vm::ptr<AdecNotifyError> notifyError, vm::ptr<void> notifyErrorArg, vm::ptr<AdecNotifySeqDone> notifySeqDone, vm::ptr<void> notifySeqDoneArg, vm::bptr<u8> work_mem)
-		: notify_au_done{notifyAuDone, notifyAuDoneArg}, notify_pcm_out{notifyPcmOut, notifyPcmOutArg}, notify_error{notifyError, notifyErrorArg}, notify_seq_done{notifySeqDone, notifySeqDoneArg}, work_mem(work_mem), decoder(work_mem)
+		: notify_au_done{ notifyAuDone, notifyAuDoneArg }
+		, notify_pcm_out{ notifyPcmOut, notifyPcmOutArg }
+		, notify_error{ notifyError, notifyErrorArg }
+		, notify_seq_done{ notifySeqDone, notifySeqDoneArg }
+		, work_mem(work_mem)
+		, decoder(work_mem)
 	{
 	}
 

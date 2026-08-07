@@ -7,6 +7,7 @@
 #include "cellCrossController.h"
 #include "cellMsgDialog.h"
 
+
 LOG_CHANNEL(cellCrossController);
 
 template <>
@@ -179,6 +180,7 @@ error_code cellCrossControllerInitialize(vm::cptr<CellCrossControllerParam> pPar
 
 	return CELL_OK;
 }
+
 
 DECLARE(ppu_module_manager::cellCrossController)("cellCrossController", []()
 	{

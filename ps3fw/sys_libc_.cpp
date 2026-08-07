@@ -1,6 +1,6 @@
-#include "Emu/Cell/PPUModule.h"
-#include "cellos/sys_tty.h"
 #include "stdafx.h"
+#include "cellos/sys_tty.h"
+#include "Emu/Cell/PPUModule.h"
 #include "util/cfmt.h"
 
 LOG_CHANNEL(sysPrxForUser);
@@ -43,14 +43,14 @@ struct ps3_fmt_src
 		return 0;
 	}
 
-	static constexpr usz size_char = 1;
+	static constexpr usz size_char  = 1;
 	static constexpr usz size_short = 2;
-	static constexpr usz size_int = 4;
-	static constexpr usz size_long = 4;
+	static constexpr usz size_int   = 4;
+	static constexpr usz size_long  = 4;
 	static constexpr usz size_llong = 8;
-	static constexpr usz size_size = 4;
-	static constexpr usz size_max = 8;
-	static constexpr usz size_diff = 4;
+	static constexpr usz size_size  = 4;
+	static constexpr usz size_max   = 8;
+	static constexpr usz size_diff  = 4;
 };
 
 template <>
@@ -59,8 +59,7 @@ f64 ps3_fmt_src::get<f64>(usz index) const
 	return std::bit_cast<f64>(get<u64>(index));
 }
 
-static std::string ps3_fmt(ppu_thread& context, vm::cptr<char> fmt,
-	u32 g_count)
+static std::string ps3_fmt(ppu_thread& context, vm::cptr<char> fmt, u32 g_count)
 {
 	std::string result;
 
@@ -69,136 +68,22 @@ static std::string ps3_fmt(ppu_thread& context, vm::cptr<char> fmt,
 	return result;
 }
 
-static const std::array<s16, 129> s_ctype_table{
+static const std::array<s16, 129> s_ctype_table
+{
 	0,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x408,
-	8,
-	8,
-	8,
-	8,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
-	0x20,
+	0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x408,
+	8, 8, 8, 8,
+	0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
 	0x18,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	4,
-	4,
-	4,
-	4,
-	4,
-	4,
-	4,
-	4,
-	4,
-	4,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x41,
-	0x41,
-	0x41,
-	0x41,
-	0x41,
-	0x41,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	1,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x42,
-	0x42,
-	0x42,
-	0x42,
-	0x42,
-	0x42,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	2,
-	0x10,
-	0x10,
-	0x10,
-	0x10,
-	0x20,
+	0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+	4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+	0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+	0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+	0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+	0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+	0x10, 0x10, 0x10, 0x10, 0x20,
 };
 
 s16 __sys_look_ctype_table(s32 ch)
@@ -230,8 +115,7 @@ s32 _sys_toupper(s32 ch)
 
 vm::ptr<void> _sys_memset(vm::ptr<void> dst, s32 value, u32 size)
 {
-	sysPrxForUser.trace("_sys_memset(dst=*0x%x, value=%d, size=0x%x)", dst, value,
-		size);
+	sysPrxForUser.trace("_sys_memset(dst=*0x%x, value=%d, size=0x%x)", dst, value, size);
 
 	std::memset(dst.get_ptr(), value, size);
 
@@ -240,8 +124,7 @@ vm::ptr<void> _sys_memset(vm::ptr<void> dst, s32 value, u32 size)
 
 vm::ptr<void> _sys_memcpy(vm::ptr<void> dst, vm::cptr<void> src, u32 size)
 {
-	sysPrxForUser.trace("_sys_memcpy(dst=*0x%x, src=*0x%x, size=0x%x)", dst, src,
-		size);
+	sysPrxForUser.trace("_sys_memcpy(dst=*0x%x, src=*0x%x, size=0x%x)", dst, src, size);
 
 	std::memcpy(dst.get_ptr(), src.get_ptr(), size);
 
@@ -250,8 +133,7 @@ vm::ptr<void> _sys_memcpy(vm::ptr<void> dst, vm::cptr<void> src, u32 size)
 
 s32 _sys_memcmp(vm::cptr<u8> buf1, vm::cptr<u8> buf2, u32 size)
 {
-	sysPrxForUser.trace("_sys_memcmp(buf1=*0x%x, buf2=*0x%x, size=%d)", buf1,
-		buf2, size);
+	sysPrxForUser.trace("_sys_memcmp(buf1=*0x%x, buf2=*0x%x, size=%d)", buf1, buf2, size);
 
 	for (u32 i = 0; i < size; i++)
 	{
@@ -273,8 +155,7 @@ s32 _sys_memcmp(vm::cptr<u8> buf1, vm::cptr<u8> buf2, u32 size)
 
 vm::ptr<u8> _sys_memchr(vm::ptr<u8> buf, u8 ch, s32 size)
 {
-	sysPrxForUser.trace("_sys_memchr(buf=*0x%x, ch=0x%x, size=0x%x)", buf, ch,
-		size);
+	sysPrxForUser.trace("_sys_memchr(buf=*0x%x, ch=0x%x, size=0x%x)", buf, ch, size);
 
 	if (!buf)
 	{
@@ -297,8 +178,7 @@ vm::ptr<u8> _sys_memchr(vm::ptr<u8> buf, u8 ch, s32 size)
 
 vm::ptr<void> _sys_memmove(vm::ptr<void> dst, vm::cptr<void> src, u32 size)
 {
-	sysPrxForUser.trace("_sys_memmove(dst=*0x%x, src=*0x%x, size=%d)", dst, src,
-		size);
+	sysPrxForUser.trace("_sys_memmove(dst=*0x%x, src=*0x%x, size=%d)", dst, src, size);
 
 	std::memmove(dst.get_ptr(), src.get_ptr(), size);
 
@@ -341,8 +221,7 @@ s32 _sys_strcmp(vm::cptr<char> str1, vm::cptr<char> str2)
 
 s32 _sys_strncmp(vm::cptr<char> str1, vm::cptr<char> str2, u32 max)
 {
-	sysPrxForUser.trace("_sys_strncmp(str1=%s, str2=%s, max=%d)", str1, str2,
-		max);
+	sysPrxForUser.trace("_sys_strncmp(str1=%s, str2=%s, max=%d)", str1, str2, max);
 
 	for (u32 i = 0; i < max; i++)
 	{
@@ -394,8 +273,7 @@ vm::cptr<char> _sys_strchr(vm::cptr<char> str, char ch)
 
 vm::ptr<char> _sys_strncat(vm::ptr<char> dst, vm::cptr<char> src, u32 max)
 {
-	sysPrxForUser.trace("_sys_strncat(dst=*0x%x %s, src=%s, max=%u)", dst, dst,
-		src, max);
+	sysPrxForUser.trace("_sys_strncat(dst=*0x%x %s, src=%s, max=%u)", dst, dst, src, max);
 
 	auto str = dst;
 
@@ -431,8 +309,7 @@ vm::ptr<char> _sys_strcpy(vm::ptr<char> dst, vm::cptr<char> src)
 
 vm::ptr<char> _sys_strncpy(vm::ptr<char> dst, vm::cptr<char> src, s32 len)
 {
-	sysPrxForUser.trace("_sys_strncpy(dst=*0x%x %s, src=%s, len=%d)", dst, dst,
-		src, len);
+	sysPrxForUser.trace("_sys_strncpy(dst=*0x%x %s, src=%s, len=%d)", dst, dst, src, len);
 
 	if (!dst || !src)
 	{
@@ -457,8 +334,7 @@ vm::ptr<char> _sys_strncpy(vm::ptr<char> dst, vm::cptr<char> src, s32 len)
 
 s32 _sys_strncasecmp(vm::cptr<char> str1, vm::cptr<char> str2, u32 n)
 {
-	sysPrxForUser.trace("_sys_strncasecmp(str1=%s, str2=%s, n=%d)", str1, str2,
-		n);
+	sysPrxForUser.trace("_sys_strncasecmp(str1=%s, str2=%s, n=%d)", str1, str2, n);
 
 	for (u32 i = 0; i < n; i++)
 	{
@@ -514,11 +390,9 @@ error_code _sys_free(u32 addr)
 	return CELL_OK;
 }
 
-s32 _sys_snprintf(ppu_thread& ppu, vm::ptr<char> dst, u32 count,
-	vm::cptr<char> fmt, ppu_va_args_t va_args)
+s32 _sys_snprintf(ppu_thread& ppu, vm::ptr<char> dst, u32 count, vm::cptr<char> fmt, ppu_va_args_t va_args)
 {
-	sysPrxForUser.warning("_sys_snprintf(dst=*0x%x, count=%d, fmt=%s, ...)", dst,
-		count, fmt);
+	sysPrxForUser.warning("_sys_snprintf(dst=*0x%x, count=%d, fmt=%s, ...)", dst, count, fmt);
 
 	std::string result = ps3_fmt(ppu, fmt, va_args.count);
 
@@ -536,8 +410,7 @@ s32 _sys_snprintf(ppu_thread& ppu, vm::ptr<char> dst, u32 count,
 	}
 }
 
-error_code _sys_printf(ppu_thread& ppu, vm::cptr<char> fmt,
-	ppu_va_args_t va_args)
+error_code _sys_printf(ppu_thread& ppu, vm::cptr<char> fmt, ppu_va_args_t va_args)
 {
 	sysPrxForUser.warning("_sys_printf(fmt=%s, ...)", fmt);
 
@@ -548,8 +421,7 @@ error_code _sys_printf(ppu_thread& ppu, vm::cptr<char> fmt,
 	return CELL_OK;
 }
 
-s32 _sys_sprintf(ppu_thread& ppu, vm::ptr<char> buffer, vm::cptr<char> fmt,
-	ppu_va_args_t va_args)
+s32 _sys_sprintf(ppu_thread& ppu, vm::ptr<char> buffer, vm::cptr<char> fmt, ppu_va_args_t va_args)
 {
 	sysPrxForUser.warning("_sys_sprintf(buffer=*0x%x, fmt=%s, ...)", buffer, fmt);
 
@@ -578,22 +450,17 @@ error_code _sys_vsprintf()
 	return CELL_OK;
 }
 
-void _sys_qsort(vm::ptr<void> base, u32 nelem, u32 size,
-	vm::ptr<qsortcmp> cmp)
+void _sys_qsort(vm::ptr<void> base, u32 nelem, u32 size, vm::ptr<qsortcmp> cmp)
 {
-	sysPrxForUser.warning(
-		"_sys_qsort(base=*0x%x, nelem=%d, size=0x%x, cmp=*0x%x)", base, nelem,
-		size, cmp);
+	sysPrxForUser.warning("_sys_qsort(base=*0x%x, nelem=%d, size=0x%x, cmp=*0x%x)", base, nelem, size, cmp);
 
 	static thread_local decltype(cmp) g_tls_cmp;
 	g_tls_cmp = cmp;
 
-	std::qsort(
-		base.get_ptr(), nelem, size, [](const void* a, const void* b) -> s32
-		{
-			return g_tls_cmp(static_cast<ppu_thread&>(*get_current_cpu_thread()),
-				vm::get_addr(a), vm::get_addr(b));
-		});
+	std::qsort(base.get_ptr(), nelem, size, [](const void* a, const void* b) -> s32
+	{
+		return g_tls_cmp(static_cast<ppu_thread&>(*get_current_cpu_thread()), vm::get_addr(a), vm::get_addr(b));
+	});
 }
 
 void sysPrxForUser_sys_libc_init()

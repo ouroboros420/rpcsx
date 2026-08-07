@@ -1,7 +1,8 @@
 #pragma once
 
-#include "rx/AddressRange.hpp"
-#include "rx/Rc.hpp"
+#include "AddressRange.hpp"
+#include "Rc.hpp"
+#include "Serializer.hpp"
 #include <bit>
 #include <cassert>
 #include <concepts>
@@ -66,7 +67,7 @@ public:
 
   void clear() { mAreas.clear(); }
 
-  AreaInfo queryArea(std::uint64_t address) const {
+  [[nodiscard]] AreaInfo queryArea(std::uint64_t address) const {
     auto it = mAreas.lower_bound(address);
     assert(it != mAreas.end());
     std::uint64_t endAddress = 0;
@@ -84,9 +85,10 @@ public:
     return {startAddress, endAddress};
   }
 
-  void map(std::uint64_t beginAddress, std::uint64_t endAddress) {
-    auto [beginIt, beginInserted] = mAreas.emplace(beginAddress, Kind::O);
-    auto [endIt, endInserted] = mAreas.emplace(endAddress, Kind::X);
+  void map(AddressRange range) {
+    auto [beginIt, beginInserted] =
+        mAreas.emplace(range.beginAddress(), Kind::O);
+    auto [endIt, endInserted] = mAreas.emplace(range.endAddress(), Kind::X);
 
     if (!beginInserted) {
       if (beginIt->second == Kind::X) {
@@ -310,12 +312,28 @@ public:
     assert(kind != Kind::X);
     kind = Kind::O;
   }
+
+  void serialize(Serializer &s) const
+    requires Serializable<T>
+  {
+    s.serialize(kind);
+    if (kind != Kind::X) {
+      s.serialize(storage.data);
+    }
+  }
+  void deserialize(Deserializer &d)
+    requires Serializable<T>
+  {
+    d.deserialize(kind);
+    if (kind != Kind::X && !d.failure()) {
+      d.deserialize(storage.data);
+    }
+  }
 };
 
 template <typename T> class Payload<T *> {
-  static constexpr std::uintptr_t
-      kCloseOpenBit = alignof(T) > 1 ? 1
-                                     : (1ull << (sizeof(std::uintptr_t) * 8 - 1));
+  static constexpr std::uintptr_t kCloseOpenBit =
+      alignof(T) > 1 ? 1 : (1ull << (sizeof(std::uintptr_t) * 8 - 1));
   static constexpr std::uintptr_t kClose = 0;
   std::uintptr_t value = kClose;
 
@@ -365,12 +383,14 @@ public:
     assert(!isClose());
     value &= ~kCloseOpenBit;
   }
+
+  void serialize(Serializer &s) const { s.serialize(value); }
+  void deserialize(Deserializer &d) { d.deserialize(value); }
 };
 
 template <typename T> class Payload<Ref<T>> {
-  static constexpr std::uintptr_t
-      kCloseOpenBit = alignof(T) > 1 ? 1
-                                     : (1ull << (sizeof(std::uintptr_t) * 8 - 1));
+  static constexpr std::uintptr_t kCloseOpenBit =
+      alignof(T) > 1 ? 1 : (1ull << (sizeof(std::uintptr_t) * 8 - 1));
   static constexpr std::uintptr_t kClose = 0;
   std::uintptr_t value = kClose;
 
@@ -453,6 +473,9 @@ public:
     assert(!isClose());
     value &= ~kCloseOpenBit;
   }
+
+  void serialize(Serializer &s) const { s.serialize(value); }
+  void deserialize(Deserializer &d) { d.deserialize(value); }
 };
 
 template <typename PayloadT,
@@ -464,39 +487,38 @@ class MemoryTableWithPayload {
       mAreas;
 
 public:
-  class AreaInfo : public rx::AddressRange {
-    PayloadT &payload;
+  template <typename T> class AreaInfo : public AddressRange {
+    T &payload;
 
   public:
-    AreaInfo(PayloadT &payload, rx::AddressRange range)
+    AreaInfo(T &payload, AddressRange range)
         : payload(payload), AddressRange(range) {}
 
-    PayloadT *operator->() { return &payload; }
-    PayloadT &get() { return payload; }
+    decltype(auto) operator->() { return &payload.get(); }
+    decltype(auto) get() { return payload.get(); }
   };
 
-  class iterator {
-    using map_iterator =
-        typename std::map<std::uint64_t, payload_type>::iterator;
-    map_iterator it;
+  template <typename MapIterator, typename AreaInfo> class Iterator {
+    MapIterator it;
 
   public:
-    iterator() = default;
-    iterator(map_iterator it) : it(it) {}
+    Iterator() = default;
+    Iterator(MapIterator it) : it(it) {}
 
-    AreaInfo operator*() const { return {it->second.get(), range()}; }
+    AreaInfo operator*() const { return {it->second, range()}; }
 
-    rx::AddressRange range() const {
-      return rx::AddressRange::fromBeginEnd(beginAddress(), endAddress());
+    AddressRange range() const {
+      return AddressRange::fromBeginEnd(beginAddress(), endAddress());
     }
 
     std::uint64_t beginAddress() const { return it->first; }
     std::uint64_t endAddress() const { return std::next(it)->first; }
     std::uint64_t size() const { return endAddress() - beginAddress(); }
 
-    PayloadT &get() const { return it->second.get(); }
-    PayloadT *operator->() const { return &it->second.get(); }
-    iterator &operator++() {
+    decltype(auto) get() const { return it->second.get(); }
+    decltype(auto) operator->() const { return &it->second.get(); }
+
+    Iterator &operator++() {
       ++it;
 
       if (!it->second.isCloseOpen()) {
@@ -506,11 +528,27 @@ public:
       return *this;
     }
 
-    bool operator==(iterator other) const { return it == other.it; }
-    bool operator!=(iterator other) const { return it != other.it; }
+    Iterator &operator--() {
+      --it;
+
+      if (it->second.isClose()) {
+        --it;
+      }
+
+      return *this;
+    }
+
+    bool operator==(Iterator other) const { return it == other.it; }
 
     friend MemoryTableWithPayload;
   };
+
+  using iterator =
+      Iterator<typename std::map<std::uint64_t, payload_type>::iterator,
+               AreaInfo<payload_type>>;
+  using const_iterator =
+      Iterator<typename std::map<std::uint64_t, payload_type>::const_iterator,
+               AreaInfo<const payload_type>>;
 
   MemoryTableWithPayload() = default;
   MemoryTableWithPayload(MemoryTableWithPayload &&) = default;
@@ -518,6 +556,10 @@ public:
   MemoryTableWithPayload(const MemoryTableWithPayload &) = delete;
   MemoryTableWithPayload &operator=(const MemoryTableWithPayload &) = delete;
 
+  const_iterator cbegin() const { return const_iterator(mAreas.begin()); }
+  const_iterator cend() const { return const_iterator(mAreas.end()); }
+  const_iterator begin() const { return const_iterator(mAreas.cbegin()); }
+  const_iterator end() const { return const_iterator(mAreas.cend()); }
   iterator begin() { return iterator(mAreas.begin()); }
   iterator end() { return iterator(mAreas.end()); }
 
@@ -570,20 +612,20 @@ public:
     return endAddress < address ? mAreas.end() : it;
   }
 
-  iterator map(std::uint64_t beginAddress, std::uint64_t endAddress,
-               PayloadT payload, bool merge = true, bool noOverride = false) {
-    assert(beginAddress < endAddress);
+  iterator map(AddressRange range, PayloadT payload, bool merge = true,
+               bool noOverride = false) {
+    assert(range.isValid());
     auto [beginIt, beginInserted] =
-        mAreas.emplace(beginAddress, payload_type::createOpen(payload));
+        mAreas.emplace(range.beginAddress(), payload_type::createOpen(payload));
     auto [endIt, endInserted] =
-        mAreas.emplace(endAddress, payload_type::createClose());
+        mAreas.emplace(range.endAddress(), payload_type::createClose());
 
     bool seenOpen = false;
     bool endCollision = false;
     bool lastRemovedIsOpen = false;
     PayloadT lastRemovedOpenPayload;
     if (noOverride && !beginInserted && !endInserted &&
-        std::next(beginIt) == endIt) {
+        std::next(beginIt) == endIt && !beginIt->second.isClose()) {
       return beginIt;
     }
 
@@ -667,7 +709,7 @@ public:
     return origBegin;
   }
 
-  void unmap(iterator it) {
+  iterator unmap(iterator it) {
     auto openIt = it.it;
     auto closeIt = openIt;
     ++closeIt;
@@ -681,13 +723,49 @@ public:
     if (closeIt->second.isCloseOpen()) {
       closeIt->second.setOpen();
     } else {
-      mAreas.erase(closeIt);
+      closeIt = mAreas.erase(closeIt);
     }
+
+    return iterator(closeIt);
   }
 
-  void unmap(std::uint64_t beginAddress, std::uint64_t endAddress) {
+  iterator unmap(AddressRange range) {
     // FIXME: can be optimized
-    unmap(map(beginAddress, endAddress, PayloadT{}, false));
+    return unmap(map(range, PayloadT{}, false));
+  }
+
+  void serialize(Serializer &s) const
+    requires Serializable<payload_type>
+  {
+    for (auto block : *this) {
+      s.serialize(block.beginAddress());
+      s.serialize(block.endAddress());
+      s.serialize(block.get());
+    }
+
+    s.serialize<std::uint64_t>(-1);
+    s.serialize<std::uint64_t>(-1);
+  }
+
+  void deserialize(Deserializer &d)
+    requires Serializable<payload_type>
+  {
+    clear();
+
+    while (!d.failure()) {
+      auto beginAddress = d.deserialize<std::uint64_t>();
+      auto endAddress = d.deserialize<std::uint64_t>();
+
+      if (beginAddress == static_cast<std::uint64_t>(-1) &&
+          endAddress == static_cast<std::uint64_t>(-1)) {
+        break;
+      }
+
+      auto value = d.deserialize<PayloadT>();
+
+      map(AddressRange::fromBeginEnd(beginAddress, endAddress),
+          std::move(value), false);
+    }
   }
 };
 } // namespace rx

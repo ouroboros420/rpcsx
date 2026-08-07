@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 
+
 // Definition of user interface implementations
 namespace rsx
 {
@@ -94,7 +95,8 @@ namespace rsx
 				pad_button::ls_up,
 				pad_button::ls_down,
 				pad_button::ls_left,
-				pad_button::ls_right};
+				pad_button::ls_right
+			};
 
 			atomic_t<bool> m_stop_input_loop = false;
 			atomic_t<bool> m_interactive = false;
@@ -132,18 +134,11 @@ namespace rsx
 				user_interface* m_parent;
 				u32 m_thread_bit;
 			};
-
 		public:
 			s32 return_code = 0; // CELL_OK
 
-			bool is_detached() const
-			{
-				return m_input_thread_detached;
-			}
-			void detach_input()
-			{
-				m_input_thread_detached.store(true);
-			}
+			bool is_detached() const { return m_input_thread_detached; }
+			void detach_input() { m_input_thread_detached.store(true); }
 
 			compiled_resource get_compiled() override = 0;
 
@@ -180,5 +175,5 @@ namespace rsx
 				return {false, {}};
 			}
 		};
-	} // namespace overlays
-} // namespace rsx
+	}
+}

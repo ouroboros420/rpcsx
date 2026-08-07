@@ -259,6 +259,7 @@ struct gl_render_target_traits
 			sink->set_rsx_pitch(ref->get_rsx_pitch());
 			sink->set_surface_dimensions(prev.width, prev.height, ref->get_rsx_pitch());
 			sink->set_native_component_layout(ref->get_native_component_layout());
+			sink->resolution_scaling_config = scaling_config;
 			sink->queue_tag(address);
 		}
 

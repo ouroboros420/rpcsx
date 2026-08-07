@@ -503,9 +503,11 @@ error_code cellGifDecDecodeData(vm::ptr<GifDecoder> mainHandle, vm::cptr<GifStre
 
 	// Decode GIF file. (TODO: Is there any faster alternative? Can we do it without external libraries?)
 	int width, height, actual_components;
-	auto image = std::unique_ptr<unsigned char, decltype(&::free)>(
+	auto image = std::unique_ptr<unsigned char,decltype(&::free)>
+		(
 		stbi_load_from_memory(gif.get(), ::narrow<int>(fileSize), &width, &height, &actual_components, 4),
-		&::free);
+			&::free
+		);
 
 	if (!image)
 		return CELL_GIFDEC_ERROR_STREAM_FORMAT;

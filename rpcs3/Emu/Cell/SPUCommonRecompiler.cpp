@@ -169,6 +169,104 @@ static spu_function_t compile_spu_llvm_with_retry(std::unique_ptr<spu_recompiler
 
 	return result;
 }
+
+// Background SPU compile worker for the ARM64 interpret-first async path (theirs 270dfed4,
+// fixed by 05b8b40a).
+//
+// ARM64 has no fast first tier (spu_fast is x86-only), so the llvm decoder compiles every block
+// synchronously on the SPU thread - a multi-second stall storm on SPURS-heavy games. Instead, on
+// a dispatch() miss the freshly analysed block is handed to this thread and interpreted via
+// spu_interpreter_rt while the compile runs in the background. compile_spu_llvm_with_retry
+// installs the block as a side effect (compile() does add_empty + compiled.store +
+// rebuild_ubertrampoline, both cross-core-published by the icache flushes above), and the SPU
+// thread atomically picks up the native function on its next dispatch through g_dispatcher.
+//
+// One worker only: the phone's few big cores are already saturated by the SPURS groups, and more
+// LLVM contexts risk OOM. The worker owns its own recompiler instance, never shared with an SPU
+// thread.
+//
+// Lifecycle: g_fxo constructs referenced types eagerly and fixed_typemap::clear() aborts AND
+// JOINS every named_thread before destroying any object, so this worker is fully joined while
+// spu_runtime/spu_cache (which hold no thread) are still alive - it can never touch a torn-down
+// m_spurt regardless of construction order.
+struct spu_async_compiler
+{
+	lf_queue<spu_program> registered;
+
+	void operator()()
+	{
+		// Own LLVM recompiler instance (never shared with SPU threads), created lazily.
+		std::unique_ptr<spu_recompiler_base> compiler;
+
+		for (auto slice = registered.pop_all();; [&]
+			{
+				if (slice)
+				{
+					slice.pop_front();
+				}
+
+				if (slice || thread_ctrl::state() == thread_state::aborting)
+				{
+					return;
+				}
+
+				thread_ctrl::wait_on(registered.get_wait_atomic(), 0);
+				slice = registered.pop_all();
+			}())
+		{
+			const spu_program* prog = slice.get();
+
+			if (thread_ctrl::state() == thread_state::aborting)
+			{
+				break;
+			}
+
+			if (!prog || prog->data.empty())
+			{
+				continue;
+			}
+
+			if (!compiler)
+			{
+				compiler = spu_recompiler_base::make_llvm_recompiler();
+				compiler->init();
+			}
+
+			// Re-analyse on THIS worker's compiler before compiling. compile() consumes
+			// per-instance analysis side-state (m_bbs and friends) that analyse() populates; the
+			// synchronous dispatch path analyses on spu.jit immediately before compiling on that
+			// same instance. The program copy handed here carries only the analysed byte-stream,
+			// NOT that side-state, so without re-analysing compile() indexes an empty m_bbs and
+			// aborts with "Range check failed, container_size 0". Mirrors what the TBL2/TBX2 retry
+			// in compile_spu_llvm_with_retry already does on its fresh compiler.
+			const spu_program analysed = analyse_spu_llvm_program(*compiler, *prog);
+
+			if (analysed != *prog)
+			{
+				// Synthetic-LS re-analysis disagreed with the dispatch-time analysis. Should not
+				// happen for safe-size blocks (the async path is gated to safe), but if it does,
+				// skip rather than compile a program whose m_bbs does not match: the block stays
+				// interpreted (queued stays 1) and is never re-enqueued, same as a genuine compile
+				// failure. Same guard the TBL2 retry uses.
+				spu_log.error("[0x%05x] SPU async re-analysis mismatch (%u vs %u), skipping", prog->entry_point, analysed.data.size(), prog->data.size());
+				continue;
+			}
+
+			// Installs the block as a side effect. Routed through the TBL2/TBX2 reg-scavenge retry
+			// wrapper exactly like the synchronous dispatch path. Return value is intentionally
+			// unused: on a genuine failure (both TBL2 and the no-TBL2 retry failed) compiled stays
+			// nullptr and item->queued stays 1, so the block is interpreted for the rest of the
+			// session and never re-enqueued - re-enqueuing an uncompilable block would spin the
+			// worker forever, and this is strictly better than the synchronous path, which re-logs
+			// a fatal and re-dispatches the same failing block in a loop.
+			compile_spu_llvm_with_retry(compiler, analysed);
+		}
+	}
+
+	static constexpr auto thread_name = "SPU Async"sv;
+};
+
+using spu_async_compiler_thread = named_thread<spu_async_compiler>;
 #endif
 
 // Move 4 args for calling native function from a GHC calling convention function
@@ -1372,6 +1470,31 @@ bool spu_program::operator<(const spu_program& rhs) const noexcept
 	return lhs_offs < rhs_offs;
 }
 
+#ifdef ARCH_ARM64
+// SPU LLVM object-cache version (theirs 8430a655, bumped by 5288a433/5fa7c373/64844c97).
+// BUMP on ANY change that affects SPU codegen or the LLVM toolchain (mirrors the PPU "v9-kusa"
+// discipline): the ObjectCache loads purely by the per-block module name (the SPU program hash)
+// with NO IR/CPU/settings validation, so a stale object would otherwise silently keep old codegen
+// alive (the lr=0/SP-corruption miscompile class). The per-config inputs (xfloat/block-size/dfma/
+// reservations/dma/i8mm/dotprod/cpu) are folded into the cache directory name in the ctor below;
+// this version covers everything else (the analyser, the IR emission, the LLVM build itself).
+// v2: g_timebase_offs is bound through an external symbol instead of a baked host address, so
+// cached objects no longer carry an absolute pointer into a differently-based .so.
+// v3: ARM USHL for inf_shl/inf_lshr masked infinite shifts changes emitted SPU shift codegen.
+// v4: FMA/AVX default-on for all ARM64 prime cores (not just Cortex) changes SPU FMA/verification
+// codegen on non-Cortex cores (e.g. Oryon), and the ARM checksum/cmp_rdata multiply-accumulate
+// cluster changes the SPU block self-verification codegen.
+// v5: our merged upstream v0.0.38..v0.0.42 SPU analyser/IR changes and the LLVM 22 toolchain bump
+// postdate everything above; force one rebuild off any object produced by an older tree.
+static constexpr u32 SPU_OBJ_CACHE_VERSION = 5;
+
+// Per keyed-dir file cap. A heavy game writes ~5700 .obj.gz per config in one session (Mafia II
+// ~6462); 12000 leaves headroom so normal play does not re-clear. Above this we clear the whole
+// keyed dir and let it rebuild (simplest race-free policy - the multi-threaded ObjectCache writers
+// share no index and never evict).
+static constexpr usz SPU_OBJ_CACHE_MAX_FILES = 12000;
+#endif
+
 spu_runtime::spu_runtime()
 {
 	// Clear LLVM output
@@ -1381,6 +1504,153 @@ spu_runtime::spu_runtime()
 	{
 		return;
 	}
+
+#ifdef ARCH_ARM64
+	// Persistent SPU LLVM object cache (theirs 8430a655). Unlike upstream - which writes SPU
+	// objects only under spu_debug - we persist them on the default path because ARM64 has no
+	// spu_fast first tier, so without a cache every launch re-JITs thousands of SPU blocks (the
+	// synchronous-compile freeze storm). The ObjectCache keys ONLY on the per-block module name
+	// (the SPU program hash) with no load-time validation, so correctness depends ENTIRELY on
+	// folding every codegen input into the cache DIRECTORY name, exactly like the PPU "v9-kusa"
+	// scheme - miss one and a stale object resurrects old codegen.
+	{
+		// Each entry below was confirmed by reading its use to change emitted code on the default
+		// (spu_debug=off) path that uses this cache. If a new SPU codegen input is added, fold it
+		// here AND bump SPU_OBJ_CACHE_VERSION. NOTE: rsx_fifo_accuracy/strict_rendering_mode are
+		// deliberately NOT folded - their only codegen use (the MFC PUT path) is gated behind
+		// !g_use_rtm, constant-true on ARM64, so they cannot affect our codegen.
+		sha1_context ctx;
+		u8 key[20];
+		sha1_starts(&ctx);
+
+		const auto fold = [&](const auto& v)
+		{
+			sha1_update(&ctx, reinterpret_cast<const u8*>(&v), sizeof(v));
+		};
+
+		const u32 version = SPU_OBJ_CACHE_VERSION;
+		fold(version);
+
+		// Multi-value config baked into / gating emitted IR.
+		const u32 xfloat = static_cast<u32>(g_cfg.core.spu_xfloat_accuracy.get()); // f64 vs approx xfloat path
+		const u32 block_size = static_cast<u32>(g_cfg.core.spu_block_size.get());  // chunk/loop structure
+		const u32 clocks_scale = static_cast<u32>(g_cfg.core.clocks_scale.get());  // SPU_RdDec fast-path (== 100) gate
+		fold(xfloat);
+		fold(block_size);
+		fold(clocks_scale);
+
+		// Boolean config that toggles emitted IR (each confirmed at its use site): dfma=accurate
+		// FMA; reservations/dma=atomic & MFC codegen; prof=block_hash stores; verification/
+		// precise_verification=entry hash-check emission; loop_detection=wait-loop yield + RdDec
+		// path; mfc_debug=MFC instrumentation; rsx_res=putllc16_rsx_res call; compatible_mode=
+		// savestate gpr-store emission.
+		const u32 flags =
+			(static_cast<u32>(g_cfg.core.use_accurate_dfma.get())         << 0) |
+			(static_cast<u32>(g_cfg.core.spu_accurate_reservations.get()) << 1) |
+			(static_cast<u32>(g_cfg.core.spu_accurate_dma.get())          << 2) |
+			(static_cast<u32>(g_cfg.core.spu_prof.get())                  << 3) |
+			(static_cast<u32>(g_cfg.core.spu_verification.get())          << 4) |
+			(static_cast<u32>(g_cfg.core.precise_spu_verification.get())  << 5) |
+			(static_cast<u32>(g_cfg.core.spu_loop_detection.get())        << 6) |
+			(static_cast<u32>(g_cfg.core.mfc_debug.get())                 << 7) |
+			(static_cast<u32>(g_cfg.core.rsx_accurate_res_access.get())   << 8) |
+			(static_cast<u32>(g_cfg.savestate.compatible_mode.get())      << 9);
+		fold(flags);
+
+		// NOTE (differs from theirs): we keep TBL2/TBX2 enabled on the first compile attempt and
+		// fall back to the split tbl1/tbx1 lowering only on the reg-scavenge retry, so a given
+		// block can be cached in either lowering. Both are semantically equivalent and each is a
+		// complete, self-consistent object, so this is nondeterminism, not a correctness input -
+		// it is deliberately NOT folded. If use_tbl2 ever becomes a user-visible setting, fold it.
+
+		// Device-variable codegen target, folded so a cache built on one device's HWCAP can never
+		// serve wrong-ISA objects to another: every variable ARM64 HWCAP feature advertised to
+		// the SPU JIT engine's setMAttrs. sha3 is the critical one - unlike i8mm/dotprod/sve2
+		// (emitted only via gated intrinsics) +sha3 lets the AArch64 backend AUTO-SELECT
+		// eor3/bcax/xar from the plain XOR/rotate IR the SPU recompiler emits everywhere, so it
+		// changes object bytes outright (and a -sha3 core would SIGILL on them). sve/sve2 must be
+		// folded too: cpu_translator::initialize() gates m_use_sve_128/m_use_sve2_128 on the same
+		// HWCAP and this recompiler then emits llvm.aarch64.sve.{smullb,smullt,umullb,umullt,
+		// smlalt,umlalt,xar,fnmls} - an object built on an SVE2 core would SIGILL on one without.
+		// Plus the timebase frequency baked as the RdDec divisor and the resolved LLVM CPU.
+		const u32 hw =
+			(static_cast<u32>(utils::has_i8mm())    << 0) |
+			(static_cast<u32>(utils::has_dotprod()) << 1) |
+			(static_cast<u32>(utils::has_sha3())    << 2) |
+			(static_cast<u32>(utils::has_sve())     << 3) |
+			(static_cast<u32>(utils::has_sve2())    << 4) |
+			// sve_length() is compiled with __attribute__((target("+sve"))) and executes svcntb,
+			// so it must never be evaluated on a core without SVE - short-circuit on has_sve().
+			(static_cast<u32>(utils::has_sve() ? utils::sve_length() : 0) << 5);
+		const u64 tsc_freq = utils::get_tsc_freq();
+		fold(hw);
+		fold(tsc_freq);
+
+		const std::string cpu = jit_compiler::cpu(g_cfg.core.llvm_cpu.to_string());
+		sha1_update(&ctx, reinterpret_cast<const u8*>(cpu.data()), cpu.size());
+
+		sha1_finish(&ctx, key);
+
+		// Under the per-game cache dir (m_cache_path = ppu-<sha1>-<name>/) -> automatically per-game.
+		m_obj_cache_path = m_cache_path + fmt::format("spuobj-v%u-%s/", SPU_OBJ_CACHE_VERSION, fmt::base57(key, 16));
+	}
+
+	// Drop object caches left behind by an older SPU_OBJ_CACHE_VERSION. Bumping the version only
+	// stops old objects from being LOADED (they live under a differently-named keyed dir); it does
+	// not delete them. Without this, every bump orphans up to SPU_OBJ_CACHE_MAX_FILES objects per
+	// game permanently and SPU_OBJ_CACHE_MAX_FILES stops being a real storage bound - it only caps
+	// the dir currently in use. Only OTHER-version dirs are removed: same-version dirs belonging to
+	// a different config key are kept, so toggling a setting and toggling it back does not throw
+	// away a still-valid cache.
+	{
+		const std::string keep_prefix = fmt::format("spuobj-v%u-", SPU_OBJ_CACHE_VERSION);
+
+		// Collect first, delete after: fs::dir reads the directory lazily (one readdir per
+		// iteration step), so removing entries while the handle is still open is unspecified.
+		std::vector<std::string> stale;
+
+		for (auto&& entry : fs::dir(m_cache_path))
+		{
+			if (entry.is_directory && entry.name.starts_with("spuobj-v") && !entry.name.starts_with(keep_prefix))
+			{
+				stale.emplace_back(entry.name);
+			}
+		}
+
+		for (const std::string& name : stale)
+		{
+			spu_log.notice("Removing stale SPU object cache '%s'", name);
+			fs::remove_all(m_cache_path + name, true);
+		}
+	}
+
+	if (!fs::create_path(m_obj_cache_path))
+	{
+		// Could not create the cache dir - disable the cache rather than pass a bad path.
+		m_obj_cache_path.clear();
+	}
+	else
+	{
+		// Storage cap (single-threaded boot-time scan; the multi-threaded ObjectCache writers share
+		// no index and never evict). If this keyed dir exceeds the cap, clear it whole and let it
+		// rebuild - the simplest race-free bound.
+		usz file_count = 0;
+
+		for (auto&& entry : fs::dir(m_obj_cache_path))
+		{
+			if (!entry.is_directory)
+			{
+				file_count++;
+			}
+		}
+
+		if (file_count > SPU_OBJ_CACHE_MAX_FILES)
+		{
+			fs::remove_all(m_obj_cache_path, true);
+			fs::create_path(m_obj_cache_path);
+		}
+	}
+#endif
 
 	if (g_cfg.core.spu_debug && g_cfg.core.spu_decoder != spu_decoder_type::dynamic && g_cfg.core.spu_decoder != spu_decoder_type::_static)
 	{
@@ -1971,6 +2241,23 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 		std::string fname;
 		fmt::append(fname, "__ub%u", m_flat_list.size());
 		jit_announce(wxptr, raw - wxptr, fname);
+
+#ifdef ARCH_ARM64
+		// Publish the freshly emitted ubertrampoline for CROSS-CORE execution before its pointer
+		// is installed into g_dispatcher below (theirs 04f96830). This block emits no barrier of
+		// its own and is covered only incidentally by the trailing same-core ISB+DSB ISH at the
+		// synchronous compile site - which is gone once rebuild_ubertrampoline runs on the async
+		// background compile worker or a boot-precompile thread. dc cvau + ic ivau + dsb ish (via
+		// __clear_cache) makes the bytes visible to another core's instruction fetch; the install
+		// below is a release CAS, so the code is coherent before the pointer becomes observable.
+		//
+		// The SPU consumer reads this pointer with a plain ldr in tr_all and br's to it with NO
+		// consumer-side ISB. That is correct ONLY because jit_runtime::alloc is a monotonic bump
+		// allocator that never reuses an executable address within a run: the SPU core has never
+		// fetched wxptr, so it holds no stale instruction/BTB state to discard. If a future change
+		// ever recycles JIT code addresses mid-run, this would need a consumer-side ISB.
+		__builtin___clear_cache(reinterpret_cast<char*>(wxptr), reinterpret_cast<char*>(raw));
+#endif
 	}
 
 	if (auto _old = stuff_it->trampoline.compare_and_swap(nullptr, result))
@@ -2129,6 +2416,45 @@ spu_recompiler_base::~spu_recompiler_base()
 {
 }
 
+#ifdef ARCH_ARM64
+// Interpret one linear run of SPU code from spu.pc with the reference C++ interpreter, used by the
+// async dispatch path to make progress while the background worker compiles this block (theirs
+// 270dfed4). Mirrors old_interpreter's loop but returns after a single linear run instead of
+// looping the whole thread:
+//   - decode() == true  => sequential instruction completed, advance pc and continue.
+//   - decode() == false => the instruction set spu.pc itself (branch/STOP/RDCH/WRCH) - a real SPU
+//     boundary, the only safe place to hand back so a now-compiled successor block can take over.
+//   - spu.state set     => honor check_state() exactly like the interpreter loop; final
+//     stop/interrupt disposition is left to the gateway loop.
+// The 0x10000 cap bounds a pathological branch-free run (a linear run cannot legitimately exceed
+// LS/4 instructions).
+static void spu_interpret_linear_run(spu_thread& spu)
+{
+	const auto& table = g_fxo->get<spu_interpreter_rt>();
+	const auto base = spu._ptr<u8>(0);
+
+	for (u32 i = 0; i < 0x10000; i++)
+	{
+		if (spu.state) [[unlikely]]
+		{
+			if (spu.check_state())
+			{
+				return;
+			}
+		}
+
+		const u32 op = *reinterpret_cast<const be_t<u32>*>(base + spu.pc);
+
+		if (!table.decode(op)(spu, {op}))
+		{
+			return;
+		}
+
+		spu.pc += 4;
+	}
+}
+#endif
+
 void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 {
 	// If code verification failed from a patched patchpoint, clear it with a dispatcher jump
@@ -2207,7 +2533,37 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 	pthread_jit_write_protect_np(false);
 #endif
 	auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
+
 #ifdef ARCH_ARM64
+	// ARM64 interpret-first async path (theirs 270dfed4; opt-in, default off). Hand the block to
+	// the background compile worker and interpret it now, instead of stalling the SPU thread on
+	// synchronous LLVM codegen. Gated to safe block size because mega/giga keep cross-block state
+	// (stack_mirror return cache, giga real-function registers) that the interpreter does not
+	// maintain.
+	if (g_cfg.core.spu_async_compile && g_cfg.core.spu_block_size == spu_block_size_type::safe)
+	{
+		// Enqueue exactly once per block (dedup via spu_item::queued). add_empty creates/returns
+		// the item with compiled == nullptr, so it stays invisible to find()/the ubertrampoline
+		// until the worker installs the native code. Moving program here is safe: every path in
+		// this branch returns before the synchronous compile below could use it.
+		if (spu_item* item = spu.jit->get_runtime().add_empty(std::move(program));
+			item && !item->compiled && item->queued.exchange(1) == 0)
+		{
+			g_fxo->get<spu_async_compiler_thread>().registered.push(spu_program{item->data});
+		}
+
+#if defined(__APPLE__)
+		// Nothing below this point emits code; restore W^X before running the interpreter.
+		pthread_jit_write_protect_np(true);
+#endif
+
+		// Make progress now by interpreting one linear run, then hand back to the gateway loop
+		// (g_escape returns cleanly, exactly like the op == 0 path above).
+		spu_interpret_linear_run(spu);
+		spu_runtime::g_escape(&spu);
+		return;
+	}
+
 	const auto func = compile_spu_llvm_with_retry(spu.jit, program);
 #else
 	const auto func = spu.jit->compile(std::move(program));
@@ -5674,15 +6030,20 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 			{
 				g_fxo->get<reduced_statistics_t>().breaking_reason[cause]++;
 
-				if (!spu_log.notice)
-				{
-					return;
-				}
-
+				// The dedup write below feeds reduced_loop_all, which the recompiler READS to decide
+				// which loops get the reduced-loop treatment - gating it on the log level made
+				// codegen log-level-dependent. Hoist it ABOVE the log gate (theirs bb840a55) so
+				// lowering the heavy SHA1 + full-disasm dump to trace keeps codegen byte-identical
+				// to the notice-on path; only the purely diagnostic dump is skipped.
 				previous.active = false;
 				previous.failed = true;
 
 				reduced_loop_all[previous.loop_pc] = previous;
+
+				if (!spu_log.trace)
+				{
+					return;
+				}
 
 				std::string break_error = fmt::format("Reduced loop pattern breakage [%x cause=%u] (read_pc=0x%x)", pos, cause, previous.loop_pc);
 
@@ -5719,12 +6080,16 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 				}
 
 				fmt::append(tracing, " of %d failures", fail_count);
-				spu_log.notice("%s\n%s", break_error, tracing);
+
+				// trace, not notice: the enclosing gate above is `if (!spu_log.trace) return;`, so
+				// emitting this at notice level meant a notice-channel message that could only ever
+				// appear when trace was enabled. Match the gate (and the block dump below).
+				spu_log.trace("%s\n%s", break_error, tracing);
 
 				std::string block_dump;
 				this->dump(result, block_dump, previous.loop_pc, previous.loop_end + 1);
-	
-				spu_log.notice("SPU Block Dump:\n%s", block_dump);
+
+				spu_log.trace("SPU Block Dump:\n%s", block_dump);
 			}
 		};
 
@@ -5858,7 +6223,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 							{
 								if (state_it->atomic16.active && !std::exchange(logged_block[target_pc / 4], true))
 								{
-									spu_log.notice("SPU Blcok Analysis is too extensive at 0x%x", entry_pc);
+									spu_log.trace("SPU Blcok Analysis is too extensive at 0x%x", entry_pc);
 								}
 
 								is_too_extensive = true;
@@ -5935,7 +6300,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 						{
 							if (!std::exchange(logged_block[target_pc / 4], true))
 							{
-								spu_log.notice("SPU block is a loop at [0x%05x -> 0x%05x]", state_it->pc, target_pc);
+								spu_log.trace("SPU block is a loop at [0x%05x -> 0x%05x]", state_it->pc, target_pc);
 							}
 
 							state_it->parent_target_index++;
@@ -5944,7 +6309,7 @@ spu_program spu_recompiler_base::analyse(const be_t<u32>* ls, u32 entry_point, s
 
 						if (is_loop_connector && !std::exchange(logged_block[target_pc / 4], true))
 						{
-							spu_log.notice("SPU block analysis is too repetitive at [0x%05x -> 0x%05x]", state_it->pc, target_pc);
+							spu_log.trace("SPU block analysis is too repetitive at [0x%05x -> 0x%05x]", state_it->pc, target_pc);
 						}
 
 						insert_entry = true;

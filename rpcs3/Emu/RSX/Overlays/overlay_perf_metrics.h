@@ -33,6 +33,7 @@ namespace rsx
 			utils::cpu_stats m_cpu_stats{};
 			Timer m_update_timer{};
 			Timer m_frametime_timer{};
+			Timer m_log_timer{}; // throttles the perf summary written to the log
 			u32 m_update_interval{}; // in ms
 			u32 m_frames{};
 			std::string m_font{};
@@ -63,6 +64,14 @@ namespace rsx
 
 			f32 m_fps{0};
 			f32 m_frametime{0};
+
+			// Per-interval frametime jitter accumulation, surfaced in the throttled Perf log.
+			// The 5s-averaged frametime hides the micro-jitter that reads as "choppy"; min/max
+			// and a hitch count over the interval expose it without per-frame log spam.
+			f32 m_ft_min{0};
+			f32 m_ft_max{0};
+			u32 m_ft_samples{0};
+			u32 m_ft_hitches{0};
 
 			u64 m_ppu_cycles{0};
 			u64 m_spu_cycles{0};

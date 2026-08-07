@@ -164,6 +164,15 @@ namespace fs
 		device_base();
 		virtual ~device_base();
 
+	protected:
+		// For devices needing a FIXED, well-known prefix (e.g. the ISO overlay
+		// device: its prefix must be identical across boots so games.yml entries
+		// and savestates can resolve it). NOTE: this fork keys the virtual-device
+		// map by the FULL first path component (see get_device), so such a device
+		// must be registered under exactly this full prefix string.
+		explicit device_base(std::string prefix);
+
+	public:
 		virtual bool stat(const std::string& path, stat_t& info) = 0;
 		virtual bool statfs(const std::string& path, device_stat& info) = 0;
 		virtual bool remove_dir(const std::string& path);

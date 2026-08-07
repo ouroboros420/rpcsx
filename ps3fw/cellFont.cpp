@@ -2169,6 +2169,7 @@ error_code cellFontGetRenderEffectSlant(vm::ptr<CellFont> font, vm::ptr<f32> eff
 	return CELL_OK;
 }
 
+
 error_code cellFontGetScalePoint(vm::ptr<CellFont> font, vm::ptr<f32> w, vm::ptr<f32> h)
 {
 	cellFont.todo("cellFontGetScalePoint(font=*0x%x, w=*0x%x, h=*0x%x)", font, w, h);
@@ -2190,6 +2191,7 @@ error_code cellFontGetScalePoint(vm::ptr<CellFont> font, vm::ptr<f32> w, vm::ptr
 
 	return CELL_OK;
 }
+
 
 error_code cellFontGraphicsGetLineRGBA(vm::ptr<CellFontGraphicsDrawContext> context, vm::ptr<f32> lineRGBA)
 {
@@ -2234,6 +2236,7 @@ error_code cellFontsetUSleep()
 
 DECLARE(ppu_module_manager::cellFont)("cellFont", []()
 	{
+
 		REG_FUNC(cellFont, cellFontSetFontsetOpenMode);
 		REG_FUNC(cellFont, cellFontSetFontOpenMode);
 		REG_FUNC(cellFont, cellFontCreateRenderer);

@@ -2090,7 +2090,7 @@ error_code sys_fs_fcntl(ppu_thread &ppu, u32 fd, u32 op, vm::ptr<void> _arg,
 
     if (op == 0x8000000b && file->type != lv2_file_type::regular && arg->size) {
       sys_fs.error("%s type: Writing %u bytes to FD=%d (path=%s)", file->type,
-                   arg->size, file->name.data());
+                   arg->size, fd, file->name.data());
     }
 
     if (op == 0x8000000a && file->type != lv2_file_type::regular &&

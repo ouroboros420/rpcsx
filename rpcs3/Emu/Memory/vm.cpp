@@ -491,7 +491,7 @@ namespace vm
 			{
 				if (i == 0 && g_cfg.core.ppu_reservation_priority_over_spu)
 				{
-					busy_wait(5000);
+					rx::busy_wait(5000);
 				}
 			}
 
@@ -560,6 +560,9 @@ namespace vm
 					{
 						constexpr u32 range_size_loc = vm::range_pos - 32;
 
+						// Skip read-only range locks (SPU reservation checks) when acquiring an
+						// exclusive writer lock - a write invalidates the reservation anyway, so
+						// the writer need not drain reservation readers.
 						if ((size2 >> range_size_loc) == (vm::range_readable >> vm::range_pos))
 						{
 							return 0;
@@ -1168,7 +1171,16 @@ namespace vm
 
 		if (!utils::memory_lock(g_sudo_addr + addr, size))
 		{
-			vm_log.error("Failed to lock sudo memory (addr=0x%x, size=0x%x). Consider increasing your system limits.", addr, size);
+			// On Android the RLIMIT_MEMLOCK budget is capped (commonly 64 MiB) and
+			// cannot cover all guest memory (256 MiB main + RSX + stacks), so this
+			// best-effort pin is expected to fail and is benign (no swap on Android
+			// anyway). Log once instead of emitting hundreds of identical errors that
+			// drown out real ones.
+			static atomic_t<bool> s_lock_sudo_warned{false};
+			if (!s_lock_sudo_warned.exchange(true))
+			{
+				vm_log.warning("Failed to lock sudo memory (addr=0x%x, size=0x%x). Consider increasing your system limits. (further failures suppressed)", addr, size);
+			}
 		}
 	}
 

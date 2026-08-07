@@ -11,7 +11,8 @@
 LOG_CHANNEL(cellSysutil);
 
 // NOTE: Unused in this module, but used by gs_frame to determine window size
-const extern std::unordered_map<video_resolution, std::pair<int, int>, value_hash<video_resolution>> g_video_out_resolution_map{
+const extern std::unordered_map<video_resolution, std::pair<int, int>, value_hash<video_resolution>> g_video_out_resolution_map
+{
 	{video_resolution::_1080p, {1920, 1080}},
 	{video_resolution::_1080i, {1920, 1080}},
 	{video_resolution::_720p, {1280, 720}},
@@ -25,7 +26,8 @@ const extern std::unordered_map<video_resolution, std::pair<int, int>, value_has
 	{video_resolution::_960x1080p, {960, 1080}},
 };
 
-const extern std::unordered_map<video_resolution, CellVideoOutResolutionId, value_hash<video_resolution>> g_video_out_resolution_id{
+const extern std::unordered_map<video_resolution, CellVideoOutResolutionId, value_hash<video_resolution>> g_video_out_resolution_id
+{
 	{video_resolution::_1080p, CELL_VIDEO_OUT_RESOLUTION_1080},
 	{video_resolution::_1080i, CELL_VIDEO_OUT_RESOLUTION_1080},
 	{video_resolution::_720p, CELL_VIDEO_OUT_RESOLUTION_720},
@@ -39,7 +41,8 @@ const extern std::unordered_map<video_resolution, CellVideoOutResolutionId, valu
 	{video_resolution::_960x1080p, CELL_VIDEO_OUT_RESOLUTION_960x1080},
 };
 
-const extern std::unordered_map<video_resolution, CellVideoOutScanMode, value_hash<video_resolution>> g_video_out_scan_mode{
+const extern std::unordered_map<video_resolution, CellVideoOutScanMode, value_hash<video_resolution>> g_video_out_scan_mode
+{
 	{video_resolution::_1080p, CELL_VIDEO_OUT_SCAN_MODE_PROGRESSIVE},
 	{video_resolution::_1080i, CELL_VIDEO_OUT_SCAN_MODE_INTERLACE},
 	{video_resolution::_720p, CELL_VIDEO_OUT_SCAN_MODE_PROGRESSIVE},
@@ -53,7 +56,8 @@ const extern std::unordered_map<video_resolution, CellVideoOutScanMode, value_ha
 	{video_resolution::_960x1080p, CELL_VIDEO_OUT_SCAN_MODE_PROGRESSIVE},
 };
 
-const extern std::unordered_map<video_aspect, CellVideoOutDisplayAspect, value_hash<video_aspect>> g_video_out_aspect_id{
+const extern std::unordered_map<video_aspect, CellVideoOutDisplayAspect, value_hash<video_aspect>> g_video_out_aspect_id
+{
 	{video_aspect::_16_9, CELL_VIDEO_OUT_ASPECT_16_9},
 	{video_aspect::_4_3, CELL_VIDEO_OUT_ASPECT_4_3},
 };
@@ -243,8 +247,7 @@ error_code cellVideoOutGetConfiguration(u32 videoOut, vm::ptr<CellVideoOutConfig
 		return CELL_VIDEO_OUT_ERROR_ILLEGAL_PARAMETER;
 	}
 
-	if (option)
-		*option = {};
+	if (option) *option = {};
 	*config = {};
 
 	switch (videoOut)
@@ -506,6 +509,7 @@ error_code cellVideoOutUnregisterCallback(u32 slot)
 	cellSysutil.todo("cellVideoOutUnregisterCallback(slot=%d)", slot);
 	return CELL_OK;
 }
+
 
 void cellSysutil_VideoOut_init()
 {

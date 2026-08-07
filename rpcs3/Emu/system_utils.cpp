@@ -8,10 +8,12 @@
 #include "util/sysinfo.hpp"
 #include "util/File.h"
 #include "util/Thread.h"
+#include "rx/asm.hpp"
 #include "Crypto/unpkg.h"
 #include "Crypto/unself.h"
 #include "Crypto/unedat.h"
 
+#include <atomic>
 #include <charconv>
 #include <thread>
 
@@ -19,11 +21,155 @@ LOG_CHANNEL(sys_log, "SYS");
 
 namespace rpcs3::utils
 {
+	static std::atomic<u32> g_compile_thread_cap{0};
+
+	void set_compile_thread_cap(u32 cap)
+	{
+		g_compile_thread_cap.store(cap, std::memory_order_relaxed);
+	}
+
+	u32 get_compile_thread_cap()
+	{
+		return g_compile_thread_cap.load(std::memory_order_relaxed);
+	}
+
+	// App-provided LLVM compile MEMORY budget in bytes (0 = unset). utils::get_total_memory()
+	// returns accurate PHYSICAL RAM (sysconf(_SC_PHYS_PAGES) = the kernel totalram; it does
+	// NOT count zRAM/swap - that is SwapTotal), so on an 8 GB device it is ~7 GiB, not
+	// inflated. The real problem is that a single Android process cannot safely allocate
+	// near all physical RAM before the per-process cgroup / Low Memory Killer limit kills it,
+	// so the stock total/3 budget is still far too loose. The app derives a device-scaled,
+	// per-process-safe figure (ActivityManager) and pushes it here; the PPU compiler uses it
+	// as the concurrent-compile memory ceiling so large modules serialize instead of OOMing.
+	// See PPUThread.cpp.
+	static std::atomic<u64> g_compile_memory_budget{0};
+
+	void set_compile_memory_budget(u64 bytes)
+	{
+		g_compile_memory_budget.store(bytes, std::memory_order_relaxed);
+	}
+
+	u64 get_compile_memory_budget()
+	{
+		return g_compile_memory_budget.load(std::memory_order_relaxed);
+	}
+
+	static std::atomic<bool> g_power_save_mode{false};
+
+	void set_power_save_mode(bool on)
+	{
+		g_power_save_mode.store(on, std::memory_order_relaxed);
+	}
+
+	bool get_power_save_mode()
+	{
+		return g_power_save_mode.load(std::memory_order_relaxed);
+	}
+
+	static std::atomic<float> g_thermal_frame_cap{0.f};
+
+	void set_thermal_frame_cap(float fps)
+	{
+		g_thermal_frame_cap.store(fps > 0.f ? fps : 0.f, std::memory_order_relaxed);
+	}
+
+	float get_thermal_frame_cap()
+	{
+		return g_thermal_frame_cap.load(std::memory_order_relaxed);
+	}
+
+	static std::atomic<int> g_rsx_thread_tid{0};
+	static std::atomic<u64> g_frame_work_ns{0};
+
+	void set_rsx_thread_tid(int tid)
+	{
+		g_rsx_thread_tid.store(tid, std::memory_order_relaxed);
+	}
+
+	int get_rsx_thread_tid()
+	{
+		return g_rsx_thread_tid.load(std::memory_order_relaxed);
+	}
+
+	void report_frame_work_ns(u64 ns)
+	{
+		g_frame_work_ns.store(ns, std::memory_order_relaxed);
+	}
+
+	u64 get_frame_work_ns()
+	{
+		return g_frame_work_ns.load(std::memory_order_relaxed);
+	}
+
+	static std::atomic<u64> g_frame_period_ns{0};
+
+	void report_frame_period_ns(u64 ns)
+	{
+		g_frame_period_ns.store(ns, std::memory_order_relaxed);
+	}
+
+	u64 get_frame_period_ns()
+	{
+		return g_frame_period_ns.load(std::memory_order_relaxed);
+	}
+
+	bool low_power_wait_enabled()
+	{
+		return g_power_save_mode.load(std::memory_order_relaxed) || rx::wfe_enabled();
+	}
+
+	// Default OFF: our shader-interpreter snapshot compiles pipelines synchronously
+	// on the RSX thread (pre-rework), so forcing async_with_interpreter causes full
+	// freezes on new shaders. Opt-in toggle until the upstream async-variant
+	// interpreter rework is ported.
+	static std::atomic<bool> g_smooth_shaders{false};
+
+	void set_smooth_shaders(bool on)
+	{
+		g_smooth_shaders.store(on, std::memory_order_relaxed);
+	}
+
+	bool get_smooth_shaders()
+	{
+		return g_smooth_shaders.load(std::memory_order_relaxed);
+	}
+
+	static std::atomic<bool> g_gpu_turbo{false};
+	static void (*g_gpu_turbo_handler)(bool) = nullptr;
+
+	void set_gpu_turbo(bool on)
+	{
+		g_gpu_turbo.store(on, std::memory_order_relaxed);
+		// The actual clock-pinning ioctl is app-side (adrenotools); run it via the registered
+		// handler so both the app toggle and the in-game home menu funnel through one path.
+		if (auto handler = g_gpu_turbo_handler)
+		{
+			handler(on);
+		}
+	}
+
+	bool get_gpu_turbo()
+	{
+		return g_gpu_turbo.load(std::memory_order_relaxed);
+	}
+
+	void set_gpu_turbo_handler(void (*handler)(bool))
+	{
+		g_gpu_turbo_handler = handler;
+	}
+
 	u32 get_max_threads()
 	{
 		const u32 max_threads = static_cast<u32>(g_cfg.core.llvm_threads);
 		const u32 hw_threads = ::utils::get_thread_count();
-		const u32 thread_count = max_threads > 0 ? std::min(max_threads, hw_threads) : hw_threads;
+		u32 thread_count = max_threads > 0 ? std::min(max_threads, hw_threads) : hw_threads;
+
+		// Apply the Android low-RAM compile-thread cap to the effective count.
+		if (const u32 cap = g_compile_thread_cap.load(std::memory_order_relaxed); cap > 0)
+		{
+			thread_count = std::min(thread_count, cap);
+		}
+
 		return thread_count;
 	}
 

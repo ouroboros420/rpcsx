@@ -11,6 +11,7 @@
 #include "Thread.h"
 #include "util/JIT.h"
 #include <cfenv>
+#include <cstdio> // detect_android_big_mask(): snprintf/fopen/fscanf on sysfs
 
 #ifdef ARCH_ARM64
 #include "Emu/CPU/Backends/AArch64/AArch64Signal.h"
@@ -23,7 +24,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <Psapi.h>
+#include <psapi.h>
 #include <process.h>
 #include <sysinfoapi.h>
 
@@ -55,6 +56,7 @@ DYNAMIC_IMPORT_RENAME("Kernel32.dll", SetThreadDescriptionImport, "SetThreadDesc
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <time.h>
+#include "stack_trace.h"
 #endif
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -1984,7 +1986,7 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 		{
 			if (auto mem = vm::get(vm::any, addr))
 			{
-				reader_lock lock(pf_entries.mutex);
+				::reader_lock lock(pf_entries.mutex);
 
 				for (const auto& entry : pf_entries.entries)
 				{
@@ -2578,9 +2580,41 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 #endif
 
+#ifdef ANDROID
+	// Resolve the faulting PC to "<module>+0x<offset>" with a single dladdr (no stack
+	// walk, so it can't itself fault) and log it WITH the fatal message. This is the
+	// symbolizable crash site; feed the offset to llvm-symbolizer -i against the
+	// matching unstripped .so.
+	{
+		const auto pc_sym = utils::get_backtrace_symbols({reinterpret_cast<void*>(RIP(context))});
+		if (!pc_sym.empty())
+		{
+			fmt::append(msg, "Faulting PC: %s\n", pc_sym[0]);
+		}
+	}
+#endif
+
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
 	logs::listener::sync_all();
+
+#ifdef ANDROID
+	// Best-effort full backtrace AFTER the critical info is flushed: unwinding from a
+	// crash site can fault, so do it last where nothing important is at risk.
+	{
+		std::string bt;
+		const auto symbols = utils::get_backtrace_symbols(utils::get_backtrace(64));
+		for (usz i = 0; i < symbols.size(); i++)
+		{
+			fmt::append(bt, "#%u: %s\n", i, symbols[i]);
+		}
+		if (!bt.empty())
+		{
+			sys_log.fatal("\nNative backtrace:\n%s", bt);
+			logs::listener::sync_all();
+		}
+	}
+#endif
 
 	if (rx::isDebuggerPresent())
 	{
@@ -2598,9 +2632,37 @@ static void sigill_handler(int /*sig*/, siginfo_t* info, void* /*uct*/) noexcept
 
 	append_thread_name(msg);
 
+#ifdef ANDROID
+	// Resolve the faulting PC to "<module>+0x<offset>" with a single dladdr (no stack walk).
+	{
+		const auto pc_sym = utils::get_backtrace_symbols({info->si_addr});
+		if (!pc_sym.empty())
+		{
+			fmt::append(msg, "Faulting PC: %s\n", pc_sym[0]);
+		}
+	}
+#endif
+
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
 	logs::listener::sync_all();
+
+#ifdef ANDROID
+	// Best-effort full backtrace after the critical info is flushed.
+	{
+		std::string bt;
+		const auto symbols = utils::get_backtrace_symbols(utils::get_backtrace(64));
+		for (usz i = 0; i < symbols.size(); i++)
+		{
+			fmt::append(bt, "#%u: %s\n", i, symbols[i]);
+		}
+		if (!bt.empty())
+		{
+			sys_log.fatal("\nNative backtrace:\n%s", bt);
+			logs::listener::sync_all();
+		}
+	}
+#endif
 
 	if (rx::isDebuggerPresent())
 	{
@@ -2616,6 +2678,74 @@ void sigpipe_signaling_handler(int)
 {
 }
 
+#ifdef ANDROID
+// Graft of ouroboros420 e0528f6 (+ re-entrancy guard from 2816549): silent process
+// deaths left nothing in the log because only SIGSEGV/SIGILL were captured.
+static void sigabrt_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noexcept
+{
+	// Re-entrancy guard: the diagnostics below allocate (std::string, the logger,
+	// backtrace symbolication). During a memory-exhaustion SIGABRT those allocations
+	// can themselves abort/terminate, which otherwise spins into an endless terminate
+	// storm that buries the real aborting frame. If this handler is re-entered, restore
+	// the default action and re-raise so we get a single clean tombstone instead.
+	static atomic_t<int> s_in_sigabrt{0};
+	if (s_in_sigabrt.exchange(1) != 0)
+	{
+		::signal(SIGABRT, SIG_DFL);
+		::raise(SIGABRT);
+		return;
+	}
+
+	// libc/scudo/driver abort() - without this handler the process dies with
+	// nothing in RPCSX.log (only SIGSEGV/SIGILL were captured before).
+	std::string msg = "Process abort (SIGABRT) - heap corruption, libc assert or library abort.\n";
+
+	append_thread_name(msg);
+
+	sys_log.fatal("\n%s", msg);
+	sys_log.notice("\n%s", dump_useful_thread_info());
+	logs::listener::sync_all();
+
+	// abort() is a normal call chain (not a corrupted PC), so a full unwind is
+	// safe here and identifies the aborting library (scudo, Vulkan driver, libc).
+	{
+		std::string bt;
+		const auto symbols = utils::get_backtrace_symbols(utils::get_backtrace(64));
+		for (usz i = 0; i < symbols.size(); i++)
+		{
+			fmt::append(bt, "#%u: %s\n", i, symbols[i]);
+		}
+		if (!bt.empty())
+		{
+			sys_log.fatal("\nNative backtrace:\n%s", bt);
+			logs::listener::sync_all();
+		}
+	}
+
+	// Restore the default action and re-raise so the system tombstone is still produced
+	::signal(SIGABRT, SIG_DFL);
+	::raise(SIGABRT);
+}
+
+// Graft of ouroboros420 5bb2b4c: release-LLVM llvm_unreachable/__builtin_trap paths
+// emit a BRK instruction; with no handler the process died instantly with ZERO log
+// output. Log + tombstone like SIGABRT.
+static void sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* /*uct*/) noexcept
+{
+	std::string msg = "Process trap (SIGTRAP) - llvm_unreachable/__builtin_trap (BRK) or debug break.\n";
+
+	append_thread_name(msg);
+
+	sys_log.fatal("\n%s", msg);
+	sys_log.notice("\n%s", dump_useful_thread_info());
+	logs::listener::sync_all();
+
+	// Restore the default action and re-raise so the system tombstone is still produced
+	::signal(SIGTRAP, SIG_DFL);
+	::raise(SIGTRAP);
+}
+#endif
+
 const bool s_exception_handler_set = []() -> bool
 {
 	struct ::sigaction sa;
@@ -2629,7 +2759,9 @@ const bool s_exception_handler_set = []() -> bool
 		std::abort();
 	}
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(ANDROID)
+	// ouroboros420 e0528f6: on ARM Android SIGBUS (alignment faults, truncated mmaps)
+	// would otherwise kill the process with nothing written to the log.
 	if (::sigaction(SIGBUS, &sa, NULL) == -1)
 	{
 		std::fprintf(stderr, "sigaction(SIGBUS) failed (%d).\n", errno);
@@ -2643,6 +2775,25 @@ const bool s_exception_handler_set = []() -> bool
 		std::fprintf(stderr, "sigaction(SIGILL) failed (%d).\n", errno);
 		std::abort();
 	}
+
+#ifdef ANDROID
+	sa.sa_sigaction = sigabrt_handler;
+	if (::sigaction(SIGABRT, &sa, NULL) == -1)
+	{
+		std::fprintf(stderr, "sigaction(SIGABRT) failed (%d).\n", errno);
+		std::abort();
+	}
+
+	// NOTE: SIGSYS is deliberately NOT claimed here - the orbis side
+	// (rx::thread::initialize) uses it for syscall emulation, and seccomp SIGSYS
+	// deaths already produce attributable tombstones.
+	sa.sa_sigaction = sigtrap_handler;
+	if (::sigaction(SIGTRAP, &sa, NULL) == -1)
+	{
+		std::fprintf(stderr, "sigaction(SIGTRAP) failed (%d).\n", errno);
+		std::abort();
+	}
+#endif
 
 	sa.sa_handler = sigpipe_signaling_handler;
 	if (::sigaction(SIGPIPE, &sa, NULL) == -1)
@@ -2661,6 +2812,21 @@ const bool s_terminate_handler_set = []() -> bool
 {
 	std::set_terminate([]()
 		{
+			// Graft of ouroboros420 2816549: under memory exhaustion the terminate path
+			// itself allocates (report_fatal_error formats a message -> operator new; with
+			// -fno-exceptions a failed allocation calls std::terminate again), which
+			// recurses forever (terminate -> get_new_handler -> terminate ...) and buries
+			// the real crash under 100+ stacked aborts. If terminate re-enters, hard-stop
+			// without allocating.
+			static atomic_t<int> s_terminating{0};
+			if (s_terminating.exchange(1) != 0)
+			{
+#ifndef _WIN32
+				::signal(SIGABRT, SIG_DFL);
+#endif
+				std::abort();
+			}
+
 			if (rx::isDebuggerPresent())
 			{
 				logs::listener::sync_all();
@@ -3196,7 +3362,17 @@ bool thread_base::join(bool dtor) const
 	}
 
 	// Hacked for too sleepy threads (1ms) TODO: make sure it's unneeded and remove
-	const auto timeout = dtor && Emu.IsStopped() ? atomic_wait_timeout{1'000'000} : atomic_wait_timeout::inf;
+	auto timeout = dtor && Emu.IsStopped() ? atomic_wait_timeout{1'000'000} : atomic_wait_timeout::inf;
+
+	// Graft of ouroboros420 7aa6c17: with opt-in WFE low-power waits, the joined thread
+	// may be parked on a watched cacheline (rx::wfe_park) rather than this sync word, so
+	// it can't see a stop on its own. Cap the wait so we periodically wake to SEV it
+	// (below); otherwise the join hangs waiting for a thread that never observes its stop
+	// flag (on-device: savestate save froze for 34s -> ANR).
+	if (rx::wfe_enabled() && timeout == atomic_wait_timeout::inf)
+	{
+		timeout = atomic_wait_timeout{1'000'000};
+	}
 
 	auto stamp0 = rx::get_tsc();
 
@@ -3207,6 +3383,13 @@ bool thread_base::join(bool dtor) const
 		if (m_sync & 2)
 		{
 			break;
+		}
+
+		// Wake any thread parked in a low-power WFE wait so it re-checks its stop
+		// flag and can finish; harmless no-op when WFE is disabled or not on ARM.
+		if (rx::wfe_enabled())
+		{
+			rx::send_event();
 		}
 
 		if (i >= 16 && !(i & (i - 1)) && timeout != atomic_wait_timeout::inf)
@@ -3538,9 +3721,96 @@ void thread_ctrl::detect_cpu_layout()
 	}
 }
 
+namespace
+{
+	std::atomic<bool> g_android_affinity{false};
+	std::atomic<u64> g_android_big_mask{0}; // 0 = unknown/disabled
+	std::atomic<bool> g_android_clusters_done{false};
+
+	// Big cluster = cores whose max frequency is above the lowest tier (the
+	// efficiency cores). 0 if detection fails or all cores are equal.
+	//
+	// Grafted from ouroboros420 6a3f2e0 (rebase-rpcs3-jun2026). Kept verbatim in
+	// behaviour: it is the big.LITTLE pinning this tree never had, and it is
+	// additive - nothing changes unless set_android_affinity(true) is called.
+	u64 detect_android_big_mask()
+	{
+		const u32 n = std::min<u32>(std::thread::hardware_concurrency(), 64u);
+		u64 freqs[64] = {};
+		u64 minf = ~0ull, maxf = 0;
+		for (u32 i = 0; i < n; i++)
+		{
+			char path[96];
+			std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", i);
+			if (std::FILE* f = std::fopen(path, "r"))
+			{
+				unsigned long long v = 0;
+				if (std::fscanf(f, "%llu", &v) == 1 && v)
+				{
+					freqs[i] = v;
+					minf = std::min<u64>(minf, v);
+					maxf = std::max<u64>(maxf, v);
+				}
+				std::fclose(f);
+			}
+		}
+
+		if (maxf == 0 || minf == maxf)
+		{
+			return 0;
+		}
+
+		u64 mask = 0;
+		for (u32 i = 0; i < n; i++)
+		{
+			if (freqs[i] > minf)
+			{
+				mask |= 1ull << i;
+			}
+		}
+		return mask;
+	}
+} // namespace
+
+// NOTE: these two stay OUTSIDE #ifdef ANDROID. They are declared unconditionally
+// in Thread.h and referenced from CPUThread/RSXThread/RSXOffload and the overlay
+// settings page, so guarding them would break every non-Android build.
+void thread_ctrl::set_android_affinity(bool enable)
+{
+	g_android_affinity.store(enable, std::memory_order_relaxed);
+}
+
+bool thread_ctrl::android_affinity_enabled()
+{
+	return g_android_affinity.load(std::memory_order_relaxed);
+}
+
 u64 thread_ctrl::get_affinity_mask(thread_class group)
 {
 #ifdef ANDROID
+	// Opt-in big-cluster pinning. Detected once, lazily.
+	if (g_android_affinity.load(std::memory_order_relaxed))
+	{
+		if (!g_android_clusters_done.load(std::memory_order_relaxed))
+		{
+			g_android_big_mask.store(detect_android_big_mask(), std::memory_order_relaxed);
+			g_android_clusters_done.store(true, std::memory_order_relaxed);
+		}
+
+		if (const u64 big = g_android_big_mask.load(std::memory_order_relaxed))
+		{
+			switch (group)
+			{
+			case thread_class::ppu:
+			case thread_class::spu:
+			case thread_class::rsx:
+				return big; // heavy work on the big cluster; helpers fall through
+			default:
+				break;
+			}
+		}
+	}
+
 	u64 mask = 0;
 	thread_class affinities[] =
 		{
@@ -3790,6 +4060,24 @@ void thread_ctrl::set_native_priority(int priority)
 	if (!SetThreadPriority(_this_thread, native_priority))
 	{
 		sig_log.error("SetThreadPriority() failed: %s", fmt::win_error{GetLastError(), nullptr});
+	}
+#elif defined(ANDROID)
+	// Graft of ouroboros420 201cc3b: JIT/compile threads run under SCHED_OTHER, whose
+	// sched_priority range is [0,0] on Linux/Android. The pthread_setschedparam() path
+	// below is therefore a no-op there, so "low priority" compile threads still ran at
+	// full normal priority and saturated every core - starving the UI thread and causing
+	// ANRs while a game compiled. SCHED_OTHER is (de)prioritised via the nice value.
+	//   priority < 0  -> nice +10 (Android THREAD_PRIORITY_BACKGROUND): keeps the
+	//                    compile running but lets the foreground UI preempt it.
+	//   priority == 0 -> nice 0 (restore to normal).
+	//   priority > 0  -> nice -2 (best effort; raising may be denied on Android).
+	const int nice_value = priority < 0 ? 10 : (priority > 0 ? -2 : 0);
+
+	if (setpriority(PRIO_PROCESS, static_cast<id_t>(::gettid()), nice_value) != 0 && priority < 0)
+	{
+		// Only the lowering path matters for responsiveness; raising can fail
+		// without CAP_SYS_NICE, which is fine - don't spam the log for it.
+		sig_log.error("setpriority(nice=%d) failed", nice_value);
 	}
 #else
 	int policy;

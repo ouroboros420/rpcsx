@@ -129,11 +129,11 @@ struct IpmiServer {
   }
 
   template <typename OutT, typename InT>
+    requires(!std::is_same_v<InT, void>)
   IpmiServer &addSyncMethod(
       std::uint32_t methodId,
       std::function<std::int32_t(OutT &out, const InT &param)> handler) {
-    syncMethods[methodId] = [=](orbis::IpmiSession &session,
-                                std::int32_t &errorCode,
+    syncMethods[methodId] = [=](orbis::IpmiSession &, std::int32_t &errorCode,
                                 std::vector<std::vector<std::byte>> &outData,
                                 const std::vector<std::span<std::byte>> &inData)
         -> orbis::ErrorCode {
@@ -150,6 +150,31 @@ struct IpmiServer {
 
       OutT out;
       errorCode = handler(out, *reinterpret_cast<InT *>(inData[0].data()));
+      std::memcpy(outData[0].data(), &out, sizeof(out));
+      outData[0].resize(sizeof(OutT));
+      return {};
+    };
+    return *this;
+  }
+
+  template <typename OutT, typename InT>
+    requires std::is_same_v<InT, void>
+  IpmiServer &addSyncMethod(std::uint32_t methodId,
+                            std::function<std::int32_t(OutT &out)> handler) {
+    syncMethods[methodId] = [=](orbis::IpmiSession &, std::int32_t &errorCode,
+                                std::vector<std::vector<std::byte>> &outData,
+                                const std::vector<std::span<std::byte>> &inData)
+        -> orbis::ErrorCode {
+      if (outData.size() != 1 || inData.size() != 0) {
+        return orbis::ErrorCode::INVAL;
+      }
+
+      if (outData[0].size() < sizeof(OutT)) {
+        return orbis::ErrorCode::INVAL;
+      }
+
+      OutT out;
+      errorCode = handler(out);
       std::memcpy(outData[0].data(), &out, sizeof(out));
       outData[0].resize(sizeof(OutT));
       return {};
@@ -258,13 +283,16 @@ struct IpmiServer {
 
 extern ipmi::IpmiClient audioIpmiClient;
 
+void setWorkerProcess(orbis::Process *process);
+
 IpmiClient createIpmiClient(orbis::Thread *thread, const char *name);
 IpmiServer &createIpmiServer(orbis::Process *process, const char *name);
 orbis::EventFlag *createEventFlag(std::string_view name, uint32_t attrs,
                                   uint64_t initPattern);
 orbis::Semaphore *createSemaphore(std::string_view name, uint32_t attrs,
                                   uint64_t initCount, uint64_t maxCount);
-void createShm(const char *name, uint32_t flags, uint32_t mode, uint64_t size);
+rx::Ref<orbis::File> createShm(const char *name, uint32_t flags, uint32_t mode,
+                               uint64_t size);
 
 void createMiniSysCoreObjects(orbis::Process *process);
 void createSysAvControlObjects(orbis::Process *process);

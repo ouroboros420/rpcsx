@@ -449,6 +449,31 @@ namespace rsx
 			u32 processed = 0;
 			const bool has_unclaimed = (m_pending_writes.back().sink == 0);
 
+			// Batch-prefetch every GPU occlusion result this drain will read in one round-trip.
+			// The VK backend collapses N blocking reads into a single copy+fence and primes its
+			// per-query cache; default backends no-op (and the loop below reads per-query as before).
+			// Filter = implemented && num_draws, a superset-or-equal of what the loop reads (the
+			// dynamic have_result early-out only skips some, which costs at most a wasted copy).
+			{
+				std::vector<occlusion_query_info*> prefetch_set;
+				prefetch_set.reserve(m_pending_writes.size());
+				for (auto& writer : m_pending_writes)
+				{
+					if (!writer.sink)
+						break;
+
+					auto query = writer.query;
+					if (!query || !query->num_draws)
+						continue;
+
+					if (writer.type == CELL_GCM_ZPASS_PIXEL_CNT || writer.type == CELL_GCM_ZCULL_STATS3)
+						prefetch_set.push_back(query);
+				}
+
+				if (prefetch_set.size() > 1)
+					prefetch_occlusion_query_results(prefetch_set);
+			}
+
 			// Write all claimed reports unconditionally
 			for (auto& writer : m_pending_writes)
 			{
@@ -468,6 +493,7 @@ namespace rsx
 					if (implemented && !have_result && query->num_draws)
 					{
 						get_occlusion_query_result(query);
+						rsx::g_perf_zcull_readbacks++;
 						counter.result += query->result;
 					}
 					else
@@ -582,6 +608,41 @@ namespace rsx
 				}
 			}
 
+			// Batch-prefetch the GPU occlusion results this drain will read (see sync() above).
+			// Mirror the loop's force-read gate exactly: force up to the sync target, then ready-only
+			// with a 'too early' break, so the prefetch set is always a subset-or-equal of what the
+			// loop reads and we never push a not-yet-submitted query into the batch (which would add a
+			// hard sync the loop deliberately avoids). Uses a LOCAL sync_addr so the real loop's
+			// sync_address parameter below is untouched.
+			{
+				u32 sync_addr = sync_address;
+				std::vector<occlusion_query_info*> prefetch_set;
+				prefetch_set.reserve(m_pending_writes.size());
+				for (auto& writer : m_pending_writes)
+				{
+					if (!writer.sink)
+						break;
+
+					const bool local_force = (sync_addr != 0);
+					if (local_force && writer.sink == sync_addr && !writer.forwarder)
+						sync_addr = 0;
+
+					auto query = writer.query;
+					if (!query || !query->num_draws)
+						continue;
+					if (writer.type != CELL_GCM_ZPASS_PIXEL_CNT && writer.type != CELL_GCM_ZCULL_STATS3)
+						continue;
+
+					if (local_force || check_occlusion_query_status(query))
+						prefetch_set.push_back(query);
+					else
+						break;
+				}
+
+				if (prefetch_set.size() > 1)
+					prefetch_occlusion_query_results(prefetch_set);
+			}
+
 			u32 processed = 0;
 			for (auto& writer : m_pending_writes)
 			{
@@ -612,6 +673,7 @@ namespace rsx
 					else if (force_read || check_occlusion_query_status(query))
 					{
 						get_occlusion_query_result(query);
+						rsx::g_perf_zcull_readbacks++;
 						counter.result += query->result;
 					}
 					else

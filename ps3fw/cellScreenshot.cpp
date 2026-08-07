@@ -139,6 +139,7 @@ error_code cellScreenShotDisable()
 		cellScreenshot.warning("cellScreenShotDisable(): Disabled");
 	}
 
+
 	return CELL_OK;
 }
 

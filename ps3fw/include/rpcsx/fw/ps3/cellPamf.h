@@ -322,7 +322,8 @@ struct PamfStreamHeader
 			u8 matrixCoefficients;
 			u8 x18; // contains entropyCodingModeFlag, deblockingFilterFlag, minNumSlicePerPictureIdc, nfwIdc
 			u8 maxMeanBitrate;
-		} AVC;
+		}
+		AVC;
 
 		// M2V specific information
 		struct
@@ -344,7 +345,8 @@ struct PamfStreamHeader
 			u8 colourPrimaries;
 			u8 transferCharacteristics;
 			u8 matrixCoefficients;
-		} M2V;
+		}
+		M2V;
 
 		// Audio specific information
 		struct
@@ -353,7 +355,8 @@ struct PamfStreamHeader
 			u8 channels;          // number of channels (1, 2, 6, 8)
 			u8 freq;              // 1 (always 48000)
 			u8 bps;               // LPCM only
-		} audio;
+		}
+		audio;
 	};
 };
 
@@ -460,7 +463,8 @@ struct PsmfStreamHeader
 		{
 			u8 horizontalSize; // in units of 16 pixels
 			u8 verticalSize;   // in units of 16 pixels
-		} video;
+		}
+		video;
 
 		// Audio specific information
 		struct
@@ -468,7 +472,8 @@ struct PsmfStreamHeader
 			be_t<u16, 1> unknown;    // 0
 			u8 channelConfiguration; // 1 = mono, 2 = stereo
 			u8 samplingFrequency;    // 2 = 44.1kHz
-		} audio;
+		}
+		audio;
 	};
 };
 
@@ -570,7 +575,8 @@ struct CellPamfReader
 			vm::bcptr<PamfGroupingPeriod> currentGroupingPeriod;
 			vm::bcptr<PamfGroup> currentGroup;
 			vm::bcptr<PamfStreamHeader> currentStream;
-		} pamf;
+		}
+		pamf;
 
 		struct
 		{
@@ -579,7 +585,8 @@ struct CellPamfReader
 			vm::bcptr<PsmfGroupingPeriod> currentGroupingPeriod;
 			vm::bcptr<PsmfGroup> currentGroup;
 			vm::bcptr<PsmfStreamHeader> currentStream;
-		} psmf;
+		}
+		psmf;
 	};
 
 	u32 reserved[18];

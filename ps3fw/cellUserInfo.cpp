@@ -1,17 +1,17 @@
-#include "Emu/Cell/PPUModule.h"
-#include "Emu/IdManager.h"
-#include "Emu/System.h"
-#include "Emu/VFS.h"
-#include "Emu/system_utils.hpp"
 #include "stdafx.h"
+#include "Emu/System.h"
+#include "Emu/system_utils.hpp"
+#include "Emu/VFS.h"
+#include "Emu/IdManager.h"
+#include "Emu/Cell/PPUModule.h"
 
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/Overlays/overlay_user_list_dialog.h"
 
 #include "cellUserInfo.h"
 
-#include "cellSysutil.h"
 #include "util/StrUtil.h"
+#include "cellSysutil.h"
 
 LOG_CHANNEL(cellUserInfo);
 
@@ -25,8 +25,7 @@ std::string get_username(const u32 user_id)
 {
 	std::string username;
 
-	if (const fs::file file{rpcs3::utils::get_hdd0_dir() +
-							fmt::format("home/%08d/localusername", user_id)})
+	if (const fs::file file{rpcs3::utils::get_hdd0_dir() + fmt::format("home/%08d/localusername", user_id)})
 	{
 		username = file.to_string();
 		username.resize(CELL_USERINFO_USERNAME_SIZE); // TODO: investigate
@@ -35,37 +34,36 @@ std::string get_username(const u32 user_id)
 	return username;
 }
 
-template <>
+template<>
 void fmt_class_string<CellUserInfoError>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](auto error)
+	{
+		switch (error)
 		{
-			switch (error)
-			{
-				STR_CASE(CELL_USERINFO_ERROR_BUSY);
-				STR_CASE(CELL_USERINFO_ERROR_INTERNAL);
-				STR_CASE(CELL_USERINFO_ERROR_PARAM);
-				STR_CASE(CELL_USERINFO_ERROR_NOUSER);
-			}
+		STR_CASE(CELL_USERINFO_ERROR_BUSY);
+		STR_CASE(CELL_USERINFO_ERROR_INTERNAL);
+		STR_CASE(CELL_USERINFO_ERROR_PARAM);
+		STR_CASE(CELL_USERINFO_ERROR_NOUSER);
+		}
 
-			return unknown;
-		});
+		return unknown;
+	});
 }
 
-template <>
-void fmt_class_string<cell_user_callback_result>::format(std::string& out,
-	u64 arg)
+template<>
+void fmt_class_string<cell_user_callback_result>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](auto error)
+	{
+		switch (error)
 		{
-			switch (error)
-			{
-				STR_CASE(CELL_USERINFO_RET_OK);
-				STR_CASE(CELL_USERINFO_RET_CANCEL);
-			}
+		STR_CASE(CELL_USERINFO_RET_OK);
+		STR_CASE(CELL_USERINFO_RET_CANCEL);
+		}
 
-			return unknown;
-		});
+		return unknown;
+	});
 }
 
 error_code cellUserInfoGetStat(u32 id, vm::ptr<CellUserInfoUserStat> stat)
@@ -88,9 +86,7 @@ error_code cellUserInfoGetStat(u32 id, vm::ptr<CellUserInfoUserStat> stat)
 
 	if (!fs::is_dir(path))
 	{
-		cellUserInfo.error("cellUserInfoGetStat(): CELL_USERINFO_ERROR_NOUSER. "
-						   "User %d doesn't exist. Did you delete the user folder?",
-			id);
+		cellUserInfo.error("cellUserInfoGetStat(): CELL_USERINFO_ERROR_NOUSER. User %d doesn't exist. Did you delete the user folder?", id);
 		return CELL_USERINFO_ERROR_NOUSER;
 	}
 
@@ -98,10 +94,7 @@ error_code cellUserInfoGetStat(u32 id, vm::ptr<CellUserInfoUserStat> stat)
 
 	if (!f)
 	{
-		cellUserInfo.error(
-			"cellUserInfoGetStat(): CELL_USERINFO_ERROR_INTERNAL. Username for "
-			"user %08u doesn't exist. Did you delete the username file?",
-			id);
+		cellUserInfo.error("cellUserInfoGetStat(): CELL_USERINFO_ERROR_INTERNAL. Username for user %08u doesn't exist. Did you delete the username file?", id);
 		return CELL_USERINFO_ERROR_INTERNAL;
 	}
 
@@ -114,14 +107,9 @@ error_code cellUserInfoGetStat(u32 id, vm::ptr<CellUserInfoUserStat> stat)
 	return CELL_OK;
 }
 
-error_code
-cellUserInfoSelectUser_ListType(vm::ptr<CellUserInfoTypeSet> listType,
-	vm::ptr<CellUserInfoFinishCallback> funcSelect,
-	u32 container, vm::ptr<void> userdata)
+error_code cellUserInfoSelectUser_ListType(vm::ptr<CellUserInfoTypeSet> listType, vm::ptr<CellUserInfoFinishCallback> funcSelect, u32 container, vm::ptr<void> userdata)
 {
-	cellUserInfo.warning("cellUserInfoSelectUser_ListType(listType=*0x%x, "
-						 "funcSelect=*0x%x, container=0x%x, userdata=*0x%x)",
-		listType, funcSelect, container, userdata);
+	cellUserInfo.warning("cellUserInfoSelectUser_ListType(listType=*0x%x, funcSelect=*0x%x, container=0x%x, userdata=*0x%x)", listType, funcSelect, container, userdata);
 
 	if (!listType || !funcSelect) // TODO: confirm
 	{
@@ -158,8 +146,7 @@ cellUserInfoSelectUser_ListType(vm::ptr<CellUserInfoTypeSet> listType,
 		}
 
 		// TODO: maybe also restrict this to CELL_USERINFO_USER_MAX
-		if (listType->type != CELL_USERINFO_LISTTYPE_NOCURRENT ||
-			user_id != Emu.GetUsrId())
+		if (listType->type != CELL_USERINFO_LISTTYPE_NOCURRENT || user_id != Emu.GetUsrId())
 		{
 			user_ids.push_back(user_id);
 		}
@@ -172,8 +159,7 @@ cellUserInfoSelectUser_ListType(vm::ptr<CellUserInfoTypeSet> listType,
 			return CELL_USERINFO_ERROR_BUSY;
 		}
 
-		if (s32 ret = sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_BEGIN, 0);
-			ret < 0)
+		if (s32 ret = sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_BEGIN, 0); ret < 0)
 		{
 			g_fxo->get<user_info_manager>().dialog_opened = false;
 			return CELL_USERINFO_ERROR_BUSY;
@@ -182,76 +168,61 @@ cellUserInfoSelectUser_ListType(vm::ptr<CellUserInfoTypeSet> listType,
 		const std::string title = listType->title.get_ptr();
 		const u32 focused = listType->focus;
 
-		cellUserInfo.warning("cellUserInfoSelectUser_ListType: opening "
-							 "user_list_dialog with: title='%s', focused=%d",
-			title, focused);
+		cellUserInfo.warning("cellUserInfoSelectUser_ListType: opening user_list_dialog with: title='%s', focused=%d", title, focused);
 
 		const bool enable_overlay = g_fxo->get<user_info_manager>().enable_overlay;
-		const error_code result =
-			manager->create<rsx::overlays::user_list_dialog>()->show(
-				title, focused, user_ids, enable_overlay,
-				[funcSelect, userdata](s32 status)
+		const error_code result = manager->create<rsx::overlays::user_list_dialog>()->show(title, focused, user_ids, enable_overlay, [funcSelect, userdata](s32 status)
+		{
+			s32 callback_result = CELL_USERINFO_RET_CANCEL;
+			u32 selected_user_id = 0;
+			std::string selected_username;
+
+			if (status >= 0)
+			{
+				callback_result = CELL_USERINFO_RET_OK;
+				selected_user_id = static_cast<u32>(status);
+				selected_username = get_username(selected_user_id);
+			}
+
+			cellUserInfo.warning("cellUserInfoSelectUser_ListType: callback_result=%s, selected_user_id=%d, selected_username='%s'", callback_result, selected_user_id, selected_username);
+
+			g_fxo->get<user_info_manager>().dialog_opened = false;
+
+			sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_END, 0);
+
+			sysutil_register_cb([=](ppu_thread& ppu) -> s32
+			{
+				vm::var<CellUserInfoUserStat> selectUser;
+				if (status >= 0)
 				{
-					s32 callback_result = CELL_USERINFO_RET_CANCEL;
-					u32 selected_user_id = 0;
-					std::string selected_username;
-
-					if (status >= 0)
-					{
-						callback_result = CELL_USERINFO_RET_OK;
-						selected_user_id = static_cast<u32>(status);
-						selected_username = get_username(selected_user_id);
-					}
-
-					cellUserInfo.warning(
-						"cellUserInfoSelectUser_ListType: callback_result=%s, "
-						"selected_user_id=%d, selected_username='%s'",
-						callback_result, selected_user_id, selected_username);
-
-					g_fxo->get<user_info_manager>().dialog_opened = false;
-
-					sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_END, 0);
-
-					sysutil_register_cb([=](ppu_thread& ppu) -> s32
-						{
-							vm::var<CellUserInfoUserStat> selectUser;
-							if (status >= 0)
-							{
-								selectUser->id = selected_user_id;
-								strcpy_trunc(selectUser->name, selected_username);
-							}
-							funcSelect(ppu, callback_result, selectUser, userdata);
-							return CELL_OK;
-						});
-				});
+					selectUser->id = selected_user_id;
+					strcpy_trunc(selectUser->name, selected_username);
+				}
+				funcSelect(ppu, callback_result, selectUser, userdata);
+				return CELL_OK;
+			});
+		});
 
 		return result;
 	}
 
-	cellUserInfo.error("User selection is only possible when the native user "
-					   "interface is enabled in the settings. The currently "
-					   "active user will be selected as a fallback.");
+	cellUserInfo.error("User selection is only possible when the native user interface is enabled in the settings. The currently active user will be selected as a fallback.");
 
 	sysutil_register_cb([=](ppu_thread& ppu) -> s32
-		{
-			vm::var<CellUserInfoUserStat> selectUser;
-			selectUser->id = Emu.GetUsrId();
-			strcpy_trunc(selectUser->name, get_username(Emu.GetUsrId()));
-			funcSelect(ppu, CELL_USERINFO_RET_OK, selectUser, userdata);
-			return CELL_OK;
-		});
+	{
+		vm::var<CellUserInfoUserStat> selectUser;
+		selectUser->id = Emu.GetUsrId();
+		strcpy_trunc(selectUser->name, get_username(Emu.GetUsrId()));
+		funcSelect(ppu, CELL_USERINFO_RET_OK, selectUser, userdata);
+		return CELL_OK;
+	});
 
 	return CELL_OK;
 }
 
-error_code
-cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList,
-	vm::ptr<CellUserInfoFinishCallback> funcSelect,
-	u32 container, vm::ptr<void> userdata)
+error_code cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList, vm::ptr<CellUserInfoFinishCallback> funcSelect, u32 container, vm::ptr<void> userdata)
 {
-	cellUserInfo.warning("cellUserInfoSelectUser_SetList(setList=*0x%x, "
-						 "funcSelect=*0x%x, container=0x%x, userdata=*0x%x)",
-		setList, funcSelect, container, userdata);
+	cellUserInfo.warning("cellUserInfoSelectUser_SetList(setList=*0x%x, funcSelect=*0x%x, container=0x%x, userdata=*0x%x)", setList, funcSelect, container, userdata);
 
 	if (!setList || !funcSelect) // TODO: confirm
 	{
@@ -265,8 +236,7 @@ cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList,
 
 	std::vector<u32> user_ids;
 
-	for (usz i = 0; i < CELL_USERINFO_USER_MAX && i < setList->fixedListNum;
-		i++)
+	for (usz i = 0; i < CELL_USERINFO_USER_MAX && i < setList->fixedListNum; i++)
 	{
 		if (const u32 id = setList->fixedList->userId[i])
 		{
@@ -276,23 +246,20 @@ cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList,
 
 	if (user_ids.empty())
 	{
-		// TODO: Confirm. Also check if this is possible in
-		// cellUserInfoSelectUser_ListType.
-		cellUserInfo.error("cellUserInfoSelectUser_SetList: callback_result=%s",
-			CELL_USERINFO_ERROR_NOUSER);
+		// TODO: Confirm. Also check if this is possible in cellUserInfoSelectUser_ListType.
+		cellUserInfo.error("cellUserInfoSelectUser_SetList: callback_result=%s", CELL_USERINFO_ERROR_NOUSER);
 
 		sysutil_register_cb([=](ppu_thread& ppu) -> s32
-			{
-				vm::var<CellUserInfoUserStat> selectUser;
-				funcSelect(ppu, CELL_USERINFO_ERROR_NOUSER, selectUser, userdata);
-				return CELL_OK;
-			});
+		{
+			vm::var<CellUserInfoUserStat> selectUser;
+			funcSelect(ppu, CELL_USERINFO_ERROR_NOUSER, selectUser, userdata);
+			return CELL_OK;
+		});
 
 		return CELL_OK;
 	}
 
-	// TODO: does this function return an error if any (user_id > 0 && not_found)
-	// ?
+	// TODO: does this function return an error if any (user_id > 0 && not_found) ?
 
 	if (auto manager = g_fxo->try_get<rsx::overlays::display_manager>())
 	{
@@ -301,8 +268,7 @@ cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList,
 			return CELL_USERINFO_ERROR_BUSY;
 		}
 
-		if (s32 ret = sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_BEGIN, 0);
-			ret < 0)
+		if (s32 ret = sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_BEGIN, 0); ret < 0)
 		{
 			g_fxo->get<user_info_manager>().dialog_opened = false;
 			return CELL_USERINFO_ERROR_BUSY;
@@ -311,64 +277,54 @@ cellUserInfoSelectUser_SetList(vm::ptr<CellUserInfoListSet> setList,
 		const std::string title = setList->title.get_ptr();
 		const u32 focused = setList->focus;
 
-		cellUserInfo.warning("cellUserInfoSelectUser_SetList: opening "
-							 "user_list_dialog with: title='%s', focused=%d",
-			title, focused);
+		cellUserInfo.warning("cellUserInfoSelectUser_SetList: opening user_list_dialog with: title='%s', focused=%d", title, focused);
 
 		const bool enable_overlay = g_fxo->get<user_info_manager>().enable_overlay;
-		const error_code result =
-			manager->create<rsx::overlays::user_list_dialog>()->show(
-				title, focused, user_ids, enable_overlay,
-				[funcSelect, userdata](s32 status)
+		const error_code result = manager->create<rsx::overlays::user_list_dialog>()->show(title, focused, user_ids, enable_overlay, [funcSelect, userdata](s32 status)
+		{
+			s32 callback_result = CELL_USERINFO_RET_CANCEL;
+			u32 selected_user_id = 0;
+			std::string selected_username;
+
+			if (status >= 0)
+			{
+				callback_result = CELL_USERINFO_RET_OK;
+				selected_user_id = static_cast<u32>(status);
+				selected_username = get_username(selected_user_id);
+			}
+
+			cellUserInfo.warning("cellUserInfoSelectUser_SetList: callback_result=%s, selected_user_id=%d, selected_username='%s'", callback_result, selected_user_id, selected_username);
+
+			g_fxo->get<user_info_manager>().dialog_opened = false;
+
+			sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_END, 0);
+
+			sysutil_register_cb([=](ppu_thread& ppu) -> s32
+			{
+				vm::var<CellUserInfoUserStat> selectUser;
+				if (status >= 0)
 				{
-					s32 callback_result = CELL_USERINFO_RET_CANCEL;
-					u32 selected_user_id = 0;
-					std::string selected_username;
-
-					if (status >= 0)
-					{
-						callback_result = CELL_USERINFO_RET_OK;
-						selected_user_id = static_cast<u32>(status);
-						selected_username = get_username(selected_user_id);
-					}
-
-					cellUserInfo.warning(
-						"cellUserInfoSelectUser_SetList: callback_result=%s, "
-						"selected_user_id=%d, selected_username='%s'",
-						callback_result, selected_user_id, selected_username);
-
-					g_fxo->get<user_info_manager>().dialog_opened = false;
-
-					sysutil_send_system_cmd(CELL_SYSUTIL_DRAWING_END, 0);
-
-					sysutil_register_cb([=](ppu_thread& ppu) -> s32
-						{
-							vm::var<CellUserInfoUserStat> selectUser;
-							if (status >= 0)
-							{
-								selectUser->id = selected_user_id;
-								strcpy_trunc(selectUser->name, selected_username);
-							}
-							funcSelect(ppu, callback_result, selectUser, userdata);
-							return CELL_OK;
-						});
-				});
+					selectUser->id = selected_user_id;
+					strcpy_trunc(selectUser->name, selected_username);
+				}
+				funcSelect(ppu, callback_result, selectUser, userdata);
+				return CELL_OK;
+			});
+		});
 
 		return result;
 	}
 
-	cellUserInfo.error("User selection is only possible when the native user "
-					   "interface is enabled in the settings. The currently "
-					   "active user will be selected as a fallback.");
+	cellUserInfo.error("User selection is only possible when the native user interface is enabled in the settings. The currently active user will be selected as a fallback.");
 
 	sysutil_register_cb([=](ppu_thread& ppu) -> s32
-		{
-			vm::var<CellUserInfoUserStat> selectUser;
-			selectUser->id = Emu.GetUsrId();
-			strcpy_trunc(selectUser->name, get_username(Emu.GetUsrId()));
-			funcSelect(ppu, CELL_USERINFO_RET_OK, selectUser, userdata);
-			return CELL_OK;
-		});
+	{
+		vm::var<CellUserInfoUserStat> selectUser;
+		selectUser->id = Emu.GetUsrId();
+		strcpy_trunc(selectUser->name, get_username(Emu.GetUsrId()));
+		funcSelect(ppu, CELL_USERINFO_RET_OK, selectUser, userdata);
+		return CELL_OK;
+	});
 
 	return CELL_OK;
 }
@@ -380,13 +336,9 @@ void cellUserInfoEnableOverlay(s32 enable)
 	manager.enable_overlay = enable != 0;
 }
 
-error_code cellUserInfoGetList(vm::ptr<u32> listNum,
-	vm::ptr<CellUserInfoUserList> listBuf,
-	vm::ptr<u32> currentUserId)
+error_code cellUserInfoGetList(vm::ptr<u32> listNum, vm::ptr<CellUserInfoUserList> listBuf, vm::ptr<u32> currentUserId)
 {
-	cellUserInfo.warning(
-		"cellUserInfoGetList(listNum=*0x%x, listBuf=*0x%x, currentUserId=*0x%x)",
-		listNum, listBuf, currentUserId);
+	cellUserInfo.warning("cellUserInfoGetList(listNum=*0x%x, listBuf=*0x%x, currentUserId=*0x%x)", listNum, listBuf, currentUserId);
 
 	// If only listNum is NULL, an error will be returned
 	if (!listNum)
@@ -427,9 +379,7 @@ error_code cellUserInfoGetList(vm::ptr<u32> listNum,
 		}
 		else
 		{
-			cellUserInfo.warning(
-				"cellUserInfoGetList: Cannot add user %s. Too many users.",
-				user_folder.name);
+			cellUserInfo.warning("cellUserInfoGetList: Cannot add user %s. Too many users.", user_folder.name);
 		}
 	}
 
@@ -463,10 +413,10 @@ error_code cellUserInfoGetList(vm::ptr<u32> listNum,
 }
 
 DECLARE(ppu_module_manager::cellUserInfo)("cellUserInfo", []()
-	{
-		REG_FUNC(cellUserInfo, cellUserInfoGetStat);
-		REG_FUNC(cellUserInfo, cellUserInfoSelectUser_ListType);
-		REG_FUNC(cellUserInfo, cellUserInfoSelectUser_SetList);
-		REG_FUNC(cellUserInfo, cellUserInfoEnableOverlay);
-		REG_FUNC(cellUserInfo, cellUserInfoGetList);
-	});
+{
+	REG_FUNC(cellUserInfo, cellUserInfoGetStat);
+	REG_FUNC(cellUserInfo, cellUserInfoSelectUser_ListType);
+	REG_FUNC(cellUserInfo, cellUserInfoSelectUser_SetList);
+	REG_FUNC(cellUserInfo, cellUserInfoEnableOverlay);
+	REG_FUNC(cellUserInfo, cellUserInfoGetList);
+});

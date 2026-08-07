@@ -2,6 +2,8 @@
 #include "Emu/Cell/PPUModule.h"
 #include "cellos/sys_spu.h"
 
+
+
 LOG_CHANNEL(cellOvis);
 
 // Return Codes
@@ -12,20 +14,20 @@ enum CellOvisError : u32
 	CELL_OVIS_ERROR_ALIGN = 0x80410410,
 };
 
-template <>
+template<>
 void fmt_class_string<CellOvisError>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](auto error)
+	{
+		switch (error)
 		{
-			switch (error)
-			{
-				STR_CASE(CELL_OVIS_ERROR_INVAL);
-				STR_CASE(CELL_OVIS_ERROR_ABORT);
-				STR_CASE(CELL_OVIS_ERROR_ALIGN);
-			}
+			STR_CASE(CELL_OVIS_ERROR_INVAL);
+			STR_CASE(CELL_OVIS_ERROR_ABORT);
+			STR_CASE(CELL_OVIS_ERROR_ALIGN);
+		}
 
-			return unknown;
-		});
+		return unknown;
+	});
 }
 
 error_code cellOvisGetOverlayTableSize(vm::cptr<char> elf)
@@ -51,9 +53,9 @@ void cellOvisInvalidateOverlappedSegments(vm::ptr<sys_spu_segment> segs, vm::ptr
 }
 
 DECLARE(ppu_module_manager::cellOvis)("cellOvis", []()
-	{
-		REG_FUNC(cellOvis, cellOvisGetOverlayTableSize);
-		REG_FUNC(cellOvis, cellOvisInitializeOverlayTable);
-		REG_FUNC(cellOvis, cellOvisFixSpuSegments);
-		REG_FUNC(cellOvis, cellOvisInvalidateOverlappedSegments);
-	});
+{
+	REG_FUNC(cellOvis, cellOvisGetOverlayTableSize);
+	REG_FUNC(cellOvis, cellOvisInitializeOverlayTable);
+	REG_FUNC(cellOvis, cellOvisFixSpuSegments);
+	REG_FUNC(cellOvis, cellOvisInvalidateOverlappedSegments);
+});

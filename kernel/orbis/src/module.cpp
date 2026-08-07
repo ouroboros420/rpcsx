@@ -119,7 +119,7 @@ static orbis::SysResult doPltRelocation(orbis::Process *process,
       foundInLibs.emplace_back(std::string_view(defLib.name));
     }
 
-    for (auto nsDefModule : defModule->namespaceModules) {
+    for (auto &nsDefModule : defModule->namespaceModules) {
       for (auto defSym : nsDefModule->symbols) {
         if (defSym.id != symbol.id || defSym.bind == orbis::SymbolBind::Local) {
           continue;
@@ -178,10 +178,7 @@ static orbis::SysResult doPltRelocation(orbis::Process *process,
   }
   }
 
-  std::fprintf(stderr, "unimplemented relocation type %u\n",
-               (unsigned)rel.relType);
-  std::abort();
-  return {};
+  rx::die("unimplemented relocation type {}", rel.relType);
 }
 
 static orbis::SysResult doRelocation(orbis::Process *process,
@@ -359,10 +356,7 @@ static orbis::SysResult doRelocation(orbis::Process *process,
   }
   }
 
-  std::fprintf(stderr, "unimplemented relocation type %u\n",
-               (unsigned)rel.relType);
-  std::abort();
-  return {};
+  rx::die("unimplemented relocation type {}", rel.relType);
 }
 
 orbis::SysResult orbis::Module::relocate(Process *process) {

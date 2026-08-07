@@ -656,7 +656,9 @@ void cpu_thread::operator()()
 
 	g_tls_this_thread = this;
 
-	if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os)
+	// Android big-cluster affinity is applied even under the OS scheduler mode, since
+	// it is a separate opt-in pinning of PPU/SPU/RSX onto the big cores (their 54abf07bd).
+	if (g_cfg.core.thread_scheduler != thread_scheduler_mode::os || thread_ctrl::android_affinity_enabled())
 	{
 		thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(get_class()));
 	}
@@ -733,6 +735,10 @@ void cpu_thread::operator()()
 			{
 				cleanup();
 
+				// Log from a fresh thread: cleanup() has already restored/torn down this
+				// thread's logging TLS (g_tls_log_prefix, g_tls_log_control), so logging
+				// inline here would touch state that is no longer valid. Capture the name
+				// by value; log_thread() only joins (see named_thread::operator()).
 				auto log_thread = named_thread("CPU Thread Cleanup Logger", [name = name]()
 				{
 					sys_log.warning("CPU Thread '%s' terminated abnormally!", name);

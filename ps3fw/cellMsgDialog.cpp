@@ -351,12 +351,14 @@ error_code open_exit_dialog(const std::string& message, bool is_exit_requested, 
 		callback.set(g_fxo->get<ppu_function_manager>().func_addr(FIND_FUNC(exit_game)));
 	}
 
-	const error_code res = open_msg_dialog(
+	const error_code res = open_msg_dialog
+	(
 		true,
 		CELL_MSGDIALOG_TYPE_SE_TYPE_ERROR | CELL_MSGDIALOG_TYPE_BUTTON_TYPE_OK | CELL_MSGDIALOG_TYPE_DISABLE_CANCEL_ON,
 		vm::make_str(message),
 		source,
-		callback);
+		callback
+	);
 
 	if (res != CELL_OK)
 	{

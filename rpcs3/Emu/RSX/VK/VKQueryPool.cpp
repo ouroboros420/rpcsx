@@ -248,6 +248,53 @@ namespace vk
 		VK_GET_SYMBOL(vkCmdCopyQueryPoolResults)(cmd, *query_slot_status[index].pool, index, count, dst, dst_offset, 4, VK_QUERY_RESULT_WAIT_BIT);
 	}
 
+	// Batched eager-ZCULL readback (grafted from 7ed3365bcbb8). Declared in VKQueryPool.h and
+	// driven by VKGSRender::prefetch_occlusion_query_results.
+	void query_pool_manager::copy_query_results(vk::command_buffer& cmd, const std::vector<u32>& indices, VkBuffer dst)
+	{
+		// TBDR (Adreno/Turnip, Apple M) returns ALL-ZERO results from vkCmdCopyQueryPoolResults if a
+		// renderpass is open, and recording the copy inside a renderpass is a spec violation. The drain
+		// can run with the frame's renderpass still open, so closing it here is mandatory for correctness.
+		if (vk::is_renderpass_open(cmd))
+		{
+			vk::end_renderpass(cmd);
+		}
+
+		const usz n = indices.size();
+		for (usz i = 0; i < n;)
+		{
+			const u32 base = indices[i];
+			const auto* pool = query_slot_status[base].pool;
+
+			// Extend the run only while indices stay contiguous AND share the same pool, so one copy
+			// never crosses a pool reallocation boundary (which would read from the wrong VkQueryPool).
+			usz j = i + 1;
+			while (j < n && indices[j] == indices[j - 1] + 1 && query_slot_status[indices[j]].pool == pool)
+			{
+				j++;
+			}
+
+			const u32 count = static_cast<u32>(j - i);
+			// dst word offset = i, this run's first position in the list; the run is contiguous in both
+			// hw index and position, so query[base + k] lands at dst word (i + k) for k in [0, count).
+			VK_GET_SYMBOL(vkCmdCopyQueryPoolResults)(cmd, *query_slot_status[base].pool, base, count, dst,
+				static_cast<VkDeviceSize>(i) * 4, 4, VK_QUERY_RESULT_WAIT_BIT);
+
+			i = j;
+		}
+	}
+
+	void query_pool_manager::prime_query_result(u32 index, u32 value)
+	{
+		// Mirror poke_query's VK_SUCCESS path: data = passed-sample count, any_passed = count != 0.
+		// The value came from a WAIT_BIT copy so it is final; mark the slot ready so get_query_result
+		// returns it directly without issuing another (blocking) read.
+		auto& query = query_slot_status[index];
+		query.ready = true;
+		query.data = value;
+		query.any_passed = (value != 0);
+	}
+
 	void query_pool_manager::free_query(vk::command_buffer& /*cmd*/, u32 index)
 	{
 		// Release reference and discard

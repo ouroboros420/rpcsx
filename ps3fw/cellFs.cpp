@@ -451,8 +451,7 @@ error_code cellFsReadWithOffset(ppu_thread& ppu, u32 fd, u64 offset, vm::ptr<voi
 
 	if (fd - 3 > 252)
 	{
-		if (nread)
-			*nread = 0;
+		if (nread) *nread = 0;
 		return CELL_EBADF;
 	}
 
@@ -488,15 +487,13 @@ error_code cellFsWriteWithOffset(ppu_thread& ppu, u32 fd, u64 offset, vm::cptr<v
 
 	if (!buf)
 	{
-		if (nwrite)
-			*nwrite = 0;
+		if (nwrite) *nwrite = 0;
 		return CELL_EFAULT;
 	}
 
 	if (fd - 3 > 252)
 	{
-		if (nwrite)
-			*nwrite = 0;
+		if (nwrite) *nwrite = 0;
 		return CELL_EBADF;
 	}
 
@@ -918,10 +915,11 @@ struct fs_aio_thread : ppu_thread
 			}
 			else if (std::lock_guard lock(file->mp->mutex); file->file)
 			{
-				const auto old_pos = file->file.pos();
-				file->file.seek(aio->offset);
+				const auto old_pos = file->file.pos(); file->file.seek(aio->offset);
 
-				result = type == 2 ? file->op_write(aio->buf, aio->size) : file->op_read(aio->buf, aio->size);
+				result = type == 2
+					? file->op_write(aio->buf, aio->size)
+					: file->op_read(aio->buf, aio->size);
 
 				file->file.seek(old_pos);
 				error = CELL_OK;
@@ -976,7 +974,8 @@ s32 cellFsAioRead(vm::ptr<CellFsAio> aio, vm::ptr<s32> id, fs_aio_cb_t func)
 
 	const s32 xid = (*id = ++g_fs_aio_id);
 
-	m.thread->cmd_list({
+	m.thread->cmd_list
+	({
 		{1, xid},
 		{aio, func},
 	});
@@ -999,7 +998,8 @@ s32 cellFsAioWrite(vm::ptr<CellFsAio> aio, vm::ptr<s32> id, fs_aio_cb_t func)
 
 	const s32 xid = (*id = ++g_fs_aio_id);
 
-	m.thread->cmd_list({
+	m.thread->cmd_list
+	({
 		{2, xid},
 		{aio, func},
 	});

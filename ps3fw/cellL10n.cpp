@@ -2,7 +2,7 @@
 #include "Emu/Cell/PPUModule.h"
 
 #ifdef _WIN32
-#include <windows.h>
+#include <Windows.h>
 #endif
 
 #ifdef _WIN32
@@ -23,17 +23,14 @@ bool _L10nCodeParse(s32 code, HostCode& retCode)
 {
 #ifdef _WIN32
 	retCode = 0;
-	if ((code >= _L10N_CODE_) || (code < 0))
-		return false;
+	if ((code >= _L10N_CODE_) || (code < 0)) return false;
 	switch (code)
 	{
 	case L10N_UTF8: retCode = 65001; return false;
 	case L10N_UTF16: retCode = 1200; return false;  // 1200=LE,1201=BE
 	case L10N_UTF32: retCode = 12000; return false; // 12000=LE,12001=BE
 	case L10N_UCS2: retCode = 1200; return false;   // Not in OEM, but just the same as UTF16
-	case L10N_UCS4:
-		retCode = 12000;
-		return false; // Not in OEM, but just the same as UTF32
+	case L10N_UCS4:             retCode = 12000;        return false; // Not in OEM, but just the same as UTF32
 	// All OEM Code Pages are Multi-Byte, not wchar_t,u16,u32.
 	case L10N_ISO_8859_1: retCode = 28591; return true;
 	case L10N_ISO_8859_2: retCode = 28592; return true;
@@ -68,9 +65,7 @@ bool _L10nCodeParse(s32 code, HostCode& retCode)
 	case L10N_ARIB: retCode = 20420; return true; // TODO: think that should be ARABIC.
 	case L10N_HZ: retCode = 52936; return true;
 	case L10N_GB18030: retCode = 54936; return true;
-	case L10N_RIS_506:
-		retCode = 932;
-		return true; // MS_KANJI, TODO: Code page
+	case L10N_RIS_506:          retCode = 932;          return true; // MS_KANJI, TODO: Code page
 	// These are only supported with FW 3.10 and above
 	case L10N_CODEPAGE_852: retCode = 852; return true;
 	case L10N_CODEPAGE_1250: retCode = 1250; return true; // EE
@@ -89,8 +84,7 @@ bool _L10nCodeParse(s32 code, HostCode& retCode)
 	default: return false;
 	}
 #else
-	if ((code >= _L10N_CODE_) || (code < 0))
-		return false;
+	if ((code >= _L10N_CODE_) || (code < 0)) return false;
 	switch (code)
 	{
 	// I don't know these Unicode Variants is LB or BE.
@@ -131,9 +125,7 @@ bool _L10nCodeParse(s32 code, HostCode& retCode)
 	case L10N_ARIB: retCode = "ARABIC"; return true; // TODO: think that should be ARABIC.
 	case L10N_HZ: retCode = "HZ"; return true;
 	case L10N_GB18030: retCode = "GB18030"; return true;
-	case L10N_RIS_506:
-		retCode = "Shift_JIS";
-		return true; // MS_KANJI
+	case L10N_RIS_506:          retCode = "Shift_JIS";      return true; // MS_KANJI
 	// These are only supported with FW 3.10 and below
 	case L10N_CODEPAGE_852: retCode = "CP852"; return true;
 	case L10N_CODEPAGE_1250: retCode = "CP1250"; return true; // EE
@@ -212,8 +204,7 @@ s32 _ConvertStr(s32 src_code, const void* src, s32 src_len, s32 dst_code, void* 
 
 	if (dst)
 	{
-		if (target.length() > static_cast<usz>(*dst_len))
-			return DSTExhausted;
+		if (target.length() > static_cast<usz>(*dst_len)) return DSTExhausted;
 		std::memcpy(dst, target.c_str(), target.length());
 	}
 	*dst_len = ::narrow<s32>(target.size());
@@ -1355,7 +1346,7 @@ s32 SBCSstoUTF8s(vm::cptr<u8> src, vm::ptr<u32> src_len, vm::ptr<u8> dst, vm::pt
 				return SRCIllegal;
 			}
 
-			longval = *reinterpret_cast<u32*>(dst_tmp);
+			longval = *reinterpret_cast<u64*>(dst_tmp);
 			utf8_len = dst_len_tmp;
 		}
 
@@ -2690,6 +2681,7 @@ s32 UTF8stoUCS2s(vm::cptr<u8> src, vm::ptr<u32> src_len, vm::ptr<u16> dst, vm::p
 	*dst_len = len;
 	return ConversionOK;
 }
+
 
 DECLARE(ppu_module_manager::cellL10n)("cellL10n", []()
 	{

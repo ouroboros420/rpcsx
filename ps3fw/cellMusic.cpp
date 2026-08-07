@@ -11,6 +11,7 @@
 #include "cellSpurs.h"
 #include "cellSysutil.h"
 #include "cellMusic.h"
+#include "util/Thread.h"
 
 LOG_CHANNEL(cellMusic);
 

@@ -34,6 +34,15 @@ namespace vk
 		{
 			for (auto&& job : m_work_queue.pop_all())
 			{
+				// Emulation is shutting down; don't drain a potentially large backlog of
+				// pending pipelines (the results are discarded on teardown anyway). This
+				// avoids a multi-second join stall when stopping mid-scene with shaders queued.
+				// Grafted from 90f1e300c0f1.
+				if (thread_ctrl::state() == thread_state::aborting)
+				{
+					break;
+				}
+
 				if (!job.is_graphics_job)
 				{
 					auto compiled = int_compile_compute_pipe(job.compute_data, job.inputs, job.flags);

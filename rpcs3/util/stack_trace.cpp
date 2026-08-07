@@ -5,8 +5,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define DBGHELP_TRANSLATE_TCHAR
-#include <DbgHelp.h>
+#include <dbghelp.h>
 #include <codecvt>
+#elif defined(ANDROID)
+#include <unwind.h>
+#include <dlfcn.h>
+#include <cstring>
 #else
 #include <execinfo.h>
 #endif
@@ -141,21 +145,90 @@ namespace utils
 
 		return result;
 	}
+#elif defined(ANDROID)
+	namespace
+	{
+		struct bt_state
+		{
+			void** current;
+			void** end;
+		};
+
+		_Unwind_Reason_Code bt_callback(_Unwind_Context* ctx, void* arg)
+		{
+			auto* state = static_cast<bt_state*>(arg);
+			const uptr pc = _Unwind_GetIP(ctx);
+			if (pc)
+			{
+				if (state->current == state->end)
+				{
+					return _URC_END_OF_STACK;
+				}
+				*state->current++ = reinterpret_cast<void*>(pc);
+			}
+			return _URC_NO_REASON;
+		}
+	}
+
+	// bionic has no execinfo backtrace(); walk the current (crashing) stack with
+	// the C++ unwinder instead. Called from the signal handler, so it runs on the
+	// faulting thread and includes the crash site.
+	std::vector<void*> get_backtrace(int max_depth)
+	{
+		std::vector<void*> result(max_depth);
+		bt_state state{result.data(), result.data() + max_depth};
+		_Unwind_Backtrace(&bt_callback, &state);
+		result.resize(state.current - result.data());
+		return result;
+	}
+
+	// Resolve each PC to "<module>+0x<offset> (<symbol>)". The offset is relative
+	// to the module load base, so it can be fed straight to llvm-symbolizer against
+	// the matching unstripped .so.
+	std::vector<std::string> get_backtrace_symbols(const std::vector<void*>& stack)
+	{
+		std::vector<std::string> result;
+		result.reserve(stack.size());
+
+		for (void* ptr : stack)
+		{
+			Dl_info info{};
+			if (::dladdr(ptr, &info) && info.dli_fname)
+			{
+				const uptr base = reinterpret_cast<uptr>(info.dli_fbase);
+				const uptr off = reinterpret_cast<uptr>(ptr) - base;
+				const char* slash = std::strrchr(info.dli_fname, '/');
+				const char* name = slash ? slash + 1 : info.dli_fname;
+
+				if (info.dli_sname)
+				{
+					result.push_back(fmt::format("%s+0x%x (%s)", name, off, info.dli_sname));
+				}
+				else
+				{
+					result.push_back(fmt::format("%s+0x%x", name, off));
+				}
+			}
+			else
+			{
+				result.push_back(fmt::format("0x%p", ptr));
+			}
+		}
+
+		return result;
+	}
 #else
 	std::vector<void*> get_backtrace(int max_depth)
 	{
 		std::vector<void*> result(max_depth);
-#ifndef ANDROID
 		int depth = backtrace(result.data(), max_depth);
 		result.resize(depth);
-#endif
 		return result;
 	}
 
 	std::vector<std::string> get_backtrace_symbols(const std::vector<void*>& stack)
 	{
 		std::vector<std::string> result;
-#ifndef ANDROID
 		result.reserve(stack.size());
 
 		const auto symbols = backtrace_symbols(stack.data(), static_cast<int>(stack.size()));
@@ -165,7 +238,6 @@ namespace utils
 		}
 
 		free(symbols);
-#endif
 		return result;
 	}
 #endif

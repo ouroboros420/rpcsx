@@ -9,6 +9,7 @@
 
 #include "sceNp.h"
 #include "sceNpClans.h"
+#include "Emu/NP/clans_client.h" // sce_np_clans_manager now lives here
 
 
 LOG_CHANNEL(sceNpClans);

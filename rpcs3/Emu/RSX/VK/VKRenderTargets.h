@@ -195,6 +195,9 @@ namespace vk
 			case driver_vendor::HONEYKRISP:
 			case driver_vendor::PANVK:
 			case driver_vendor::ARM_MALI:
+			case driver_vendor::TURNIP:
+			case driver_vendor::QUALCOMM_PROPRIETARY:
+				// These vendors need no special attachment-creation flags for FBO loops.
 				break;
 			}
 
@@ -383,6 +386,7 @@ namespace vk
 				sink->rsx_pitch = ref->get_rsx_pitch();
 				sink->surface_width = prev.width;
 				sink->surface_height = prev.height;
+				sink->resolution_scaling_config = scaling_config;
 				sink->queue_tag(address);
 
 				const auto best_layout = (ref->info.usage & VK_IMAGE_USAGE_SAMPLED_BIT) ?

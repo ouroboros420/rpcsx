@@ -1,13 +1,11 @@
 #include "stdafx.h"
-
-#include "Emu/Cell/PPUModule.h"
-#include "cellos/sys_ppu_thread.h"
-#include "cellos/sys_process.h"
-#include "cellos/sys_sync.h"
 #include "Emu/IdManager.h"
 #include "Emu/perf_meter.hpp"
+#include "Emu/Cell/PPUModule.h"
+#include "cellos/sys_sync.h"
+#include "cellos/sys_ppu_thread.h"
+#include "cellos/sys_process.h"
 #include "Emu/savestate_utils.hpp"
-#include "rx/align.hpp"
 #include "sysPrxForUser.h"
 #include "util/media_utils.h"
 
@@ -42,12 +40,12 @@ extern "C"
 #include "libsvc1d.h"
 #include "cellVdec.h"
 
-#include "rx/asm.hpp"
-#include "util/lockless.h"
-#include <cmath>
 #include <mutex>
 #include <queue>
+#include <cmath>
+#include "util/lockless.h"
 #include <variant>
+#include "rx/asm.hpp"
 
 std::mutex g_mutex_avcodec_open2;
 
@@ -1941,7 +1939,7 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 	info->startAddr = 0x00000123; // invalid value (no address for picture)
 	const int buffer_size = av_image_get_buffer_size(vdec->ctx->pix_fmt, vdec->ctx->width, vdec->ctx->height, 1);
 	ensure(buffer_size >= 0);
-	info->size = rx::alignUp<u32>(buffer_size, 128);
+	info->size = rx::align<u32>(buffer_size, 128);
 	info->auNum = 1;
 	info->auPts[0].lower = static_cast<u32>(pts);
 	info->auPts[0].upper = static_cast<u32>(pts >> 32);
@@ -1956,7 +1954,7 @@ error_code cellVdecGetPicItem(ppu_thread& ppu, u32 handle, vm::pptr<CellVdecPicI
 	info->status = CELL_OK;
 	info->attr = attr;
 
-	const vm::addr_t picinfo_addr{info.addr() + OFFSET_OF(all_info_t, picInfo)};
+	const vm::addr_t picinfo_addr{info.addr() + ::offset32(&all_info_t::picInfo)};
 	info->picInfo_addr = picinfo_addr;
 
 	if (vdec->type == CELL_VDEC_CODEC_TYPE_AVC)

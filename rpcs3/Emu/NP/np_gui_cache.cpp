@@ -1,6 +1,5 @@
 #include "stdafx.h"
 #include "rx/asm.hpp"
-#include "rx/align.hpp"
 #include "np_gui_cache.h"
 
 LOG_CHANNEL(np_gui_cache);
@@ -73,7 +72,7 @@ namespace np
 
 		const auto& room = ::at32(rooms, room_id);
 
-		const u32 room_size = ::narrow<u32>(rx::alignUp(sizeof(SceNpMatchingRoomStatus), 8) + (rx::alignUp(sizeof(SceNpMatchingRoomMember), 8) * room.members.size()));
+		const u32 room_size = ::narrow<u32>(rx::align(sizeof(SceNpMatchingRoomStatus), 8) + (rx::align(sizeof(SceNpMatchingRoomMember), 8) * room.members.size()));
 
 		if (!data)
 			return not_an_error(room_size);
@@ -95,12 +94,12 @@ namespace np
 			{
 				if (!cur_member_ptr)
 				{
-					room_status->members = vm::cast(data.addr() + rx::alignUp(sizeof(SceNpMatchingRoomStatus), 8));
+					room_status->members = vm::cast(data.addr() + rx::align(sizeof(SceNpMatchingRoomStatus), 8));
 					cur_member_ptr = room_status->members;
 				}
 				else
 				{
-					cur_member_ptr->next = vm::cast(cur_member_ptr.addr() + rx::alignUp(sizeof(SceNpMatchingRoomMember), 8));
+					cur_member_ptr->next = vm::cast(cur_member_ptr.addr() + rx::align(sizeof(SceNpMatchingRoomMember), 8));
 					cur_member_ptr = cur_member_ptr->next;
 				}
 

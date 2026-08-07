@@ -4,8 +4,8 @@
 
 #include "Emu/Cell/PPUModule.h"
 
-#include "cellos/sys_cond.h"
 #include "cellos/sys_mutex.h"
+#include "cellos/sys_cond.h"
 
 LOG_CHANNEL(sysPrxForUser);
 
@@ -28,13 +28,9 @@ struct memory_pool_t
 	std::vector<vm::ptr<void>> free_blocks;
 };
 
-error_code sys_mempool_create(ppu_thread& ppu, vm::ptr<sys_mempool_t> mempool,
-	vm::ptr<void> chunk, const u64 chunk_size,
-	const u64 block_size, const u64 ralignment)
+error_code sys_mempool_create(ppu_thread& ppu, vm::ptr<sys_mempool_t> mempool, vm::ptr<void> chunk, const u64 chunk_size, const u64 block_size, const u64 ralignment)
 {
-	sysPrxForUser.warning("sys_mempool_create(mempool=*0x%x, chunk=*0x%x, "
-						  "chunk_size=%d, block_size=%d, ralignment=%d)",
-		mempool, chunk, chunk_size, block_size, ralignment);
+	sysPrxForUser.warning("sys_mempool_create(mempool=*0x%x, chunk=*0x%x, chunk_size=%d, block_size=%d, ralignment=%d)", mempool, chunk, chunk_size, block_size, ralignment);
 
 	if (block_size > chunk_size)
 	{
@@ -74,8 +70,7 @@ error_code sys_mempool_create(ppu_thread& ppu, vm::ptr<sys_mempool_t> mempool,
 	memory_pool->free_blocks.resize(num_blocks);
 	for (u32 i = 0; i < num_blocks; ++i)
 	{
-		memory_pool->free_blocks[i] =
-			vm::ptr<void>::make(chunk.addr() + i * static_cast<u32>(block_size));
+		memory_pool->free_blocks[i] = vm::ptr<void>::make(chunk.addr() + i * static_cast<u32>(block_size));
 	}
 
 	// Create synchronization variables
@@ -86,7 +81,7 @@ error_code sys_mempool_create(ppu_thread& ppu, vm::ptr<sys_mempool_t> mempool,
 	attr->pshared = SYS_SYNC_NOT_PROCESS_SHARED;
 	attr->adaptive = SYS_SYNC_NOT_ADAPTIVE;
 	attr->ipc_key = 0; // No idea what this is
-	attr->flags = 0;   //  Also no idea what this is.
+	attr->flags = 0; //  Also no idea what this is.
 	strcpy_trunc(attr->name, "mp_m" + std::to_string(*mempool));
 
 	error_code ret = sys_mutex_create(ppu, mutexid, attr);
@@ -99,15 +94,14 @@ error_code sys_mempool_create(ppu_thread& ppu, vm::ptr<sys_mempool_t> mempool,
 	vm::var<u32> condid;
 	vm::var<sys_cond_attribute_t> condAttr;
 	condAttr->pshared = SYS_SYNC_NOT_PROCESS_SHARED;
-	condAttr->flags = 0;   // No idea what this is
+	condAttr->flags = 0; // No idea what this is
 	condAttr->ipc_key = 0; // Also no idea what this is
 	strcpy_trunc(condAttr->name, "mp_c" + std::to_string(*mempool));
 
 	ret = sys_cond_create(ppu, condid, *mutexid, condAttr);
 	if (ret != CELL_OK)
-	{ // TODO: Better exception handling.
-		fmt::throw_exception("mempool %x failed to create condition variable",
-			mempool);
+	{  // TODO: Better exception handling.
+		fmt::throw_exception("mempool %x failed to create condition variable", mempool);
 	}
 	memory_pool->condid = *condid;
 
@@ -132,16 +126,13 @@ void sys_mempool_destroy(ppu_thread& ppu, sys_mempool_t mempool)
 	}
 	else
 	{
-		sysPrxForUser.error("Trying to destroy an already destroyed mempool=%d",
-			mempool);
+		sysPrxForUser.error("Trying to destroy an already destroyed mempool=%d", mempool);
 	}
 }
 
-error_code sys_mempool_free_block(ppu_thread& ppu, sys_mempool_t mempool,
-	vm::ptr<void> block)
+error_code sys_mempool_free_block(ppu_thread& ppu, sys_mempool_t mempool, vm::ptr<void> block)
 {
-	sysPrxForUser.warning("sys_mempool_free_block(mempool=%d, block=*0x%x)",
-		mempool, block);
+	sysPrxForUser.warning("sys_mempool_free_block(mempool=%d, block=*0x%x)", mempool, block);
 
 	auto memory_pool = idm::get_unlocked<memory_pool_t>(mempool);
 	if (!memory_pool)
@@ -178,27 +169,23 @@ u64 sys_mempool_get_count(ppu_thread& ppu, sys_mempool_t mempool)
 	return ret;
 }
 
-vm::ptr<void> sys_mempool_allocate_block(ppu_thread& ppu,
-	sys_mempool_t mempool)
+vm::ptr<void> sys_mempool_allocate_block(ppu_thread& ppu, sys_mempool_t mempool)
 {
 	sysPrxForUser.warning("sys_mempool_allocate_block(mempool=%d)", mempool);
 
 	auto memory_pool = idm::get_unlocked<memory_pool_t>(mempool);
 	if (!memory_pool)
-	{ // if the memory pool gets deleted-- is null, clearly it's
-	  // impossible to allocate memory.
+	{	// if the memory pool gets deleted-- is null, clearly it's impossible to allocate memory.
 		return vm::null;
 	}
 	sys_mutex_lock(ppu, memory_pool->mutexid, 0);
 
-	while (memory_pool->free_blocks
-			.empty()) // while is to guard against spurious wakeups
+	while (memory_pool->free_blocks.empty()) // while is to guard against spurious wakeups
 	{
 		sys_cond_wait(ppu, memory_pool->condid, 0);
 		memory_pool = idm::get_unlocked<memory_pool_t>(mempool);
-		if (!memory_pool) // in case spurious wake up was from delete, don't die by
-		                  // accessing a freed pool.
-		{                 // No need to unlock as if the pool is freed, the lock was freed as well.
+		if (!memory_pool)  // in case spurious wake up was from delete, don't die by accessing a freed pool.
+		{ // No need to unlock as if the pool is freed, the lock was freed as well.
 			return vm::null;
 		}
 	}
@@ -209,8 +196,7 @@ vm::ptr<void> sys_mempool_allocate_block(ppu_thread& ppu,
 	return block_ptr;
 }
 
-vm::ptr<void> sys_mempool_try_allocate_block(ppu_thread& ppu,
-	sys_mempool_t mempool)
+vm::ptr<void> sys_mempool_try_allocate_block(ppu_thread& ppu, sys_mempool_t mempool)
 {
 	sysPrxForUser.warning("sys_mempool_try_allocate_block(mempool=%d)", mempool);
 

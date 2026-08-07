@@ -9,6 +9,7 @@
 #include "Emu/Cell/timers.hpp"
 
 #include "util/sysinfo.hpp"
+#include "util/Thread.h"
 #include "rx/asm.hpp"
 
 namespace vk
@@ -170,6 +171,15 @@ namespace vk
 	{
 		while (!flushed)
 		{
+			// Abandon the wait if the emulator is tearing down: this flush can be
+			// reached from the stop-time texture-cache readback, and the submit it
+			// waits on may never be drained during abort -> the RSX thread would
+			// hang forever and the join times out (savestate-save freeze). The
+			// in-flight readback is discarded on abort anyway.
+			if (thread_ctrl::state() == thread_state::aborting)
+			{
+				return;
+			}
 			rx::pause();
 		}
 	}

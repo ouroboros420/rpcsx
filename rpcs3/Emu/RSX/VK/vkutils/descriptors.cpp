@@ -2,6 +2,8 @@
 #include "descriptors.h"
 #include "garbage_collector.h"
 
+#include <mutex>
+
 namespace vk
 {
 	// Error handler callback
@@ -38,7 +40,7 @@ namespace vk
 
 				m_notification_list.erase_if(FN(x == set));
 				// rsx_log.notice("[descriptor_manager::deregister] Now monitoring %u descriptor sets", m_notification_list.size());
-				}
+			}
 
 			void destroy()
 			{

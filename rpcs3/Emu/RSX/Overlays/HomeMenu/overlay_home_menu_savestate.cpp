@@ -64,7 +64,9 @@ namespace rsx
 				}
 			}
 
-			apply_layout();
+			// Center the few savestate entries vertically so the page doesn't leave
+			// a large empty gap below them (centering only applies when items fit). (theirs c6a8b93)
+			apply_layout(true);
 		}
 	} // namespace overlays
 } // namespace rsx

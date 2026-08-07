@@ -1,5 +1,5 @@
-#include "stdafx.h"
 #include "Emu/NP/ip_address.h"
+#include "stdafx.h"
 #include "Emu/Cell/PPUCallback.h"
 #include "signaling_handler.h"
 #include "Emu/IdManager.h"

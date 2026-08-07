@@ -5,6 +5,7 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_ptr.h"
 #include "Emu/Memory/vm_reservation.h"
+#include "Emu/system_utils.hpp"
 
 #include "Loader/ELF.h"
 #include "Emu/VFS.h"
@@ -4336,6 +4337,15 @@ bool spu_thread::process_mfc_cmd()
 
 										getllar_busy_waiting_switch =
 											evaluate_spin_optimization({ history.data(), history.size() }, getllar_evaluate_time, g_cfg.core.spu_getllar_busy_waiting_percentage);
+
+										// Android battery-saver (their 1018103/96f8f22): collapse the GETLLAR busy-wait
+										// window so idle SPU reservation polls take the OS sleep instead of pinning a big
+										// core - the largest steady-state SPU power drain on mobile. Equivalent to forcing
+										// the wait percentage to 0 while keeping the history rotation above intact.
+										if (rpcs3::utils::get_power_save_mode())
+										{
+											getllar_busy_waiting_switch = 0;
+										}
 									}
 									else
 									{
@@ -5666,6 +5676,14 @@ s64 spu_thread::get_ch_value(u32 ch)
 			eventstat_busy_waiting_switch = value ? 1 : 0;
 		}
 		
+		// Stall watchdog (their 4d7c18f0): SPURS soft-freezes show threads sitting in this
+		// wait for tens of seconds. Log ONCE per pathological wait which address is being
+		// watched and whether its content actually changed - that distinguishes a missed
+		// notification (content changed, no wake) from producer starvation (content never
+		// written).
+		const u64 wait_watchdog_start = get_system_time();
+		bool wait_watchdog_fired = false;
+
 		for (bool is_first = true; !events.count; events = get_events(mask1 & ~SPU_EVENT_LR, true, true), is_first = false)
 		{
 			const auto old = +state;
@@ -5682,6 +5700,19 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 				deregister_cache_line_waiter(cache_line_waiter_index);
 				return -1;
+			}
+
+			if (!wait_watchdog_fired && get_system_time() - wait_watchdog_start > 15'000'000)
+			{
+				wait_watchdog_fired = true;
+				spu_log.error("Event-stat wait stalled for 15s (mask=0x%x, raddr=0x%x, rtime=0x%llx, res=0x%llx, line_changed=%s)",
+					mask1, raddr, rtime, raddr ? +vm::reservation_acquire(raddr) : 0,
+					// check_addr() is mandatory here: on a non-LR wait (mask1 < SPU_EVENT_LR, e.g. a long
+					// SPU_EVENT_TM/SN wait) raddr can still hold a stale reservation address that was never
+					// validated - the dangling-address dance at the top of this case only runs for
+					// mask1 > SPU_EVENT_LR, and the LR path below only dereferences resrv_mem after its own
+					// check_addr. Without this, a diagnostics-only log could fault on a decommitted page.
+					(raddr && resrv_mem && vm::check_addr(raddr)) ? (cmp_rdata(rdata, *resrv_mem) ? "no" : "YES") : "n/a");
 			}
 
 			// Optimized check
@@ -5807,7 +5838,13 @@ s64 spu_thread::get_ch_value(u32 ch)
 				{
 					if (u32 work_count = g_spu_work_count)
 					{
-						const u32 true_free = rx::sub_saturate<u32>(utils::get_thread_count(), 10);
+						// The fixed '10' headroom assumes a many-core desktop. On a low-core device
+						// (e.g. an 8-thread phone) sub_saturate(8, 10) == 0, so this throttle fires on
+						// EVERY background SPU compile and needlessly sleeps productive reservation
+						// waiters during scene warm-up. Preserve the desktop value (>10 threads) but
+						// give low-core devices a non-zero floor (their d8a19e2c).
+						const u32 hw_threads = utils::get_thread_count();
+						const u32 true_free = hw_threads > 10 ? (hw_threads - 10) : (hw_threads / 2);
 
 						if (work_count > true_free)
 						{
@@ -6954,7 +6991,22 @@ void spu_thread::halt()
 		spu_runtime::g_escape(this);
 	}
 
-	spu_log.fatal("Halt");
+	// Log-DoS guard (their 7c293d8): a cooperative-SPU HALT does not set a stop flag,
+	// so a SPURS kernel that self-HALTs on a bad job and is re-dispatched by its runtime
+	// spins here indefinitely. The unbounded fatal log then floods storage (observed
+	// 572 MB from ~440k identical lines). Keep the first few for diagnosis, then suppress.
+	// HALT semantics are unchanged (still fatal + escape).
+	static atomic_t<u32> s_halt_log_count{0};
+
+	if (const u32 n = s_halt_log_count++; n < 8)
+	{
+		spu_log.fatal("Halt");
+	}
+	else if (n == 8)
+	{
+		spu_log.fatal("Halt (further Halt logs suppressed to bound log size)");
+	}
+
 	spu_runtime::g_escape(this);
 }
 

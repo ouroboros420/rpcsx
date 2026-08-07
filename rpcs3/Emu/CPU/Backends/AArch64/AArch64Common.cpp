@@ -256,9 +256,69 @@ namespace aarch64
 		return part_info ? part_info->name : nullptr;
 	}
 
+	// Best-effort max CPU frequency (kHz) for a core; 0 if cpufreq isn't exposed.
+	static u64 read_max_freq([[maybe_unused]] u32 cpu_id)
+	{
+#if defined(__linux__)
+		const std::string path = fmt::format("/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", cpu_id);
+		if (!fs::is_file(path))
+		{
+			return 0;
+		}
+
+		std::string value;
+		if (!fs::file(path, fs::read).read(value, 32))
+		{
+			return 0;
+		}
+		return std::strtoull(value.c_str(), nullptr, 10);
+#else
+		return 0;
+#endif
+	}
+
+	// Scheduler-assigned capacity (a DMIPS-derived rating, ~1024 for the prime
+	// core, lower for efficiency cores); 0 if not exposed. Distinguishes big from
+	// LITTLE even on devices where cpufreq is locked down.
+	static u64 read_cpu_capacity([[maybe_unused]] u32 cpu_id)
+	{
+#if defined(__linux__)
+		const std::string path = fmt::format("/sys/devices/system/cpu/cpu%u/cpu_capacity", cpu_id);
+		if (!fs::is_file(path))
+		{
+			return 0;
+		}
+
+		std::string value;
+		if (!fs::file(path, fs::read).read(value, 32))
+		{
+			return 0;
+		}
+		return std::strtoull(value.c_str(), nullptr, 10);
+#else
+		return 0;
+#endif
+	}
+
 	std::string get_cpu_name()
 	{
-		std::map<u64, int> core_layout;
+		// Heterogeneous (big.LITTLE) SoCs report several core types. Target the
+		// highest-performance one (prime/big): the emulation's hot threads (PPU,
+		// SPU) run there, so the JIT should use that core's scheduling and cost
+		// model. Rank cores by, in order: scheduler capacity (cpu_capacity), then
+		// max frequency, then MIDR part id (within a Cortex generation the bigger
+		// core has the higher part id, e.g. A720=0xd81 > A520=0xd80).
+		//
+		// Earlier code keyed only on max frequency; when cpufreq is not readable
+		// (common on locked-down Android) every core scored 0 and it kept CPU0,
+		// which on modern SoCs is a LITTLE core - so it targeted e.g. Cortex-A520
+		// instead of the Cortex-A720 prime, tuning all codegen for a weak core.
+		u64 best_midr = 0;
+		u64 best_cap = 0;
+		u64 best_freq = 0;
+		u64 best_part = 0;
+		bool found = false;
+
 		for (u32 i = 0; i < std::thread::hardware_concurrency(); ++i)
 		{
 			const auto midr = read_MIDR_EL1(i);
@@ -266,34 +326,39 @@ namespace aarch64
 			{
 				break;
 			}
+			if (midr == 0)
+			{
+				continue;
+			}
 
-			core_layout[midr]++;
+			const u64 cap = read_cpu_capacity(i);
+			const u64 freq = read_max_freq(i);
+			const u64 part = (midr >> 4) & 0xfff;
+
+			const bool better = !found
+				|| cap > best_cap
+				|| (cap == best_cap && freq > best_freq)
+				|| (cap == best_cap && freq == best_freq && part > best_part);
+
+			if (better)
+			{
+				best_midr = midr;
+				best_cap = cap;
+				best_freq = freq;
+				best_part = part;
+				found = true;
+			}
 		}
 
-		if (core_layout.empty())
+		if (!found)
 		{
 			return {};
 		}
 
-		const cpu_entry_t* lowest_part_info = nullptr;
-		for (const auto& [midr, count] : core_layout)
-		{
-			const auto implementer_id = (midr >> 24) & 0xff;
-			const auto part_id = (midr >> 4) & 0xfff;
-
-			const auto part_info = find_cpu_part(implementer_id, part_id);
-			if (!part_info)
-			{
-				return {};
-			}
-
-			if (lowest_part_info == nullptr || lowest_part_info > part_info)
-			{
-				lowest_part_info = part_info;
-			}
-		}
-
-		return lowest_part_info ? lowest_part_info->name : "";
+		const auto implementer_id = (best_midr >> 24) & 0xff;
+		const auto part_id = (best_midr >> 4) & 0xfff;
+		const auto part_info = find_cpu_part(implementer_id, part_id);
+		return part_info ? part_info->name : "";
 	}
 
 	std::string get_cpu_brand()

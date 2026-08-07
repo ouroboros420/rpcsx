@@ -695,6 +695,17 @@ namespace rsx
 					.any())
 			{
 				const u32 offs = cmd & (jump_type.test_unsafe(0) ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
+
+				// Don't follow a jump into unmapped IO space (a desynced/corrupt
+				// command stream). Recovering here avoids executing whatever stale
+				// memory the GET pointer would land on. (ouroboros c9049b3a1)
+				if (iomap_table.get_addr(offs) == umax) [[unlikely]]
+				{
+					rsx_log.error("FIFO: jump to unmapped IO address 0x%x (last cmd = 0x%x)", offs, get_fifo_cmd());
+					recover_fifo();
+					return;
+				}
+
 				if (offs == fifo_ctrl->get_pos())
 				{
 					// Jump to self. Often preceded by NOP
@@ -726,6 +737,16 @@ namespace rsx
 				}
 
 				const u32 offs = cmd & RSX_METHOD_CALL_OFFSET_MASK;
+
+				// Don't follow a call into unmapped IO space (a desynced/corrupt
+				// command stream) - recover instead of running off into stale memory. (ouroboros c9049b3a1)
+				if (iomap_table.get_addr(offs) == umax) [[unlikely]]
+				{
+					rsx_log.error("FIFO: call to unmapped IO address 0x%x (last cmd = 0x%x)", offs, get_fifo_cmd());
+					recover_fifo();
+					return;
+				}
+
 				fifo_ret_addr = fifo_ctrl->get_pos() + 4;
 				fifo_ctrl->set_get(offs);
 				last_known_code_start = offs;

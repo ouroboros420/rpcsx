@@ -208,6 +208,17 @@ namespace rsx
 		const u32 count = draw_indexed_clause.get_elements_count();
 
 		const auto ptr = vm::_ptr<const std::byte>(address);
+
+		// Defensive: a desynced FIFO can execute stale draws with a garbage index
+		// offset/count. Validate the index region is mapped instead of reading past
+		// it (which faults the RSX thread); return an empty array on failure.
+		if (!address || !vm::check_addr(address + first * type_size, vm::page_readable, count * type_size)) [[unlikely]]
+		{
+			rsx_log.error("Skipped out-of-bounds index array (addr=0x%x, first=%u, count=%u, type_size=%u)",
+				address, first, count, type_size);
+			return {};
+		}
+
 		return {ptr + first * type_size, count * type_size};
 	}
 
@@ -551,6 +562,19 @@ namespace rsx
 
 				const u32 data_size = range.second * block->attribute_stride;
 				const u32 vertex_base = range.first * block->attribute_stride;
+
+				// Defensive: a desynced FIFO can execute stale display-list draws with
+				// garbage vertex offsets/strides (observed crashing inFamous with a wild
+				// write while uploading such a draw). Skip the upload if the source
+				// vertex region isn't fully mapped, instead of reading/overrunning into
+				// unmapped memory and faulting the RSX thread.
+				if (!block->real_offset_address ||
+					!vm::check_addr(block->real_offset_address + vertex_base, vm::page_readable, data_size))
+				{
+					rsx_log.error("Skipped out-of-bounds vertex upload (addr=0x%x, base=0x%x, size=0x%x, stride=%u)",
+						block->real_offset_address, vertex_base, data_size, block->attribute_stride);
+					continue;
+				}
 
 				g_fxo->get<rsx::dma_manager>().copy(persistent, vm::_ptr<char>(block->real_offset_address) + vertex_base, data_size);
 				persistent += data_size;

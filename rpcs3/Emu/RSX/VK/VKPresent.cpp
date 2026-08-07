@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "VKGSRender.h"
+#include "Emu/Cell/timers.hpp"
 #include "vkutils/buffer_object.h"
 #include "vkutils/memory.h"
 #include "Emu/RSX/Overlays/overlay_manager.h"
@@ -798,12 +799,16 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 		vk::change_image_layout(*m_current_command_buffer, target_image, present_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, subresource_range);
 		VK_GET_SYMBOL(vkCmdClearColorImage)(*m_current_command_buffer, target_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_black, 1, &subresource_range);
 
-		// Prevent WAW on transfer writes
+		// Prevent WAW on transfer writes.
+		// NOTE (6437f680ce97): the image was transitioned to TRANSFER_DST_OPTIMAL by the
+		// change_image_layout above, so both layouts must be TRANSFER_DST_OPTIMAL here.
+		// target_layout still holds present_layout at this point (it is only updated below),
+		// and naming it would be a layout mismatch against the image's actual state.
 		vk::insert_image_memory_barrier(
 			*m_current_command_buffer,
 			target_image,
-			target_layout,
-			target_layout,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			VK_PIPELINE_STAGE_TRANSFER_BIT,
 			VK_PIPELINE_STAGE_TRANSFER_BIT,
 			VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -996,6 +1001,21 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 	m_frame->flip(m_context);
 	rsx::thread::flip(info);
+
+	// Crash-resilient VkPipelineCache persistence (193dbeb38cbf). The disk blob is
+	// otherwise written only on clean teardown, so any crash/LMK kill mid-session loses
+	// the entire pipeline warmup - and a cold-boot compile-burst crash then keeps every
+	// subsequent boot cold too (the observed Write-Color-Buffers crash-loop). Re-save
+	// every ~2 minutes; save_pipeline_cache() skips the file write entirely when the
+	// cache size is unchanged, so steady state costs one size query per interval.
+	if (const u64 now = get_system_time(); now >= m_last_pipeline_cache_save_time + 120'000'000)
+	{
+		m_last_pipeline_cache_save_time = now;
+		if (m_device)
+		{
+			m_device->save_pipeline_cache();
+		}
+	}
 
 	// Data sync
 	const rsx::surface_scaling_config_t active_res_scaling_config =
