@@ -3530,7 +3530,21 @@ void thread_base::exec()
 
 void thread_ctrl::set_name(std::string name)
 {
-	ensure(g_tls_this_thread);
+	// Tolerate being called from a thread that is not a named_thread, matching
+	// get_name()'s existing behaviour (it returns "not named_thread" rather than
+	// asserting). The two are used as a pair - save the old name, set a new one,
+	// restore it - so a hard assert here turns any such caller into a SIGTRAP
+	// while the get_name() half succeeds silently.
+	//
+	// This is reachable on Android: the app drives PPU precompilation from a
+	// platform service thread, which never goes through named_thread, so
+	// ppu_initialize()'s worker-naming traps on entry. The name is purely
+	// cosmetic (debugger/profiler labelling), so skipping it is harmless.
+	if (!g_tls_this_thread)
+	{
+		return;
+	}
+
 	g_tls_this_thread->m_tname.store(make_single<std::string>(name));
 	g_tls_this_thread->set_name(std::move(name));
 }
