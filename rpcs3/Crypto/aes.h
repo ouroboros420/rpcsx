@@ -172,7 +172,7 @@ extern "C"
 		const unsigned char* input,
 		unsigned char* output);
 
-	void aes_cmac(aes_context* ctx, size_t length, unsigned char* input, unsigned char* output);
+void aes_cmac(aes_context *ctx, size_t length, const unsigned char *input, unsigned char *output);
 
 #ifdef __cplusplus
 }

@@ -1,7 +1,6 @@
 #include "stdafx.h"
 #include "overlay_trophy_notification.h"
 #include "Emu/Cell/ErrorCodes.h"
-#include "Emu/System.h"
 
 namespace rsx
 {
@@ -70,7 +69,7 @@ namespace rsx
 			{
 				// First tick
 				creation_time_us = timestamp_us;
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_trophy.wav");
+				play_sound(sound_effect::trophy);
 				return;
 			}
 
@@ -81,7 +80,7 @@ namespace rsx
 			{
 				if (!sliding_animation.active)
 				{
-					sliding_animation.end = {-f32(frame.x + frame.w), 0, 0};
+					sliding_animation.end = { -f32(frame.x + frame.w), 0, 0 };
 					sliding_animation.on_finish = [this]
 					{
 						s_trophy_semaphore.release();
@@ -166,8 +165,8 @@ namespace rsx
 			constexpr u16 margin_sz = 9;
 			frame.w = margin_sz * 3 + image.w + text_view.w;
 
-			sliding_animation.current = {-f32(frame.x + frame.w), 0, 0};
-			sliding_animation.end = {0, 0, 0};
+			sliding_animation.current = { -f32(frame.x + frame.w), 0, 0 };
+			sliding_animation.end = { 0, 0, 0 };
 			sliding_animation.active = true;
 
 			fade_animation.current = color4f(0.f);

@@ -14,9 +14,9 @@ extern "C"
 
 namespace rsx
 {
-	// Import address_range utilities
-	using utils::address_range;
-	using utils::address_range_vector;
+	// Import address_range32 utilities
+	using utils::address_range32;
+	using utils::address_range_vector32;
 	using utils::next_page;
 	using utils::page_end;
 	using utils::page_for;
@@ -36,6 +36,54 @@ namespace rsx
 		severe,
 		fatal
 	};
+
+	namespace limits
+	{
+		enum
+		{
+			fragment_textures_count = 16,
+			vertex_textures_count = 4,
+			vertex_count = 16,
+			fragment_count = 32,
+			tiles_count = 15,
+			zculls_count = 8,
+			color_buffers_count = 4
+		};
+	} // namespace limits
+
+	namespace constants
+	{
+		constexpr std::array<const char*, 16> fragment_texture_names =
+			{
+				"tex0",
+				"tex1",
+				"tex2",
+				"tex3",
+				"tex4",
+				"tex5",
+				"tex6",
+				"tex7",
+				"tex8",
+				"tex9",
+				"tex10",
+				"tex11",
+				"tex12",
+				"tex13",
+				"tex14",
+				"tex15",
+		};
+
+		constexpr std::array<const char*, 4> vertex_texture_names =
+			{
+				"vtex0",
+				"vtex1",
+				"vtex2",
+				"vtex3",
+		};
+
+		// Local RSX memory base (known as constant)
+		constexpr u32 local_mem_base = 0xC0000000;
+	} // namespace constants
 
 	// Base for resources with reference counting
 	class ref_counted
@@ -73,54 +121,6 @@ namespace rsx
 		}
 	};
 
-	namespace limits
-	{
-		enum
-		{
-			fragment_textures_count = 16,
-			vertex_textures_count = 4,
-			vertex_count = 16,
-			fragment_count = 32,
-			tiles_count = 15,
-			zculls_count = 8,
-			color_buffers_count = 4
-		};
-	}
-
-	namespace constants
-	{
-		constexpr std::array<const char*, 16> fragment_texture_names =
-			{
-				"tex0",
-				"tex1",
-				"tex2",
-				"tex3",
-				"tex4",
-				"tex5",
-				"tex6",
-				"tex7",
-				"tex8",
-				"tex9",
-				"tex10",
-				"tex11",
-				"tex12",
-				"tex13",
-				"tex14",
-				"tex15",
-		};
-
-		constexpr std::array<const char*, 4> vertex_texture_names =
-			{
-				"vtex0",
-				"vtex1",
-				"vtex2",
-				"vtex3",
-		};
-
-		// Local RSX memory base (known as constant)
-		constexpr u32 local_mem_base = 0xC0000000;
-	} // namespace constants
-
 	/**
 	 * Holds information about a framebuffer
 	 */
@@ -137,7 +137,7 @@ namespace rsx
 		u8 bpp = 0;
 		u8 samples = 0;
 
-		address_range range{};
+		address_range32 range{};
 
 		gcm_framebuffer_info() = default;
 
@@ -148,16 +148,16 @@ namespace rsx
 			// Account for the last line of the block not reaching the end
 			const u32 block_size = pitch * (height - 1) * aa_factor_v;
 			const u32 line_size = width * aa_factor_u * bpp;
-			range = address_range::start_length(address, block_size + line_size);
+			range = address_range32::start_length(address, block_size + line_size);
 		}
 
-		address_range get_memory_range(const u32* aa_factors)
+		address_range32 get_memory_range(const u32* aa_factors)
 		{
 			calculate_memory_range(aa_factors[0], aa_factors[1]);
 			return range;
 		}
 
-		address_range get_memory_range() const
+		address_range32 get_memory_range() const
 		{
 			ensure(range.start == address);
 			return range;
@@ -166,7 +166,7 @@ namespace rsx
 
 	struct avconf
 	{
-		stereo_render_mode_options stereo_mode = stereo_render_mode_options::disabled; // Stereo 3D display mode
+		bool stereo_enabled = false; // Stereo 3D display mode
 		u8 format = 0;                                                                 // XRGB
 		u8 aspect = 0;                                                                 // AUTO
 		u8 resolution_id = 2;                                                          // 720p
@@ -188,6 +188,8 @@ namespace rsx
 		u32 get_compatible_gcm_format() const;
 		u8 get_bpp() const;
 		double get_aspect_ratio() const;
+
+		size2u video_frame_size() const;
 
 		areau aspect_convert_region(const size2u& image_dimensions, const size2u& output_dimensions) const;
 		size2u aspect_convert_dimensions(const size2u& image_dimensions) const;
@@ -227,6 +229,20 @@ namespace rsx
 		u32 rsx_address;
 		u8* pixels;
 		bool swizzled;
+	};
+
+	struct surface_scaling_config_t
+	{
+		u16 scale_percent = 100;
+		u16 min_scalable_dimension = 0;
+
+		f32 scale_factor() const { return scale_percent * 0.01f; }
+
+		bool operator == (const surface_scaling_config_t& that) const
+		{
+			return this->scale_percent == that.scale_percent &&
+				this->min_scalable_dimension == that.min_scalable_dimension;
+		}
 	};
 
 	template <typename T>
@@ -278,7 +294,7 @@ namespace rsx
 	static inline u32 get_location(u32 addr)
 	{
 		// We don't really care about the actual memory map, it shouldn't be possible to use the mmio bar region anyway
-		constexpr address_range local_mem_range = address_range::start_length(rsx::constants::local_mem_base, 0x1000'0000);
+		constexpr address_range32 local_mem_range = address_range32::start_length(rsx::constants::local_mem_base, 0x1000'0000);
 		return local_mem_range.overlaps(addr) ?
 		           CELL_GCM_LOCATION_LOCAL :
 		           CELL_GCM_LOCATION_MAIN;
@@ -590,28 +606,23 @@ namespace rsx
 		}
 	}
 
-	static inline f32 get_resolution_scale()
-	{
-		return g_cfg.video.strict_rendering_mode ? 1.f : (g_cfg.video.resolution_scale_percent / 100.f);
-	}
-
-	static inline int get_resolution_scale_percent()
-	{
-		return g_cfg.video.strict_rendering_mode ? 100 : g_cfg.video.resolution_scale_percent;
-	}
-
 	template <bool clamp = false>
-	static inline const std::pair<u16, u16> apply_resolution_scale(u16 width, u16 height, u16 ref_width = 0, u16 ref_height = 0)
+	static inline const std::pair<u16, u16> apply_resolution_scale(
+		const surface_scaling_config_t& config,
+		u16 width,
+		u16 height,
+		u16 ref_width = 0,
+		u16 ref_height = 0)
 	{
 		ref_width = (ref_width) ? ref_width : width;
 		ref_height = (ref_height) ? ref_height : height;
 		const u16 ref = std::max(ref_width, ref_height);
 
-		if (ref > g_cfg.video.min_scalable_dimension)
+		if (ref > config.min_scalable_dimension)
 		{
 			// Upscale both width and height
-			width = (get_resolution_scale_percent() * width) / 100;
-			height = (get_resolution_scale_percent() * height) / 100;
+			width = (config.scale_percent * width) / 100;
+			height = (config.scale_percent * height) / 100;
 
 			if constexpr (clamp)
 			{
@@ -624,11 +635,14 @@ namespace rsx
 	}
 
 	template <bool clamp = false>
-	static inline const std::pair<u16, u16> apply_inverse_resolution_scale(u16 width, u16 height)
+	static inline const std::pair<u16, u16> apply_inverse_resolution_scale(
+		const surface_scaling_config_t& config,
+		u16 width,
+		u16 height)
 	{
 		// Inverse scale
-		auto width_ = (width * 100) / get_resolution_scale_percent();
-		auto height_ = (height * 100) / get_resolution_scale_percent();
+		auto width_ = (width * 100) / config.scale_percent;
+		auto height_ = (height * 100) / config.scale_percent;
 
 		if constexpr (clamp)
 		{
@@ -636,7 +650,7 @@ namespace rsx
 			height_ = std::max<u16>(height_, 1);
 		}
 
-		if (std::max(width_, height_) > g_cfg.video.min_scalable_dimension)
+		if (std::max(width_, height_) > config.min_scalable_dimension)
 		{
 			return {width_, height_};
 		}

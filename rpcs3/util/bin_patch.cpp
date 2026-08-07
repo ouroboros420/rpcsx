@@ -335,7 +335,7 @@ bool patch_engine::load(patch_map& patches_map, const std::string& path, std::st
 						}
 						else if (serial.size() != 9 || !std::all_of(serial.begin(), serial.end(), [](char c)
 														   {
-															   return std::isalnum(c);
+															   return std::isalnum(static_cast<unsigned char>(c));
 														   }))
 						{
 							append_log_message(log_messages, fmt::format("Error: Serial '%s' invalid (patch: %s, key: %s, location: %s, file: %s)", serial, description, main_key, get_yaml_node_location(serial_node), path), &patch_log.error);
@@ -1745,7 +1745,7 @@ void patch_engine::save_config(const patch_map& patches_map)
 
 	fs::pending_file file(path);
 
-	if (!file.file || (file.file.write(out.c_str(), out.size()), !file.commit()))
+	if (!file.file || file.file.write(out.c_str(), out.size()) < out.size() || !file.commit())
 	{
 		patch_log.error("Failed to create patch config file %s (error=%s)", path, fs::g_tls_error);
 	}

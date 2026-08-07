@@ -2,6 +2,7 @@
 
 #include "stdafx.h"
 #include "sdl_pad_handler.h"
+#include "sdl_instance.h"
 #include "Emu/system_utils.hpp"
 #include "Emu/system_config.h"
 #include "Emu/System.h"
@@ -10,117 +11,14 @@
 
 LOG_CHANNEL(sdl_log, "SDL");
 
-struct sdl_instance
+template <>
+void fmt_class_string<SDL_GUID>::format(std::string& out, u64 arg)
 {
-public:
-	sdl_instance() = default;
-	~sdl_instance()
-	{
-		// Only quit SDL once on exit. SDL uses a global state internally...
-		if (m_initialized)
-		{
-			sdl_log.notice("Quitting SDL ...");
-			SDL_Quit();
-		}
-	}
-
-	static sdl_instance& get_instance()
-	{
-		static sdl_instance instance{};
-		return instance;
-	}
-
-	bool initialize()
-	{
-		// Only init SDL once. SDL uses a global state internally...
-		if (m_initialized)
-		{
-			return true;
-		}
-
-		sdl_log.notice("Initializing SDL ...");
-
-		// Set non-dynamic hints before SDL_Init
-		if (!SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1"))
-		{
-			sdl_log.error("Could not set SDL_HINT_JOYSTICK_THREAD: %s", SDL_GetError());
-		}
-
-		if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD))
-		{
-			sdl_log.error("Could not initialize! SDL Error: %s", SDL_GetError());
-			return false;
-		}
-
-		SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
-		SDL_SetLogOutputFunction([](void*, int category, SDL_LogPriority priority, const char* message)
-			{
-				std::string category_name;
-				switch (category)
-				{
-				case SDL_LOG_CATEGORY_APPLICATION:
-					category_name = "app";
-					break;
-				case SDL_LOG_CATEGORY_ERROR:
-					category_name = "error";
-					break;
-				case SDL_LOG_CATEGORY_ASSERT:
-					category_name = "assert";
-					break;
-				case SDL_LOG_CATEGORY_SYSTEM:
-					category_name = "system";
-					break;
-				case SDL_LOG_CATEGORY_AUDIO:
-					category_name = "audio";
-					break;
-				case SDL_LOG_CATEGORY_VIDEO:
-					category_name = "video";
-					break;
-				case SDL_LOG_CATEGORY_RENDER:
-					category_name = "render";
-					break;
-				case SDL_LOG_CATEGORY_INPUT:
-					category_name = "input";
-					break;
-				case SDL_LOG_CATEGORY_TEST:
-					category_name = "test";
-					break;
-				default:
-					category_name = fmt::format("unknown(%d)", category);
-					break;
-				}
-
-				switch (priority)
-				{
-				case SDL_LOG_PRIORITY_VERBOSE:
-				case SDL_LOG_PRIORITY_DEBUG:
-					sdl_log.trace("%s: %s", category_name, message);
-					break;
-				case SDL_LOG_PRIORITY_INFO:
-					sdl_log.notice("%s: %s", category_name, message);
-					break;
-				case SDL_LOG_PRIORITY_WARN:
-					sdl_log.warning("%s: %s", category_name, message);
-					break;
-				case SDL_LOG_PRIORITY_ERROR:
-					sdl_log.error("%s: %s", category_name, message);
-					break;
-				case SDL_LOG_PRIORITY_CRITICAL:
-					sdl_log.error("%s: %s", category_name, message);
-					break;
-				default:
-					break;
-				}
-			},
-			nullptr);
-
-		m_initialized = true;
-		return true;
-	}
-
-private:
-	bool m_initialized = false;
-};
+	const SDL_GUID& guid = get_object(arg);
+	char str[sizeof(SDL_GUID) * 2 + 1] {};
+	SDL_GUIDToString(guid, str, sizeof(str));
+	fmt::append(out, "%s", str);
+}
 
 sdl_pad_handler::sdl_pad_handler() : PadHandlerBase(pad_handler::sdl)
 {
@@ -143,6 +41,11 @@ sdl_pad_handler::sdl_pad_handler() : PadHandlerBase(pad_handler::sdl)
 			{SDLKeyCodes::RS, "RS"},
 			{SDLKeyCodes::Guide, "Guide"},
 			{SDLKeyCodes::Misc1, "Misc 1"},
+		{ SDLKeyCodes::Misc2,    "Misc 2"   },
+		{ SDLKeyCodes::Misc3,    "Misc 3"   },
+		{ SDLKeyCodes::Misc4,    "Misc 4"   },
+		{ SDLKeyCodes::Misc5,    "Misc 5"   },
+		{ SDLKeyCodes::Misc6,    "Misc 6"   },
 			{SDLKeyCodes::RPaddle1, "R Paddle 1"},
 			{SDLKeyCodes::LPaddle1, "L Paddle 1"},
 			{SDLKeyCodes::RPaddle2, "R Paddle 2"},
@@ -219,7 +122,7 @@ void sdl_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, SDLKeyCodes::RSYPos);
 	cfg->start.def = ::at32(button_list, SDLKeyCodes::Start);
 	cfg->select.def = ::at32(button_list, SDLKeyCodes::Back);
-	cfg->ps.def = ::at32(button_list, SDLKeyCodes::Guide);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{SDLKeyCodes::Guide}, {SDLKeyCodes::Start, SDLKeyCodes::Back}});
 	cfg->square.def = ::at32(button_list, SDLKeyCodes::West);
 	cfg->cross.def = ::at32(button_list, SDLKeyCodes::South);
 	cfg->circle.def = ::at32(button_list, SDLKeyCodes::East);
@@ -246,8 +149,6 @@ void sdl_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rstickdeadzone.def = 8000;                                     // between 0 and SDL_JOYSTICK_AXIS_MAX
 	cfg->ltriggerthreshold.def = 0;                                     // between 0 and SDL_JOYSTICK_AXIS_MAX
 	cfg->rtriggerthreshold.def = 0;                                     // between 0 and SDL_JOYSTICK_AXIS_MAX
-	cfg->lpadsquircling.def = 8000;
-	cfg->rpadsquircling.def = 8000;
 
 	// Set default color value
 	cfg->colorR.def = 0;
@@ -268,14 +169,7 @@ bool sdl_pad_handler::Init()
 	if (m_is_init)
 		return true;
 
-	bool instance_success;
-
-	Emu.BlockingCallFromMainThread([&instance_success]()
-		{
-			instance_success = sdl_instance::get_instance().initialize();
-		});
-
-	if (!instance_success)
+	if (!sdl_instance::get_instance().initialize())
 		return false;
 
 	if (g_cfg.io.load_sdl_mappings)
@@ -316,7 +210,7 @@ void sdl_pad_handler::process()
 	if (!m_is_init)
 		return;
 
-	SDL_PumpEvents();
+	sdl_instance::get_instance().pump_events();
 
 	PadHandlerBase::process();
 }
@@ -354,15 +248,17 @@ SDLDevice::sdl_info sdl_pad_handler::get_sdl_info(SDL_JoystickID id)
 	}
 
 	info.type = SDL_GetGamepadType(info.gamepad);
+	info.real_type = SDL_GetRealGamepadType(info.gamepad);
+	info.guid = SDL_GetGamepadGUIDForID(id);
 	info.vid = SDL_GetGamepadVendor(info.gamepad);
 	info.pid = SDL_GetGamepadProduct(info.gamepad);
 	info.product_version = SDL_GetGamepadProductVersion(info.gamepad);
 	info.firmware_version = SDL_GetGamepadFirmwareVersion(info.gamepad);
-	info.has_led = SDL_HasProperty(property_id, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN);
-	info.has_mono_led = SDL_HasProperty(property_id, SDL_PROP_GAMEPAD_CAP_MONO_LED_BOOLEAN);
-	info.has_player_led = SDL_HasProperty(property_id, SDL_PROP_GAMEPAD_CAP_PLAYER_LED_BOOLEAN);
-	info.has_rumble = SDL_HasProperty(property_id, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN);
-	info.has_rumble_triggers = SDL_HasProperty(property_id, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN);
+	info.has_led = SDL_GetBooleanProperty(property_id, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+	info.has_mono_led = SDL_GetBooleanProperty(property_id, SDL_PROP_GAMEPAD_CAP_MONO_LED_BOOLEAN, false);
+	info.has_player_led = SDL_GetBooleanProperty(property_id, SDL_PROP_GAMEPAD_CAP_PLAYER_LED_BOOLEAN, false);
+	info.has_rumble = SDL_GetBooleanProperty(property_id, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+	info.has_rumble_triggers = SDL_GetBooleanProperty(property_id, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
 	info.has_accel = SDL_GamepadHasSensor(info.gamepad, SDL_SENSOR_ACCEL);
 	info.has_gyro = SDL_GamepadHasSensor(info.gamepad, SDL_SENSOR_GYRO);
 
@@ -387,8 +283,8 @@ SDLDevice::sdl_info sdl_pad_handler::get_sdl_info(SDL_JoystickID id)
 		}
 	}
 
-	sdl_log.notice("Found game pad %d: type=%d, name='%s', path='%s', serial='%s', vid=0x%x, pid=0x%x, product_version=0x%x, firmware_version=0x%x, has_led=%d, has_player_led=%d, has_mono_led=%d, has_rumble=%d, has_rumble_triggers=%d, has_accel=%d, has_gyro=%d",
-		id, static_cast<int>(info.type), info.name, info.path, info.serial, info.vid, info.pid, info.product_version, info.firmware_version, info.has_led, info.has_player_led, info.has_mono_led, info.has_rumble, info.has_rumble_triggers, info.has_accel, info.has_gyro);
+	sdl_log.notice("Found game pad %d: type=%d, real_type=%d, name='%s', guid='%s', path='%s', serial='%s', vid=0x%x, pid=0x%x, product_version=0x%x, firmware_version=0x%x, has_led=%d, has_player_led=%d, has_mono_led=%d, has_rumble=%d, has_rumble_triggers=%d, has_accel=%d, has_gyro=%d",
+		id, static_cast<int>(info.type), static_cast<int>(info.real_type), info.name, info.guid, info.path, info.serial, info.vid, info.pid, info.product_version, info.firmware_version, info.has_led, info.has_player_led, info.has_mono_led, info.has_rumble, info.has_rumble_triggers, info.has_accel, info.has_gyro);
 
 	if (info.has_accel)
 	{
@@ -435,6 +331,39 @@ SDLDevice::sdl_info sdl_pad_handler::get_sdl_info(SDL_JoystickID id)
 		if (SDL_GamepadHasAxis(info.gamepad, axis_id))
 		{
 			info.axis_ids.insert(axis_id);
+		}
+	}
+
+	// The DS3 may have extra pressure sensitive buttons as axis
+	if (info.real_type == SDL_GamepadType::SDL_GAMEPAD_TYPE_PS3)
+	{
+		if (SDL_Joystick* joystick = SDL_GetGamepadJoystick(info.gamepad))
+		{
+			const int num_axes = SDL_GetNumJoystickAxes(joystick);
+			const int num_buttons = SDL_GetNumJoystickButtons(joystick);
+
+			// The DJ Hero Turntable (VID 0x12BA, PID 0x0140) coincidentally matches the
+			// DS3 axis/button counts (16 axes, 11 buttons) but is NOT a pressure-sensitive
+			// DS3. Routing its face buttons through the pressure axes drops the green (Cross)
+			// and blue (Square) deck buttons, so exclude it and read its buttons digitally.
+			const bool is_dj_hero_turntable = info.vid == 0x12BA && info.pid == 0x0140;
+
+			info.is_ds3_with_pressure_buttons = num_axes == 16 && num_buttons == 11 && !is_dj_hero_turntable;
+
+			sdl_log.notice("DS3 device %d has %d axis and %d buttons (has_pressure_buttons=%d)", id, num_axes, num_buttons, info.is_ds3_with_pressure_buttons);
+
+			if (info.is_ds3_with_pressure_buttons)
+			{
+				// Add pressure buttons
+				for (int i = SDL_GAMEPAD_AXIS_COUNT; i < num_axes; i++)
+				{
+					const SDL_GamepadAxis axis_id = static_cast<SDL_GamepadAxis>(i);
+					//if (SDL_GamepadHasAxis(info.gamepad, axis_id)) // Always returns false for axis >= SDL_GAMEPAD_AXIS_COUNT
+					{
+						info.axis_ids.insert(axis_id);
+					}
+				}
+			}
 		}
 	}
 
@@ -740,7 +669,7 @@ void sdl_pad_handler::get_extended_info(const pad_ensemble& binding)
 		{
 			const f32 accel_x = dev->values_accel[0]; // Angular speed around the x axis (pitch)
 			const f32 accel_y = dev->values_accel[1]; // Angular speed around the y axis (yaw)
-			const f32 accel_z = dev->values_accel[2]; // Angular speed around the z axis (roll
+			const f32 accel_z = dev->values_accel[2]; // Angular speed around the z axis (roll)
 
 			// Convert to ds3. The ds3 resolution is 113/G.
 			pad->m_sensors[0].m_value = Clamp0To1023((accel_x / SDL_STANDARD_GRAVITY) * -1 * MOTION_ONE_G + 512);
@@ -778,7 +707,7 @@ void sdl_pad_handler::get_motion_sensors(const std::string& pad_id, const motion
 	if (!m_is_init)
 		return;
 
-	SDL_PumpEvents();
+	sdl_instance::get_instance().pump_events();
 
 	PadHandlerBase::get_motion_sensors(pad_id, callback, fail_callback, preview_values, sensors);
 }
@@ -788,9 +717,32 @@ PadHandlerBase::connection sdl_pad_handler::get_next_button_press(const std::str
 	if (!m_is_init)
 		return connection::disconnected;
 
-	SDL_PumpEvents();
+	sdl_instance::get_instance().pump_events();
 
 	return PadHandlerBase::get_next_button_press(padId, callback, fail_callback, call_type, buttons);
+}
+
+pad_capabilities sdl_pad_handler::get_capabilities(const std::string& pad_id)
+{
+	pad_capabilities capabilities = PadHandlerBase::get_capabilities(pad_id);
+
+	std::shared_ptr<PadDevice> device = get_device(pad_id);
+	SDLDevice* dev = static_cast<SDLDevice*>(device.get());
+	if (!dev || dev->sdl.is_virtual_device)
+	{
+		return capabilities;
+	}
+
+	capabilities.has_led &= dev->sdl.has_led;
+	capabilities.has_mono_led &= dev->sdl.has_mono_led;
+	capabilities.has_player_led &= dev->sdl.has_player_led;
+	capabilities.has_battery_led &= (dev->sdl.has_led || dev->sdl.has_mono_led);
+	capabilities.has_rumble &= dev->sdl.has_rumble;
+	capabilities.has_accel &= dev->sdl.has_accel;
+	capabilities.has_gyro &= dev->sdl.has_gyro;
+	capabilities.has_pressure_intensity_button &= !dev->sdl.is_ds3_with_pressure_buttons; // Only allow if there's not pressure sensitivity
+
+	return capabilities;
 }
 
 void sdl_pad_handler::apply_pad_data(const pad_ensemble& binding)
@@ -806,8 +758,8 @@ void sdl_pad_handler::apply_pad_data(const pad_ensemble& binding)
 	// The two motors are not the same, and they create different vibration effects. Values range between 0 to 65535.
 	if (dev->sdl.has_rumble || dev->sdl.has_rumble_triggers)
 	{
-		const u8 speed_large = cfg->get_large_motor_speed(pad->m_vibrateMotors);
-		const u8 speed_small = cfg->get_small_motor_speed(pad->m_vibrateMotors);
+		const u8 speed_large = cfg->get_large_motor_speed(pad->m_vibrate_motors);
+		const u8 speed_small = cfg->get_small_motor_speed(pad->m_vibrate_motors);
 
 		dev->new_output_data |= dev->large_motor != speed_large || dev->small_motor != speed_small;
 
@@ -932,17 +884,17 @@ void sdl_pad_handler::set_rumble(SDLDevice* dev, u8 speed_large, u8 speed_small)
 	}
 }
 
-bool sdl_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool sdl_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == SDLKeyCodes::LT;
 }
 
-bool sdl_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool sdl_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == SDLKeyCodes::RT;
 }
 
-bool sdl_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool sdl_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -956,7 +908,7 @@ bool sdl_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*devi
 	}
 }
 
-bool sdl_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool sdl_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -970,7 +922,7 @@ bool sdl_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*dev
 	}
 }
 
-bool sdl_pad_handler::get_is_touch_pad_motion(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool sdl_pad_handler::get_is_touch_pad_motion(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -984,25 +936,82 @@ bool sdl_pad_handler::get_is_touch_pad_motion(const std::shared_ptr<PadDevice>& 
 	}
 }
 
-std::unordered_map<u64, u16> sdl_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> sdl_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	std::unordered_map<u64, u16> values;
+	std::unordered_map<u32, u16> values;
 	SDLDevice* dev = static_cast<SDLDevice*>(device.get());
 	if (!dev || !dev->sdl.gamepad)
 		return values;
 
+	static const std::map<SDLKeyCodes, SDLKeyCodes> button_to_pressure =
+	{
+		{ SDLKeyCodes::South, SDLKeyCodes::PressureCross },
+		{ SDLKeyCodes::East, SDLKeyCodes::PressureCircle },
+		{ SDLKeyCodes::West, SDLKeyCodes::PressureSquare },
+		{ SDLKeyCodes::North, SDLKeyCodes::PressureTriangle },
+		{ SDLKeyCodes::LB, SDLKeyCodes::PressureL1 },
+		{ SDLKeyCodes::RB, SDLKeyCodes::PressureR1 },
+		{ SDLKeyCodes::Up, SDLKeyCodes::PressureUp },
+		{ SDLKeyCodes::Down, SDLKeyCodes::PressureDown },
+		{ SDLKeyCodes::Left, SDLKeyCodes::PressureLeft },
+		{ SDLKeyCodes::Right, SDLKeyCodes::PressureRight }
+	};
+
+	static const std::map<SDLKeyCodes, SDLKeyCodes> pressure_to_button =
+	{
+		{ SDLKeyCodes::PressureCross, SDLKeyCodes::South },
+		{ SDLKeyCodes::PressureCircle, SDLKeyCodes::East },
+		{ SDLKeyCodes::PressureSquare, SDLKeyCodes::West },
+		{ SDLKeyCodes::PressureTriangle, SDLKeyCodes::North },
+		{ SDLKeyCodes::PressureL1, SDLKeyCodes::LB },
+		{ SDLKeyCodes::PressureR1, SDLKeyCodes::RB },
+		{ SDLKeyCodes::PressureUp, SDLKeyCodes::Up },
+		{ SDLKeyCodes::PressureDown, SDLKeyCodes::Down },
+		{ SDLKeyCodes::PressureLeft, SDLKeyCodes::Left },
+		{ SDLKeyCodes::PressureRight, SDLKeyCodes::Right }
+	};
+
+	std::set<SDLKeyCodes> pressed_pressure_buttons;
+
 	for (SDL_GamepadButton button_id : dev->sdl.button_ids)
 	{
-		const u8 value = SDL_GetGamepadButton(dev->sdl.gamepad, button_id);
+		const bool value = SDL_GetGamepadButton(dev->sdl.gamepad, button_id);
 		const SDLKeyCodes key_code = get_button_code(button_id);
 
-		// TODO: SDL does not support DS3 button intensity in the current version
+		// NOTE: SDL does not simply support DS3 button intensity in the current version
+		//       So we have to skip the normal buttons if a DS3 with pressure buttons was detected
+		if (dev->sdl.is_ds3_with_pressure_buttons)
+		{
+			switch (key_code)
+			{
+			case SDLKeyCodes::North:
+			case SDLKeyCodes::South:
+			case SDLKeyCodes::West:
+			case SDLKeyCodes::East:
+			case SDLKeyCodes::Left:
+			case SDLKeyCodes::Right:
+			case SDLKeyCodes::Up:
+			case SDLKeyCodes::Down:
+			case SDLKeyCodes::LB:
+			case SDLKeyCodes::RB:
+			{
+				if (value)
+				{
+					pressed_pressure_buttons.insert(::at32(button_to_pressure, key_code));
+				}
+				continue;
+			}
+			default:
+				break;
+			}
+		}
+
 		values[key_code] = value ? 255 : 0;
 	}
 
 	for (SDL_GamepadAxis axis_id : dev->sdl.axis_ids)
 	{
-		const s16 value = SDL_GetGamepadAxis(dev->sdl.gamepad, axis_id);
+		s16 value = SDL_GetGamepadAxis(dev->sdl.gamepad, axis_id);
 
 		switch (axis_id)
 		{
@@ -1029,8 +1038,37 @@ std::unordered_map<u64, u16> sdl_pad_handler::get_button_values(const std::share
 			values[SDLKeyCodes::RSYPos] = value < 0 ? std::abs(value) - 1 : 0;
 			break;
 		default:
+		{
+			if (dev->sdl.is_ds3_with_pressure_buttons)
+			{
+				// Get pressure button value from axis
+				if (int key_code = SDLKeyCodes::PressureBegin + 1 + axis_id - SDL_GAMEPAD_AXIS_COUNT;
+					key_code > SDLKeyCodes::PressureBegin && key_code < SDLKeyCodes::PressureEnd)
+				{
+					// We need to get the joystick value directly for axis >= SDL_GAMEPAD_AXIS_COUNT
+					if (SDL_Joystick* joystick = SDL_GetGamepadJoystick(dev->sdl.gamepad))
+					{
+						value = SDL_GetJoystickAxis(joystick, axis_id);
+					}
+
+					value = static_cast<s16>(ScaledInput(value, SDL_JOYSTICK_AXIS_MIN, SDL_JOYSTICK_AXIS_MAX, 0.0f, 255.0f));
+
+					if (pressed_pressure_buttons.contains(static_cast<SDLKeyCodes>(key_code)))
+					{
+						if (value <= 0)
+					{
+						value = 1;
+					}
+
+						key_code = ::at32(pressure_to_button, static_cast<SDLKeyCodes>(key_code));
+					}
+
+					values[key_code] = Clamp0To255(value);
+				}
+			}
 			break;
 		}
+	}
 	}
 
 	for (const SDLDevice::touchpad& touchpad : dev->sdl.touchpads)
@@ -1070,7 +1108,7 @@ std::unordered_map<u64, u16> sdl_pad_handler::get_button_values(const std::share
 	return values;
 }
 
-pad_preview_values sdl_pad_handler::get_preview_values(const std::unordered_map<u64, u16>& data)
+pad_preview_values sdl_pad_handler::get_preview_values(const std::unordered_map<u32, u16>& data, const std::vector<std::string>& /*buttons*/)
 {
 	return {
 		::at32(data, LT),
@@ -1123,6 +1161,11 @@ sdl_pad_handler::SDLKeyCodes sdl_pad_handler::get_button_code(SDL_GamepadButton 
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_RIGHT_STICK: return SDLKeyCodes::RS;
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_GUIDE: return SDLKeyCodes::Guide;
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC1: return SDLKeyCodes::Misc1;
+	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC2: return SDLKeyCodes::Misc2;
+	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC3: return SDLKeyCodes::Misc3;
+	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC4: return SDLKeyCodes::Misc4;
+	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC5: return SDLKeyCodes::Misc5;
+	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_MISC6: return SDLKeyCodes::Misc6;
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1: return SDLKeyCodes::RPaddle1;
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_LEFT_PADDLE1: return SDLKeyCodes::LPaddle1;
 	case SDL_GamepadButton::SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2: return SDLKeyCodes::RPaddle2;

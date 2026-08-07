@@ -106,8 +106,8 @@ LOG_CHANNEL(rpcsx_android, "ANDROID");
 struct LogListener : logs::listener {
   LogListener() { logs::listener::add(this); }
 
-  void log(u64 stamp, const logs::message &msg, const std::string &prefix,
-           const std::string &text) override {
+  void log(u64 stamp, const logs::message &msg, std::string_view prefix,
+           std::string_view text) override {
     int prio = 0;
     switch (static_cast<logs::level>(msg)) {
     case logs::level::always:
@@ -136,7 +136,9 @@ struct LogListener : logs::listener {
       break;
     }
 
-    __android_log_write(prio, "RPCS3", text.c_str());
+    // text is a string_view and is not guaranteed to be null terminated.
+    __android_log_print(prio, "RPCS3", "%.*s", static_cast<int>(text.size()),
+                        text.data());
   }
 } static g_androidLogListener;
 
@@ -200,10 +202,17 @@ struct GraphicsFrame : GSFrameBase {
 
   bool can_consume_frame() const override { return false; }
 
-  void present_frame(std::vector<u8> &data, u32 pitch, u32 width, u32 height,
+  // Upstream v0.0.39 changed this to take the buffer by rvalue reference.
+  void present_frame(std::vector<u8> &&data, u32 pitch, u32 width, u32 height,
                      bool is_bgra) const override {}
   void take_screenshot(std::vector<u8> &&sshot_data, u32 sshot_width,
                        u32 sshot_height, bool is_bgra) override {}
+
+  // Upstream v0.0.42 added this as a pure virtual on GSFrameBase. It exists to
+  // put the FPS counter in a desktop window's title bar; there is no title bar
+  // here, and its only caller is GLGSRender, which Android never uses (we are
+  // Vulkan-only). The UI gets its stats through the JNI bridge instead.
+  void update_title(double fps = 0.0) override {}
 };
 
 void jit_announce(uptr, usz, std::string_view);
@@ -1251,7 +1260,8 @@ extern bool ppu_load_exec(const ppu_exec_object &, bool virtual_load,
 extern void spu_load_exec(const spu_exec_object &);
 extern void spu_load_rel_exec(const spu_rel_object &);
 extern void ppu_precompile(std::vector<std::string> &dir_queue,
-                           std::vector<ppu_module<lv2_obj> *> *loaded_prx);
+                           std::vector<ppu_module<lv2_obj> *> *loaded_prx,
+                           bool is_fast_compilation);
 extern bool ppu_initialize(const ppu_module<lv2_obj> &, bool check_only = false,
                            u64 file_size = 0);
 extern void ppu_finalize(const ppu_module<lv2_obj> &);
@@ -1413,7 +1423,9 @@ private:
       }
     }
 
-    ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list);
+    // false = upstream's non-fast path: precompile everything rather than
+    // stopping early, which is what this batch precompile step wants.
+    ppu_precompile(dir_queue, mod_list.empty() ? nullptr : &mod_list, false);
 
     rpcsx_android.error("Finalization");
     g_fxo->reset();
@@ -1613,39 +1625,39 @@ static bool initVirtualPad(const std::shared_ptr<Pad> &pad) {
             CELL_PAD_DEV_TYPE_STANDARD, CELL_PAD_PCLASS_TYPE_STANDARD,
             pclass_profile, 0, 0, 50);
 
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_UP);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_DOWN);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_LEFT);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_RIGHT);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_CROSS);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_SQUARE);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_CIRCLE);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_TRIANGLE);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_L1);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_L2);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_L3);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_R1);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL2, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_R2);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_R3);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_START);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_SELECT);
-  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::set<u32>{},
+  pad->m_buttons.emplace_back(CELL_PAD_BTN_OFFSET_DIGITAL1, std::vector<std::set<u32>>{},
                               CELL_PAD_CTRL_PS);
 
   pad->m_sticks[0] = AnalogStick(CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X, {}, {});
@@ -1662,8 +1674,8 @@ static bool initVirtualPad(const std::shared_ptr<Pad> &pad) {
   pad->m_sensors[3] =
       AnalogSensor(CELL_PAD_BTN_OFFSET_SENSOR_G, 0, 0, 0, DEFAULT_MOTION_G);
 
-  pad->m_vibrateMotors[0] = VibrateMotor(true, 0);
-  pad->m_vibrateMotors[1] = VibrateMotor(false, 0);
+  pad->m_vibrate_motors[0] = VibrateMotor(true);
+  pad->m_vibrate_motors[1] = VibrateMotor(false);
 
   if (pad->m_player_id == 0) {
     std::lock_guard lock(g_virtual_pad_mutex);
@@ -1817,6 +1829,14 @@ extern "C" bool _rpcsx_initialize(std::string_view rootDir,
 
   g_cfg.core.llvm_cpu.from_string("cortex-a34");
 
+  // v0.0.41 added the boot-sequence music overlay, defaulting ON. It reaches
+  // ensure(Emu.GetCallbacks().make_video_source()) in
+  // Emu/RSX/Overlays/overlay_audio.cpp, and setupCallbacks() above installs no
+  // make_video_source - Android has no video_source implementation - so the
+  // empty std::function throws std::bad_function_call for any title shipping
+  // SND0.AT3. Keep it off until a video_source exists here.
+  g_cfg.misc.play_music_during_boot.set(false);
+
   Emulator::SaveSettings(g_cfg.to_string(), Emu.GetTitleID());
   return true;
 }
@@ -1852,7 +1872,11 @@ extern "C" int _rpcsx_boot(std::string_view path_) {
     path.pop_back();
   }
 
-  return static_cast<int>(Emu.BootGame(path, "", false, cfg_mode::global));
+  // NOTE: upstream v0.0.41 renamed cfg_mode::global to cfg_mode::database_config.
+  // RPCSX installs no get_database_config callback, so this falls back to the
+  // global config exactly like the old cfg_mode::global did.
+  return static_cast<int>(
+      Emu.BootGame(path, "", false, cfg_mode::database_config));
 }
 
 extern "C" int _rpcsx_getState() {

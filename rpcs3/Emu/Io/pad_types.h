@@ -2,7 +2,8 @@
 
 #include "util/types.hpp"
 #include "util/endian.hpp"
-#include "Emu/Io/pad_config_types.h"
+#include "pad_config_types.h"
+#include "ps_move_data.h"
 
 #include <map>
 #include <set>
@@ -42,6 +43,13 @@ enum class pad_button : u8
 	rs_y,
 
 	pad_button_max_enum,
+
+	motion_x,
+	motion_y,
+	motion_z,
+	motion_g,
+
+	pad_motion_max_enum,
 
 	// Special buttons for mouse input
 	mouse_button_1,
@@ -151,6 +159,13 @@ enum
 	CELL_PAD_FAKE_TYPE_TOP_SHOT_ELITE = 0xa001,
 	CELL_PAD_FAKE_TYPE_TOP_SHOT_FEARMASTER = 0xa002,
 	CELL_PAD_FAKE_TYPE_GAMETABLET = 0xa003,
+	CELL_PAD_FAKE_TYPE_COPILOT_1           = 0xa004,
+	CELL_PAD_FAKE_TYPE_COPILOT_2           = 0xa005,
+	CELL_PAD_FAKE_TYPE_COPILOT_3           = 0xa006,
+	CELL_PAD_FAKE_TYPE_COPILOT_4           = 0xa007,
+	CELL_PAD_FAKE_TYPE_COPILOT_5           = 0xa008,
+	CELL_PAD_FAKE_TYPE_COPILOT_6           = 0xa009,
+	CELL_PAD_FAKE_TYPE_COPILOT_7           = 0xa00a,
 	CELL_PAD_FAKE_TYPE_LAST,
 
 	CELL_PAD_PCLASS_TYPE_MAX // last item
@@ -337,6 +352,8 @@ struct CellPadData
 	be_t<u16> button[CELL_PAD_MAX_CODES];
 };
 
+static constexpr u8 MOTOR_THRESHOLD = 63; // The DS3 does not seem to respond to values <= 63. So we should ignore those in other handlers as well.
+
 static constexpr u16 MOTION_ONE_G = 113;
 static constexpr u16 DEFAULT_MOTION_X = 512;
 static constexpr u16 DEFAULT_MOTION_Y = 399; // 512 - 113 (113 is 1G gravity)
@@ -372,18 +389,20 @@ enum special_button_value
 struct Button
 {
 	u32 m_offset = 0;
-	std::set<u32> m_key_codes{};
 	u32 m_outKeyCode = 0;
 	u16 m_value = 0;
 	bool m_pressed = false;
 
+	std::vector<std::set<u32>> m_key_combos;
+
 	u16 m_actual_value = 0;              // only used in keyboard_pad_handler
 	bool m_analog = false;               // only used in keyboard_pad_handler
 	bool m_trigger = false;              // only used in keyboard_pad_handler
-	std::map<u32, u16> m_pressed_keys{}; // only used in keyboard_pad_handler
+	std::map<u32, u16> m_pressed_keys; // only used in keyboard_pad_handler
 
-	Button(u32 offset, std::set<u32> key_codes, u32 outKeyCode)
-		: m_offset(offset), m_key_codes(std::move(key_codes)), m_outKeyCode(outKeyCode)
+	Button() {}
+	Button(u32 offset, std::vector<std::set<u32>> key_combos, u32 outKeyCode)
+		: m_offset(offset), m_outKeyCode(outKeyCode), m_key_combos(std::move(key_combos))
 	{
 		if (offset == CELL_PAD_BTN_OFFSET_DIGITAL1)
 		{
@@ -407,21 +426,41 @@ struct Button
 	}
 };
 
+struct ButtonExternal
+{
+	u32 m_offset = 0;
+	u32 m_outKeyCode = 0;
+	u16 m_value    = 0;
+	bool m_pressed = false;
+};
+
 struct AnalogStick
 {
 	u32 m_offset = 0;
-	std::set<u32> m_key_codes_min{};
-	std::set<u32> m_key_codes_max{};
 	u16 m_value = 128;
 
-	std::map<u32, u16> m_pressed_keys_min{}; // only used in keyboard_pad_handler
-	std::map<u32, u16> m_pressed_keys_max{}; // only used in keyboard_pad_handler
+	std::vector<std::set<u32>> m_key_combos_min;
+	std::vector<std::set<u32>> m_key_combos_max;
+
+	std::map<u32, u16> m_pressed_keys_min; // only used in keyboard_pad_handler
+	std::map<u32, u16> m_pressed_keys_max; // only used in keyboard_pad_handler
+	std::map<u32, u16> m_pressed_combos_min; // only used in keyboard_pad_handler
+	std::map<u32, u16> m_pressed_combos_max; // only used in keyboard_pad_handler
+	u8 m_stick_min = 0; // only used in keyboard_pad_handler
+	u8 m_stick_max = 128; // only used in keyboard_pad_handler
+	u8 m_stick_val = 128; // only used in keyboard_pad_handler
 
 	AnalogStick() {}
-	AnalogStick(u32 offset, std::set<u32> key_codes_min, std::set<u32> key_codes_max)
-		: m_offset(offset), m_key_codes_min(std::move(key_codes_min)), m_key_codes_max(std::move(key_codes_max))
+	AnalogStick(u32 offset, std::vector<std::set<u32>> key_combos_min, std::vector<std::set<u32>> key_combos_max)
+		: m_offset(offset), m_key_combos_min(std::move(key_combos_min)), m_key_combos_max(std::move(key_combos_max))
 	{
 	}
+};
+
+struct AnalogStickExternal
+{
+	u32 m_offset = 0;
+	u16 m_value = 128;
 };
 
 struct AnalogSensor
@@ -441,46 +480,15 @@ struct AnalogSensor
 
 struct VibrateMotor
 {
-	bool m_is_large_motor = false;
-	u8 m_value = 0;
+	bool is_large_motor = false;
+	u8 value = 0;
+	u8 adjusted_value = 0;
 
 	VibrateMotor() {}
-	VibrateMotor(bool is_large_motor, u8 value)
-		: m_is_large_motor(is_large_motor), m_value(value)
+	VibrateMotor(bool is_large_motor)
+		: is_large_motor(is_large_motor)
 	{
 	}
-};
-
-struct ps_move_data
-{
-	bool external_device_connected = false;
-	u32 external_device_id = 0;
-	std::array<u8, 5> external_device_data{};
-	std::array<u8, 38> external_device_read{};  // CELL_GEM_EXTERNAL_PORT_DEVICE_INFO_SIZE
-	std::array<u8, 40> external_device_write{}; // CELL_GEM_EXTERNAL_PORT_OUTPUT_SIZE
-	bool external_device_read_requested = false;
-	bool external_device_write_requested = false;
-
-	bool calibration_requested = false;
-	bool calibration_succeeded = false;
-
-	bool magnetometer_enabled = false;
-	bool orientation_enabled = false;
-
-	static constexpr std::array<f32, 4> default_quaternion{1.0f, 0.0f, 0.0f, 0.0f};
-	std::array<f32, 4> quaternion = default_quaternion; // quaternion orientation (x,y,z,w) of controller relative to default (facing the camera with buttons up)
-	f32 accelerometer_x = 0.0f;                         // linear velocity in m/s²
-	f32 accelerometer_y = 0.0f;                         // linear velocity in m/s²
-	f32 accelerometer_z = 0.0f;                         // linear velocity in m/s²
-	f32 gyro_x = 0.0f;                                  // angular velocity in rad/s
-	f32 gyro_y = 0.0f;                                  // angular velocity in rad/s
-	f32 gyro_z = 0.0f;                                  // angular velocity in rad/s
-	f32 magnetometer_x = 0.0f;
-	f32 magnetometer_y = 0.0f;
-	f32 magnetometer_z = 0.0f;
-	s16 temperature = 0;
-
-	void reset_sensors();
 };
 
 struct Pad
@@ -528,36 +536,14 @@ struct Pad
 	std::vector<Button> m_buttons;
 	std::array<AnalogStick, 4> m_sticks{};
 	std::array<AnalogSensor, 4> m_sensors{};
-	std::array<VibrateMotor, 2> m_vibrateMotors{};
+	std::array<VibrateMotor, 2> m_vibrate_motors{};
 
-	// These hold bits for their respective buttons
-	u16 m_digital_1{0};
-	u16 m_digital_2{0};
+	std::vector<ButtonExternal> m_buttons_external;
+	std::array<AnalogStickExternal, 4> m_sticks_external{};
 
-	// All sensors go from 0-255
-	u16 m_analog_left_x{128};
-	u16 m_analog_left_y{128};
-	u16 m_analog_right_x{128};
-	u16 m_analog_right_y{128};
+	std::vector<std::shared_ptr<Pad>> copilots;
 
-	u16 m_press_right{0};
-	u16 m_press_left{0};
-	u16 m_press_up{0};
-	u16 m_press_down{0};
-	u16 m_press_triangle{0};
-	u16 m_press_circle{0};
-	u16 m_press_cross{0};
-	u16 m_press_square{0};
-	u16 m_press_L1{0};
-	u16 m_press_L2{0};
-	u16 m_press_R1{0};
-	u16 m_press_R2{0};
-
-	// Except for these...0-1023
-	u16 m_sensor_x{DEFAULT_MOTION_X};
-	u16 m_sensor_y{DEFAULT_MOTION_Y};
-	u16 m_sensor_z{DEFAULT_MOTION_Z};
-	u16 m_sensor_g{DEFAULT_MOTION_G};
+	CellPadData data{};
 
 	bool ldd{false};
 	CellPadData ldd_data{};
@@ -581,5 +567,26 @@ struct Pad
 		m_vendor_id = vendor_id;
 		m_product_id = product_id;
 		m_pressure_intensity = (255 * pressure_intensity_percent) / 100;
+	}
+
+	u32 copilot_player() const
+	{
+		if (m_class_type >= CELL_PAD_FAKE_TYPE_COPILOT_1 && m_class_type <= CELL_PAD_FAKE_TYPE_COPILOT_7)
+		{
+			return m_class_type - CELL_PAD_FAKE_TYPE_COPILOT_1;
+		}
+
+		return umax;
+	}
+
+	bool is_copilot() const
+	{
+		const u32 copilot_player_id = copilot_player();
+		return copilot_player_id != umax && copilot_player_id != m_player_id;
+	}
+
+	bool is_connected() const
+	{
+		return !!(m_port_status & CELL_PAD_STATUS_CONNECTED);
 	}
 };

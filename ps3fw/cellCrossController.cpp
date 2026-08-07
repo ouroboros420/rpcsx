@@ -106,13 +106,8 @@ struct cross_controller
 
 	void stop_thread()
 	{
-		if (connection_thread)
-		{
-			auto& thread = *connection_thread;
-			thread = thread_state::aborting;
-			thread();
+		// Join thread
 			connection_thread.reset();
-		}
 	};
 };
 

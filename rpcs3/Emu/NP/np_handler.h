@@ -3,6 +3,7 @@
 #include <queue>
 #include <map>
 #include <unordered_map>
+#include <condition_variable>
 
 #include "Emu/Memory/vm_ptr.h"
 #include "rpcsx/fw/ps3/sceNp.h"
@@ -63,18 +64,19 @@ namespace np
 		ticket() = default;
 		ticket(std::vector<u8>&& raw_data);
 
-		std::size_t size() const;
+		usz size() const;
 		const u8* data() const;
 		bool empty() const;
 
 		bool get_value(s32 param_id, vm::ptr<SceNpTicketParam> param) const;
+		std::string get_service_id() const;
 
 	private:
-		std::optional<ticket_data> parse_node(std::size_t index) const;
+		std::optional<ticket_data> parse_node(usz index) const;
 		void parse();
 
 	private:
-		static constexpr std::size_t MIN_TICKET_DATA_SIZE = 4;
+		static constexpr usz MIN_TICKET_DATA_SIZE = 4;
 
 		std::vector<u8> raw_data;
 
@@ -152,6 +154,7 @@ namespace np
 		std::optional<shared_ptr<std::pair<std::string, message_data>>> get_message_selected(SceNpBasicAttachmentDataId id);
 		void clear_message_selected(SceNpBasicAttachmentDataId id);
 		void send_message(const message_data& msg_data, const std::set<std::string>& npids);
+		bool select_invitation(u64 msg_id);
 
 		// Those should probably be under match2 ctx
 		vm::ptr<SceNpMatching2RoomEventCallback> room_event_cb{}; // Room events
@@ -174,6 +177,7 @@ namespace np
 		u32 leave_room(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2LeaveRoomRequest* req);
 		u32 search_room(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SearchRoomRequest* req);
 		u32 get_roomdata_external_list(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomDataExternalListRequest* req);
+		u32 get_room_member_data_external_list(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomMemberDataExternalListRequest* req);
 		u32 set_roomdata_external(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SetRoomDataExternalRequest* req);
 		u32 get_roomdata_internal(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2GetRoomDataInternalRequest* req);
 		u32 set_roomdata_internal(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, const SceNpMatching2SetRoomDataInternalRequest* req);
@@ -232,6 +236,7 @@ namespace np
 		std::pair<error_code, std::optional<SceNpMatching2RoomSlotInfo>> local_get_room_slots(SceNpMatching2RoomId room_id);
 		std::pair<error_code, std::optional<SceNpMatching2SessionPassword>> local_get_room_password(SceNpMatching2RoomId room_id);
 		std::pair<error_code, std::vector<SceNpMatching2RoomMemberId>> local_get_room_memberids(SceNpMatching2RoomId room_id, s32 sort_method);
+		std::pair<error_code, std::optional<SceNpMatching2SignalingOptParam>> local_get_signaling_opt_param(SceNpMatching2RoomId room_id);
 		error_code local_get_room_member_data(SceNpMatching2RoomId room_id, SceNpMatching2RoomMemberId member_id, const std::vector<SceNpMatching2AttributeId>& binattrs_list, SceNpMatching2RoomMemberDataInternal* ptr_member, u32 addr_data, u32 size_data, u32 ctx_id);
 
 		// Local GUI functions
@@ -252,14 +257,17 @@ namespace np
 		// Misc stuff
 		void req_ticket(u32 version, const SceNpId* npid, const char* service_id, const u8* cookie, u32 cookie_size, const char* entitlement_id, u32 consumed_count);
 		const ticket& get_ticket() const;
+		u32 get_clan_ticket_ready() const;
+		ticket get_clan_ticket() const;
 		void add_player_to_history(const SceNpId* npid, const char* description);
 		u32 add_players_to_history(const SceNpId* npids, const char* description, u32 count);
-		u32 get_players_history_count(u32 options);
-		bool get_player_history_entry(u32 options, u32 index, SceNpId* npid);
-		bool abort_request(u32 req_id);
+		u32 get_players_history_count(u32 options) const;
+		bool get_player_history_entry(u32 options, u32 index, SceNpId* npid) const;
+		SceNpMatching2MemoryInfo get_memory_info() const;
+		error_code abort_request(u32 req_id);
 
 		// For signaling
-		void req_sign_infos(const std::string& npid, u32 conn_id);
+		void req_sign_infos(std::string_view npid, u32 conn_id);
 
 		// For UPNP
 		void upnp_add_port_mapping(u16 internal_port, std::string_view protocol);
@@ -289,7 +297,7 @@ namespace np
 		// Various generic helpers
 		bool discover_ip_address();
 		bool discover_ether_address();
-		bool error_and_disconnect(const std::string& error_msg);
+		bool error_and_disconnect(std::string_view error_msg);
 
 		// Notification handlers
 		void notif_user_joined_room(vec_stream& noti);
@@ -316,6 +324,7 @@ namespace np
 		void reply_leave_room(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_search_room(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_get_roomdata_external_list(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
+		void reply_get_room_member_data_external_list(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_set_roomdata_external(u32 req_id, rpcn::ErrorType error);
 		void reply_get_roomdata_internal(u32 req_id, rpcn::ErrorType error, vec_stream& reply);
 		void reply_set_roomdata_internal(u32 req_id, rpcn::ErrorType error);
@@ -371,21 +380,12 @@ namespace np
 			vm::ptr<SceNpMatching2RequestCallback> cb;
 			vm::ptr<void> cb_arg;
 			SceNpMatching2Event event_type;
+			bool abortable;
 
-			void queue_callback(u32 req_id, u32 event_key, s32 error_code, u32 data_size) const
-			{
-				if (cb)
-				{
-					sysutil_register_cb([=, ctx_id = this->ctx_id, event_type = this->event_type, cb = this->cb, cb_arg = this->cb_arg](ppu_thread& cb_ppu) -> s32
-						{
-							cb(cb_ppu, ctx_id, req_id, event_type, event_key, error_code, data_size, cb_arg);
-							return 0;
-						});
-				}
-			}
+			void queue_callback(u32 req_id, u32 event_key, s32 error_code, u32 data_size) const;
 		};
 
-		u32 generate_callback_info(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, SceNpMatching2Event event_type);
+		u32 generate_callback_info(SceNpMatching2ContextId ctx_id, vm::cptr<SceNpMatching2RequestOptParam> optParam, SceNpMatching2Event event_type, bool abortable);
 		std::optional<callback_info> take_pending_request(u32 req_id);
 
 	private:
@@ -414,9 +414,13 @@ namespace np
 
 		ticket current_ticket;
 
+		// Clan ticket
+		atomic_t<u32> clan_ticket_ready = 0;
+		ticket clan_ticket;
+
 		// IP & DNS info
 		std::string hostname = "localhost";
-		std::array<u8, 6> ether_address{};
+		std::array<u8, 6> ether_address{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 		be_t<u32> local_ip_addr{};
 		be_t<u32> public_ip_addr{};
 		be_t<u32> dns_ip = 0x08080808;
@@ -436,6 +440,7 @@ namespace np
 		gui_cache_manager gui_cache;
 
 		// Messages related
+		shared_mutex m_mutex_selected_messages;
 		std::optional<u64> selected_invite_id{};
 		std::optional<u64> selected_message_id{};
 
@@ -514,7 +519,7 @@ namespace np
 		player_history& get_player_and_set_timestamp(const SceNpId& npid, u64 timestamp);
 		void save_players_history();
 
-		shared_mutex mutex_history;
+		mutable shared_mutex mutex_history;
 		std::map<std::string, player_history> players_history; // npid / history
 
 		struct

@@ -137,7 +137,7 @@ bool vfs::unmount(std::string_view vpath)
 		return false;
 	}
 
-	const std::vector<std::string> entry_list = fmt::split(vpath, {"/"});
+	const std::vector<std::string_view> entry_list = fmt::split_sv(vpath, {"/"});
 
 	if (entry_list.empty())
 	{
@@ -166,7 +166,7 @@ bool vfs::unmount(std::string_view vpath)
 		}
 
 		// Get the current name based on the depth
-		const std::string& name = ::at32(entry_list, depth);
+		const std::string_view name = ::at32(entry_list, depth);
 
 		// Go through all children of this node
 		for (auto it = dir.dirs.begin(); it != dir.dirs.end();)
@@ -194,13 +194,13 @@ bool vfs::unmount(std::string_view vpath)
 	return true;
 }
 
-std::string vfs::get(std::string_view vpath, std::vector<std::string>* out_dir, std::string* out_path)
+std::string vfs::get(std::string_view vpath, std::vector<std::string>* out_dir, std::string* out_path, std::source_location src_loc)
 {
 	// Just to make the code more robust.
 	// It should never happen because we take care to initialize Emu (and so also vfs_manager) with Emu.Init() before this function is invoked
 	if (!g_fxo->is_init<vfs_manager>())
 	{
-		fmt::throw_exception("vfs_manager not initialized");
+		fmt::throw_exception("vfs_manager not initialized.%s", src_loc);
 	}
 
 	auto& table = g_fxo->get<vfs_manager>();
@@ -377,13 +377,13 @@ std::string vfs::get(std::string_view vpath, std::vector<std::string>* out_dir, 
 
 using char2 = char8_t;
 
-std::string vfs::retrieve(std::string_view path, const vfs_directory* node, std::vector<std::string_view>* mount_path)
+std::string vfs::retrieve(std::string_view path, const vfs_directory* node, std::vector<std::string_view>* mount_path, std::source_location src_loc)
 {
 	// Just to make the code more robust.
 	// It should never happen because we take care to initialize Emu (and so also vfs_manager) with Emu.Init() before this function is invoked
 	if (!g_fxo->is_init<vfs_manager>())
 	{
-		fmt::throw_exception("vfs_manager not initialized");
+		fmt::throw_exception("vfs_manager not initialized.%s", src_loc);
 	}
 
 	auto& table = g_fxo->get<vfs_manager>();
@@ -456,10 +456,10 @@ std::string vfs::retrieve(std::string_view path, const vfs_directory* node, std:
 		auto unescape_path = [](std::string_view path)
 		{
 			// Unescape from host FS
-			std::vector<std::string> escaped = fmt::split(path, {std::string_view{&fs::delim[0], 1}, std::string_view{&fs::delim[1], 1}});
+			const std::vector<std::string_view> escaped = fmt::split_sv(path, {std::string_view{&fs::delim[0], 1}, std::string_view{&fs::delim[1], 1}});
 			std::vector<std::string> result;
-			for (auto& sv : escaped)
-				result.emplace_back(vfs::unescape(sv));
+			for (const auto& sv : escaped)
+				result.push_back(vfs::unescape(sv));
 
 			return fmt::merge(result, "/");
 		};
@@ -1028,7 +1028,7 @@ bool vfs::host::rename(const std::string& from, const std::string& to, const lv2
 			}
 
 			// Reopen with ignored TRUNC, APPEND, CREATE and EXCL flags
-			auto res0 = lv2_file::open_raw(file.real_path, file.flags & CELL_FS_O_ACCMODE, file.mode, file.type, file.mp);
+			auto res0 = lv2_file::open_raw(file.real_path, file.flags & CELL_FS_O_ACCMODE, true, file.type, file.mp);
 			file.file = std::move(res0.file);
 			ensure(file.file.operator bool());
 			file.file.seek(file.restore_data.seek_pos);

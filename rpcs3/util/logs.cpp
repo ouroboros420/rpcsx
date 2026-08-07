@@ -89,8 +89,8 @@ namespace logs
 		z_stream m_zs{};
 		shared_mutex m_m{};
 
-		atomic_t<u64, 64> m_buf{0}; // MSB (39 bits): push begin, LSB (25 bis): push size
-		atomic_t<u64, 64> m_out{0}; // Amount of bytes written to file
+		atomic_t<u64, 128> m_buf{0}; // MSB (39 bits): push begin, LSB (25 bis): push size
+		atomic_t<u64, 128> m_out{0}; // Amount of bytes written to file
 
 		uchar m_zout[65536]{};
 
@@ -118,7 +118,7 @@ namespace logs
 
 		~file_listener() override = default;
 
-		void log(u64 stamp, const message& msg, const std::string& prefix, const std::string& text) override;
+		void log(u64 stamp, const message& msg, std::string_view prefix, std::string_view text) override;
 
 		void sync() override
 		{
@@ -138,7 +138,7 @@ namespace logs
 		~root_listener() override = default;
 
 		// Encode level, current thread name, channel name and write log message
-		void log(u64, const message&, const std::string&, const std::string&) override
+		void log(u64, const message&, std::string_view, std::string_view) override
 		{
 			// Do nothing
 		}
@@ -202,7 +202,7 @@ namespace logs
 
 		for (auto&& pair : get_logger()->channels)
 		{
-			pair.second->enabled.release(level::notice);
+			pair.second->enabled.release(level::_default);
 		}
 	}
 
@@ -251,17 +251,15 @@ namespace logs
 	{
 		std::lock_guard lock(g_mutex);
 
-		auto found = get_logger()->channels.equal_range(ch_name);
+		const auto found = get_logger()->channels.equal_range(ch_name);
 
 		if (found.first != found.second)
 		{
 			return found.first->second->enabled.observe();
 		}
-		else
-		{
+
 			return level::always;
 		}
-	}
 
 	void set_channel_levels(const std::map<std::string, logs::level, std::less<>>& map)
 	{
@@ -271,18 +269,17 @@ namespace logs
 		}
 	}
 
-	std::vector<std::string> get_channels()
+	std::set<std::string> get_channels()
 	{
-		std::vector<std::string> result;
+		std::set<std::string> result;
 
 		std::lock_guard lock(g_mutex);
 
 		for (auto&& p : get_logger()->channels)
 		{
-			// Copy names removing duplicates
-			if (result.empty() || result.back() != p.first)
+			if (!p.first.empty())
 			{
-				result.push_back(p.first);
+				result.insert(p.first);
 			}
 		}
 
@@ -373,6 +370,16 @@ void logs::listener::sync_all()
 	}
 }
 
+void logs::listener::shutdown_all()
+{
+	std::lock_guard lock(g_mutex);
+
+	for (listener* lis = get_logger()->m_next.exchange(nullptr); lis;)
+	{
+		lis = lis->m_next.exchange(nullptr);
+	}
+}
+
 void logs::listener::close_all_prematurely()
 {
 	for (listener* lis = get_logger(); lis; lis = lis->m_next)
@@ -397,8 +404,8 @@ void logs::message::broadcast(const char* fmt, const fmt_type_info* sup, ...) co
 	g_tls_log_control(fmt, 0);
 
 	// Get text, extract va_args
-	/*constinit thread_local*/ std::string text;
-	/*constinit thread_local*/ std::vector<u64> args;
+	thread_local std::string text;
+	thread_local std::vector<u64> args;
 
 	static constexpr fmt_type_info empty_sup{};
 
@@ -406,7 +413,7 @@ void logs::message::broadcast(const char* fmt, const fmt_type_info* sup, ...) co
 	for (auto v = sup; v && v->fmt_string; v++)
 		args_count++;
 
-	text.reserve(50000);
+	text.clear();
 	args.resize(args_count);
 
 	va_list c_args;
@@ -699,6 +706,11 @@ void logs::file_writer::sync()
 		std::this_thread::yield();
 	}
 
+	if (thread_ctrl::get_current())
+	{
+		return;
+	}
+
 	// Ensure written to disk
 	if (m_fout)
 	{
@@ -767,7 +779,7 @@ logs::file_listener::file_listener(const std::string& path, u64 max_size)
 	file_writer::log("\xEF\xBB\xBF", 3);
 }
 
-void logs::file_listener::log(u64 stamp, const logs::message& msg, const std::string& prefix, const std::string& _text)
+void logs::file_listener::log(u64 stamp, const logs::message& msg, std::string_view prefix, std::string_view _text)
 {
 	/*constinit thread_local*/ std::string text;
 	text.reserve(50000);

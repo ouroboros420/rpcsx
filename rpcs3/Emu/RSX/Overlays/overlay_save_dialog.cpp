@@ -2,27 +2,27 @@
 #include "overlay_save_dialog.h"
 #include "overlay_video.h"
 #include "util/date_time.h"
-#include "Emu/System.h"
 
 namespace rsx
 {
 	namespace overlays
 	{
-		save_dialog::save_dialog_entry::save_dialog_entry(const std::string& text1, const std::string& text2, const std::string& text3, u8 resource_id, const std::vector<u8>& icon_buf, [[maybe_unused]] const std::string& video_path)
+		save_dialog::save_dialog_entry::save_dialog_entry(std::string_view text1, std::string_view text2, std::string_view text3, u8 resource_id, const std::vector<u8>& icon_buf, [[maybe_unused]] const std::string& video_path)
 		{
 			std::unique_ptr<overlay_element> image;
 #ifndef ANDROID
+			const std::string audio_path; // no audio here
 			if (resource_id != image_resource_id::raw_image)
 			{
-				image = std::make_unique<video_view>(video_path, resource_id);
+				image = std::make_unique<video_view>(video_path, audio_path, resource_id);
 			}
 			else if (!icon_buf.empty())
 			{
-				image = std::make_unique<video_view>(video_path, icon_buf);
+				image = std::make_unique<video_view>(video_path, audio_path, icon_buf);
 			}
 			else
 			{
-				image = std::make_unique<video_view>(video_path, resource_config::standard_image_resource::save); // Fallback
+				image = std::make_unique<video_view>(video_path, audio_path, resource_config::standard_image_resource::save); // Fallback
 			}
 #else
 			image = std::make_unique<image_view>();
@@ -165,11 +165,11 @@ namespace rsx
 				if (m_no_saves)
 					break;
 				return_code = m_list->get_selected_index();
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_decide.wav");
+				play_sound(sound_effect::accept);
 				close_dialog = true;
 				break;
 			case pad_button::circle:
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_cancel.wav");
+				play_sound(sound_effect::cancel);
 				close_dialog = true;
 				break;
 			case pad_button::dpad_up:
@@ -205,7 +205,7 @@ namespace rsx
 			// Play a sound unless this is a fast auto repeat which would induce a nasty noise
 			else if (!is_auto_repeat || m_auto_repeat_ms_interval >= m_auto_repeat_ms_interval_default)
 			{
-				Emu.GetCallbacks().play_sound(fs::get_config_dir() + "sounds/snd_cursor.wav");
+				play_sound(sound_effect::cursor);
 			}
 		}
 

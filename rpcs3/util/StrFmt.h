@@ -390,7 +390,11 @@ namespace fmt
 			raw_throw_exception(src_loc, reinterpret_cast<const char*>(fmt), type_info_v<Args...>, fmt_args_t<Args...>{fmt_unveil<Args>::get(args)...});
 		}
 
-#ifndef _MSC_VER
+#if !defined(_MSC_VER) || defined(__clang__)
+		// Declared but deliberately never defined: the constructor always
+		// throws, so this is never called. It must NOT be "= default" - clang
+		// drops [[noreturn]] from a defaulted trivial destructor, and then every
+		// function ending in fmt::throw_exception() trips -Werror=return-type.
 		[[noreturn]] ~throw_exception();
 #endif
 	};

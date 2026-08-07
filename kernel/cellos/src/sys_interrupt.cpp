@@ -12,11 +12,12 @@
 
 LOG_CHANNEL(sys_interrupt);
 
-lv2_int_tag::lv2_int_tag() noexcept : lv2_obj(1), id(idm::last_id()) {}
+lv2_int_tag::lv2_int_tag() noexcept
+    : lv2_obj(1), id(idm::last_id<lv2_int_tag>()) {}
 
 lv2_int_tag::lv2_int_tag(utils::serial &ar) noexcept
-    : lv2_obj(1), id(idm::last_id()), handler([&]() {
-        const u32 id = ar;
+    : lv2_obj(1), id(idm::last_id<lv2_int_tag>()), handler([&]() {
+        const u32 id{ar};
 
         auto ptr = idm::get_unlocked<lv2_obj, lv2_int_serv>(id);
 
@@ -35,12 +36,13 @@ void lv2_int_tag::save(utils::serial &ar) {
 
 lv2_int_serv::lv2_int_serv(shared_ptr<named_thread<ppu_thread>> thread,
                            u64 arg1, u64 arg2) noexcept
-    : lv2_obj(1), id(idm::last_id()), thread(thread), arg1(arg1), arg2(arg2) {}
+    : lv2_obj(1), id(idm::last_id<lv2_int_serv>()), thread(thread), arg1(arg1),
+      arg2(arg2) {}
 
 lv2_int_serv::lv2_int_serv(utils::serial &ar) noexcept
-    : lv2_obj(1), id(idm::last_id()),
-      thread(idm::get_unlocked<named_thread<ppu_thread>>(ar)), arg1(ar),
-      arg2(ar) {}
+    : lv2_obj(1), id(idm::last_id<lv2_int_serv>()),
+      thread(idm::get_unlocked<named_thread<ppu_thread>>(ar.pop<u32>())),
+      arg1(ar), arg2(ar) {}
 
 void lv2_int_serv::save(utils::serial &ar) {
   ar(thread && idm::check_unlocked<named_thread<ppu_thread>>(thread->id)

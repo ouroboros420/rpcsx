@@ -423,8 +423,7 @@ static error_code display_callback_result_error_message(
 	switch (result.result)
 	{
 	case CELL_SAVEDATA_CBRESULT_ERR_NOSPACE:
-		msg = get_localized_string(localized_string_id::CELL_SAVEDATA_CB_NO_SPACE,
-			fmt::format("%d", result.errNeedSizeKB).c_str());
+		msg = get_localized_string(localized_string_id::CELL_SAVEDATA_CB_NO_SPACE, "%d", result.errNeedSizeKB);
 		break;
 	case CELL_SAVEDATA_CBRESULT_ERR_FAILURE:
 		msg = get_localized_string(localized_string_id::CELL_SAVEDATA_CB_FAILURE);
@@ -785,15 +784,37 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 	u32 container, u32 unk_op_flags /*TODO*/, vm::ptr<void> userdata,
 	u32 userId, PFuncDone funcDone)
 {
-	if (const auto& [ok, list] = setList.try_read(); ok)
-		cellSaveData.notice("savedata_op(): setList = { .sortType=%d, "
-							".sortOrder=%d, .dirNamePrefix='%s' }",
-			list.sortType, list.sortOrder, list.dirNamePrefix);
+	if (setList)
+	{
+		if (const auto& [ok, list] = setList.try_read(); ok)
+		{
+			cellSaveData.notice("savedata_op(): setList = { .sortType=%d, "
+								".sortOrder=%d, .dirNamePrefix='%s' }",
+				list.sortType, list.sortOrder, list.dirNamePrefix);
+		}
+		else
+		{
+			cellSaveData.error("savedata_op(): Failed to read setList!");
+		}
+	}
 
-	if (const auto& [ok, buf] = setBuf.try_read(); ok)
-		cellSaveData.notice("savedata_op(): setBuf  = { .dirListMax=%d, "
-							".fileListMax=%d, .bufSize=%d }",
-			buf.dirListMax, buf.fileListMax, buf.bufSize);
+	if (setBuf)
+	{
+		if (const auto& [ok, buf] = setBuf.try_read(); ok)
+		{
+			cellSaveData.notice("savedata_op(): setBuf = { .dirListMax=%d, "
+								".fileListMax=%d, .bufSize=%d }",
+				buf.dirListMax, buf.fileListMax, buf.bufSize);
+		}
+		else
+		{
+			cellSaveData.error("savedata_op(): Failed to read setBuf!");
+		}
+	}
+
+	// There is a lot going on in this function, ensure function log and past log
+	// commands have completed for ease of debugging
+	logs::listener::sync_all();
 
 	if (const auto ecode = savedata_check_args(
 			operation, version, dirName, errDialog, setList, setBuf, funcList,
@@ -976,35 +997,43 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 
 		// Sort the entries
 		{
-			const u32 order = setList->sortOrder;
 			const u32 type = setList->sortType;
 
-			std::sort(save_entries.begin(), save_entries.end(),
-				[=](const SaveDataEntry& entry1, const SaveDataEntry& entry2)
+			auto comp = [type](const SaveDataEntry& entry1,
+							const SaveDataEntry& entry2) -> bool
+			{
+				const bool mtime_lower = entry1.mtime < entry2.mtime;
+				const bool mtime_equal = entry1.mtime == entry2.mtime;
+				const bool subtitle_lower = entry1.subtitle < entry2.subtitle;
+				const bool subtitle_equal = entry1.subtitle == entry2.subtitle;
+
+				if (type == CELL_SAVEDATA_SORTTYPE_MODIFIEDTIME)
 				{
-					if (order == CELL_SAVEDATA_SORTORDER_DESCENT &&
-						type == CELL_SAVEDATA_SORTTYPE_MODIFIEDTIME)
+					if (mtime_equal)
 					{
-						return entry1.mtime >= entry2.mtime;
-					}
-					if (order == CELL_SAVEDATA_SORTORDER_DESCENT &&
-						type == CELL_SAVEDATA_SORTTYPE_SUBTITLE)
-					{
-						return entry1.subtitle >= entry2.subtitle;
-					}
-					if (order == CELL_SAVEDATA_SORTORDER_ASCENT &&
-						type == CELL_SAVEDATA_SORTTYPE_MODIFIEDTIME)
-					{
-						return entry1.mtime < entry2.mtime;
-					}
-					if (order == CELL_SAVEDATA_SORTORDER_ASCENT &&
-						type == CELL_SAVEDATA_SORTTYPE_SUBTITLE)
-					{
-						return entry1.subtitle < entry2.subtitle;
+						return subtitle_lower;
 					}
 
-					return true;
-				});
+					return mtime_lower;
+				}
+				else if (type == CELL_SAVEDATA_SORTTYPE_SUBTITLE)
+				{
+					if (subtitle_equal)
+					{
+						return mtime_lower;
+					}
+
+					return subtitle_lower;
+				}
+
+				ensure(false);
+				return true;
+			};
+
+			if (setList->sortOrder == CELL_SAVEDATA_SORTORDER_ASCENT)
+				std::sort(save_entries.begin(), save_entries.end(), comp);
+			else
+				std::sort(save_entries.rbegin(), save_entries.rend(), comp);
 		}
 
 		// Fill the listGet->dirList array
@@ -1269,18 +1298,18 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 			}
 		}
 
-		auto delete_save = [&]()
+		const auto delete_save = [&]()
 		{
-			strcpy_trunc(doneGet->dirName, save_entries[selected].dirName);
+			const SaveDataEntry& entry = ::at32(save_entries, selected);
+			strcpy_trunc(doneGet->dirName, entry.dirName);
 			doneGet->hddFreeSizeKB =
 				40 * 1024 * 1024 - 256; // Read explanation in cellHddGameCheck
 			doneGet->excResult = CELL_OK;
 			std::memset(doneGet->reserved, 0, sizeof(doneGet->reserved));
 
 			const std::string old_path =
-				base_dir + ".backup_" + save_entries[selected].escaped + "/";
-			const std::string del_path =
-				base_dir + save_entries[selected].escaped + "/";
+				base_dir + ".backup_" + entry.escaped + "/";
+			const std::string del_path = base_dir + entry.escaped + "/";
 
 			const fs::dir _dir(del_path);
 			u64 size_bytes = 0;
@@ -1606,7 +1635,7 @@ savedata_op(ppu_thread& ppu, u32 operation, u32 version, vm::cptr<char> dirName,
 			}
 			else
 			{
-				fmt::throw_exception("Invalid savedata selected");
+				fmt::throw_exception("Invalid savedata selected (selected=%d)", selected);
 			}
 		}
 	}
@@ -2958,6 +2987,18 @@ error_code cellSaveDataUserFixedDelete(ppu_thread& ppu, u32 userId,
 		6, userdata, userId, funcDone);
 }
 
+error_code cellSaveDataGetEnableOverlay()
+{
+	cellSaveData.todo("cellSaveDataGetEnableOverlay()");
+
+	// auto& manager = g_fxo->get<savedata_manager>();
+	// manager.enable_overlay;
+
+	// TODO
+
+	return CELL_OK;
+}
+
 void cellSaveDataEnableOverlay(s32 enable)
 {
 	cellSaveData.notice("cellSaveDataEnableOverlay(enable=%d)", enable);
@@ -2981,12 +3022,7 @@ error_code cellSaveDataListDelete(ppu_thread& ppu, PSetList setList,
 		0x40, userdata, 0, funcDone);
 }
 
-// Temporarily
-#ifndef _MSC_VER
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#endif
-
-error_code cellSaveDataListImport(ppu_thread& ppu, PSetList setList,
+error_code cellSaveDataListImport(ppu_thread& /*ppu*/, PSetList setList,
 	u32 maxSizeKB, PFuncDone funcDone,
 	u32 container, vm::ptr<void> userdata)
 {
@@ -3007,7 +3043,7 @@ error_code cellSaveDataListImport(ppu_thread& ppu, PSetList setList,
 	return CELL_OK;
 }
 
-error_code cellSaveDataListExport(ppu_thread& ppu, PSetList setList,
+error_code cellSaveDataListExport(ppu_thread& /*ppu*/, PSetList setList,
 	u32 maxSizeKB, PFuncDone funcDone,
 	u32 container, vm::ptr<void> userdata)
 {
@@ -3028,7 +3064,7 @@ error_code cellSaveDataListExport(ppu_thread& ppu, PSetList setList,
 	return CELL_OK;
 }
 
-error_code cellSaveDataFixedImport(ppu_thread& ppu, vm::cptr<char> dirName,
+error_code cellSaveDataFixedImport(ppu_thread& /*ppu*/, vm::cptr<char> dirName,
 	u32 maxSizeKB, PFuncDone funcDone,
 	u32 container, vm::ptr<void> userdata)
 {
@@ -3049,7 +3085,7 @@ error_code cellSaveDataFixedImport(ppu_thread& ppu, vm::cptr<char> dirName,
 	return CELL_OK;
 }
 
-error_code cellSaveDataFixedExport(ppu_thread& ppu, vm::cptr<char> dirName,
+error_code cellSaveDataFixedExport(ppu_thread& /*ppu*/, vm::cptr<char> dirName,
 	u32 maxSizeKB, PFuncDone funcDone,
 	u32 container, vm::ptr<void> userdata)
 {
@@ -3100,7 +3136,7 @@ error_code cellSaveDataUserListDelete(ppu_thread& ppu, u32 userId,
 		0x40, userdata, userId, funcDone);
 }
 
-error_code cellSaveDataUserListImport(ppu_thread& ppu, u32 userId,
+error_code cellSaveDataUserListImport(ppu_thread& /*ppu*/, u32 userId,
 	PSetList setList, u32 maxSizeKB,
 	PFuncDone funcDone, u32 container,
 	vm::ptr<void> userdata)
@@ -3123,7 +3159,7 @@ error_code cellSaveDataUserListImport(ppu_thread& ppu, u32 userId,
 	return CELL_OK;
 }
 
-error_code cellSaveDataUserListExport(ppu_thread& ppu, u32 userId,
+error_code cellSaveDataUserListExport(ppu_thread& /*ppu*/, u32 userId,
 	PSetList setList, u32 maxSizeKB,
 	PFuncDone funcDone, u32 container,
 	vm::ptr<void> userdata)
@@ -3146,7 +3182,7 @@ error_code cellSaveDataUserListExport(ppu_thread& ppu, u32 userId,
 	return CELL_OK;
 }
 
-error_code cellSaveDataUserFixedImport(ppu_thread& ppu, u32 userId,
+error_code cellSaveDataUserFixedImport(ppu_thread& /*ppu*/, u32 userId,
 	vm::cptr<char> dirName, u32 maxSizeKB,
 	PFuncDone funcDone, u32 container,
 	vm::ptr<void> userdata)
@@ -3169,7 +3205,7 @@ error_code cellSaveDataUserFixedImport(ppu_thread& ppu, u32 userId,
 	return CELL_OK;
 }
 
-error_code cellSaveDataUserFixedExport(ppu_thread& ppu, u32 userId,
+error_code cellSaveDataUserFixedExport(ppu_thread& /*ppu*/, u32 userId,
 	vm::cptr<char> dirName, u32 maxSizeKB,
 	PFuncDone funcDone, u32 container,
 	vm::ptr<void> userdata)
@@ -3212,6 +3248,7 @@ void cellSysutil_SaveData_init()
 	REG_VAR(cellSysutil, g_savedata_context).flag(MFF_HIDDEN);
 
 	// libsysutil functions:
+	REG_FUNC(cellSysutil, cellSaveDataGetEnableOverlay);
 	REG_FUNC(cellSysutil, cellSaveDataEnableOverlay);
 
 	REG_FUNC(cellSysutil, cellSaveDataDelete2);

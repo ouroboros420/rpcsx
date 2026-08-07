@@ -78,11 +78,12 @@ void fmt_class_string<spu_stop_syscall>::format(std::string &out, u64 arg) {
   });
 }
 
-void sys_spu_image::load(const fs::file &stream) {
+bool sys_spu_image::load(const fs::file &stream) {
   const spu_exec_object obj{stream, 0, elf_opt::no_sections + elf_opt::no_data};
 
   if (obj != elf_error::ok) {
-    fmt::throw_exception("Failed to load SPU image: %s", obj.get_error());
+    sys_spu.error("Failed to load SPU image: %s", obj.get_error());
+    return false;
   }
 
   for (const auto &shdr : obj.shdrs) {
@@ -108,7 +109,8 @@ void sys_spu_image::load(const fs::file &stream) {
   const s32 nsegs = sys_spu_image::get_nsegs(obj.progs);
 
   const u32 mem_size = nsegs * sizeof(sys_spu_segment) + ::size32(stream);
-  const vm::ptr<sys_spu_segment> segs = vm::cast(vm::alloc(mem_size, vm::main));
+  const vm::ptr<sys_spu_segment> segs =
+      vm::cast(vm::reserve_map(vm::user64k, 0, 0x10000000)->alloc(mem_size));
 
   // const u32 entry = obj.header.e_entry;
 
@@ -132,6 +134,7 @@ void sys_spu_image::load(const fs::file &stream) {
 
   vm::page_protect(segs.addr(), rx::alignUp(mem_size, 4096), 0, 0,
                    vm::page_writable);
+  return true;
 }
 
 void sys_spu_image::free() const {
@@ -158,22 +161,52 @@ void sys_spu_image::deploy(u8 *loc, std::span<const sys_spu_segment> segs,
     sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.type),
                 sizeof(seg.type));
 
+    // Prevent possible segfault
+    const u32 masked_ls = seg.ls % SPU_LS_SIZE;
+    u32 masked_size =
+        std::min<u32>(SPU_LS_SIZE - masked_ls, seg.size % SPU_LS_SIZE);
+
     // Hash big-endian values
     if (seg.type == SYS_SPU_SEGMENT_TYPE_COPY) {
-      std::memcpy(loc + seg.ls, vm::base(seg.addr), seg.size);
+      if (!vm::check_addr(seg.addr, 0, seg.size)) {
+        // Further clamp size to fit 4GB address space, preventing segfault
+        masked_size =
+            masked_size
+                ? std::min<u32>(u32{umax} - seg.addr, masked_size - 1) + 1
+                : 0;
+        spu_log.error("Dumping sys_spu_image log - illgal address:\n\n%s",
+                      dump);
+      }
+
+      if ((seg.ls | seg.size) % 4) {
+        spu_log.error("Unaligned SPU COPY type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      if (masked_ls != seg.ls || masked_size != seg.size) {
+        spu_log.error("Illegal SPU COPY type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      std::memcpy(loc + masked_ls, vm::base(seg.addr), masked_size);
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.size),
                   sizeof(seg.size));
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.ls),
                   sizeof(seg.ls));
-      sha1_update(&sha, vm::_ptr<uchar>(seg.addr), seg.size);
+      sha1_update(&sha, loc + masked_ls, masked_size);
     } else if (seg.type == SYS_SPU_SEGMENT_TYPE_FILL) {
       if ((seg.ls | seg.size) % 4) {
         spu_log.error("Unaligned SPU FILL type segment (ls=0x%x, size=0x%x)",
                       seg.ls, seg.size);
       }
 
-      std::fill_n(reinterpret_cast<be_t<u32> *>(loc + seg.ls), seg.size / 4,
-                  seg.addr);
+      if (masked_ls != seg.ls || masked_size != seg.size) {
+        spu_log.error("Illegal SPU FILL type segment (ls=0x%x, size=0x%x)",
+                      seg.ls, seg.size);
+      }
+
+      std::fill_n(reinterpret_cast<be_t<u32> *>(loc + masked_ls),
+                  masked_size / 4, seg.addr);
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.size),
                   sizeof(seg.size));
       sha1_update(&sha, reinterpret_cast<const uchar *>(&seg.ls),
@@ -219,15 +252,16 @@ lv2_spu_group::lv2_spu_group(utils::serial &ar) noexcept
     : name(ar.pop<std::string>()), id(idm::last_id()), max_num(ar),
       mem_size(ar), type(ar) // SPU Thread Group Type
       ,
-      ct(lv2_memory_container::search(ar)), has_scheduler_context(ar.pop<u8>()),
-      max_run(ar), init(ar), prio([&ar]() {
+      ct(lv2_memory_container::search(ar.pop<u32>())),
+      has_scheduler_context(ar.pop<u8>()), max_run(ar), init(ar.pop<u32>()),
+      prio([&ar]() {
         std::common_type_t<decltype(lv2_spu_group::prio)> prio{};
 
         ar(prio.all);
 
         return prio;
       }()),
-      run_state(ar.pop<spu_group_status>()), exit_status(ar) {
+      run_state(ar.pop<spu_group_status>()), exit_status(ar.pop<s32>()) {
   for (auto &thread : threads) {
     if (ar.pop<bool>()) {
       ar(id_manager::g_id);
@@ -368,17 +402,38 @@ struct spu_limits_t {
 
   SAVESTATE_INIT_POS(47);
 
-  bool check(const limits_data &init) const {
+  bool check_valid(const limits_data &init) const {
+    const u32 physical_spus_count = init.physical;
+    const u32 controllable_spu_count = init.controllable;
+
+    const u32 spu_limit = init.spu_limit != umax ? init.spu_limit : max_spu;
+    const u32 raw_limit = init.raw_limit != umax ? init.raw_limit : max_raw;
+
+    if (spu_limit + raw_limit > 6 || physical_spus_count > spu_limit ||
+        controllable_spu_count > spu_limit) {
+      return false;
+    }
+
+    return true;
+  }
+
+  bool check_busy(const limits_data &init) const {
     u32 physical_spus_count = init.physical;
     u32 raw_spu_count = init.raw_spu;
     u32 controllable_spu_count = init.controllable;
+    u32 system_coop = init.controllable != 0 && init.physical != 0 ? 1 : 0;
+
     const u32 spu_limit = init.spu_limit != umax ? init.spu_limit : max_spu;
     const u32 raw_limit = init.raw_limit != umax ? init.raw_limit : max_raw;
 
     idm::select<lv2_spu_group>([&](u32, lv2_spu_group &group) {
-      if (group.has_scheduler_context) {
+      if (group.type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM) {
+        system_coop++;
+        controllable_spu_count = std::max<u32>(controllable_spu_count, 1);
+        physical_spus_count += group.max_num - 1;
+      } else if (group.has_scheduler_context) {
         controllable_spu_count =
-            std::max(controllable_spu_count, group.max_num);
+            std::max<u32>(controllable_spu_count, group.max_num);
       } else {
         physical_spus_count += group.max_num;
       }
@@ -386,9 +441,16 @@ struct spu_limits_t {
 
     raw_spu_count += spu_thread::g_raw_spu_ctr;
 
+    // physical_spus_count >= spu_limit returns EBUSY, not EINVAL!
     if (spu_limit + raw_limit > 6 || raw_spu_count > raw_limit ||
         physical_spus_count >= spu_limit ||
-        physical_spus_count + controllable_spu_count > spu_limit) {
+        controllable_spu_count > spu_limit) {
+      return false;
+    }
+
+    if (system_coop > 1) {
+      // Cannot have more than one SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM
+      // group at a time
       return false;
     }
 
@@ -414,8 +476,8 @@ error_code sys_spu_initialize(ppu_thread &ppu, u32 max_usable_spu,
 
   std::lock_guard lock(limits.mutex);
 
-  if (!limits.check(limits_data{.spu_limit = max_usable_spu - max_raw_spu,
-                                .raw_limit = max_raw_spu})) {
+  if (!limits.check_busy(limits_data{.spu_limit = max_usable_spu - max_raw_spu,
+                                     .raw_limit = max_raw_spu})) {
     return CELL_EBUSY;
   }
 
@@ -467,15 +529,51 @@ error_code sys_spu_image_open(ppu_thread &ppu, vm::ptr<sys_spu_image> img,
   u128 klic = g_fxo->get<loaded_npdrm_keys>().last_key();
 
   const fs::file elf_file =
-      decrypt_self(std::move(file), reinterpret_cast<u8 *>(&klic));
+      decrypt_self(file, reinterpret_cast<const u8 *>(&klic));
 
-  if (!elf_file) {
+  if (!elf_file || !img->load(elf_file)) {
     sys_spu.error("sys_spu_image_open(): file %s is illegal for SPU image!",
                   path);
     return {CELL_ENOEXEC, path};
   }
 
-  img->load(elf_file);
+  return CELL_OK;
+}
+
+error_code sys_spu_image_open_by_fd(ppu_thread &ppu, vm::ptr<sys_spu_image> img,
+                                    s32 fd, s64 offset) {
+  ppu.state += cpu_flag::wait;
+
+  sys_spu.warning("sys_spu_image_open_by_fd(img=*0x%x, fd=%d, offset=0x%x)",
+                  img, fd, offset);
+
+  const auto file = idm::get_unlocked<lv2_fs_object, lv2_file>(fd);
+
+  if (!file) {
+    return CELL_EBADF;
+  }
+
+  if (offset < 0) {
+    return CELL_ENOEXEC;
+  }
+
+  std::lock_guard lock(file->mp->mutex);
+
+  if (!file->file) {
+    return CELL_EBADF;
+  }
+
+  u128 klic = g_fxo->get<loaded_npdrm_keys>().last_key();
+
+  const fs::file elf_file = decrypt_self(lv2_file::make_view(file, offset),
+                                         reinterpret_cast<const u8 *>(&klic));
+
+  if (!img->load(elf_file)) {
+    sys_spu.error("sys_spu_image_open(): file %s is illegal for SPU image!",
+                  file->name.data());
+    return {CELL_ENOEXEC, file->name.data()};
+  }
+
   return CELL_OK;
 }
 
@@ -506,7 +604,7 @@ error_code _sys_spu_image_close(ppu_thread &ppu, vm::ptr<sys_spu_image> img) {
     return CELL_ESRCH;
   }
 
-  ensure(vm::dealloc(handle->segs.addr(), vm::main));
+  ensure(vm::dealloc(handle->segs.addr(), vm::user64k));
   return CELL_OK;
 }
 
@@ -668,16 +766,19 @@ error_code sys_spu_thread_initialize(ppu_thread &ppu, vm::ptr<u32> thread,
   }
 
   // Read thread name
-  const std::string thread_name(attr_data.name.get_ptr(),
-                                std::max<u32>(attr_data.name_len, 1) - 1);
+  std::string thread_name;
+
+  if (attr_data.name_len &&
+      !vm::read_string(attr_data.name.addr(), attr_data.name_len - 1,
+                       thread_name, true)) {
+    return {CELL_EFAULT, attr_data.name.addr()};
+  }
 
   const auto group = idm::get_unlocked<lv2_spu_group>(group_id);
 
   if (!group) {
     return CELL_ESRCH;
   }
-
-  std::unique_lock lock(group->mutex);
 
   if (auto state = +group->run_state;
       state != SPU_THREAD_GROUP_STATUS_NOT_INITIALIZED) {
@@ -692,21 +793,46 @@ error_code sys_spu_thread_initialize(ppu_thread &ppu, vm::ptr<u32> thread,
     return CELL_EBUSY;
   }
 
+  const u32 inited_before_lock = group->init;
+
+  u32 tid = (inited_before_lock << 24) | (group_id & 0xffffff);
+
+  const auto spu_ptr = ensure(idm::make_ptr<named_thread<spu_thread>>(
+      group.get(), spu_num, thread_name, tid, false, option));
+
+  std::unique_lock lock(group->mutex);
+
+  if (auto state = +group->run_state;
+      state != SPU_THREAD_GROUP_STATUS_NOT_INITIALIZED) {
+    lock.unlock();
+    ensure(idm::remove<named_thread<spu_thread>>(idm::last_id<spu_thread>()));
+
+    if (state == SPU_THREAD_GROUP_STATUS_DESTROYED) {
+      return CELL_ESRCH;
+    }
+
+    return CELL_EBUSY;
+  }
+
+  if (group->threads_map[spu_num] != -1) {
+    lock.unlock();
+    ensure(idm::remove<named_thread<spu_thread>>(idm::last_id<spu_thread>()));
+    return CELL_EBUSY;
+  }
+
   if (option & SYS_SPU_THREAD_OPTION_ASYNC_INTR_ENABLE) {
     sys_spu.warning("Unimplemented SPU Thread options (0x%x)", option);
   }
 
   const u32 inited = group->init;
 
-  const u32 tid = (inited << 24) | (group_id & 0xffffff);
+  tid = (inited << 24) | (group_id & 0xffffff);
 
-  ensure(idm::import <named_thread<spu_thread>>([&]() {
-    const auto spu = stx::make_shared<named_thread<spu_thread>>(
-        group.get(), spu_num, thread_name, tid, false, option);
-    group->threads[inited] = spu;
-    group->threads_map[spu_num] = static_cast<s8>(inited);
-    return spu;
-  }));
+  // Update lv2_id (potentially changed after locking)
+  spu_ptr->lv2_id = tid;
+
+  group->threads[inited] = spu_ptr;
+  group->threads_map[spu_num] = static_cast<s8>(inited);
 
   // alloc_hidden indicates falloc to allocate page with no access rights in
   // base memory
@@ -783,9 +909,9 @@ error_code sys_spu_thread_get_exit_status(ppu_thread &ppu, u32 id,
   return CELL_ESTAT;
 }
 
-error_code
-sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
-                            vm::ptr<sys_spu_thread_group_attribute> attr) {
+error_code sys_spu_thread_group_create(
+    ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
+    vm::ptr<reduced_sys_spu_thread_group_attribute> attr) {
   ppu.state += cpu_flag::wait;
 
   sys_spu.warning(
@@ -794,10 +920,31 @@ sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
 
   const s32 min_prio = g_ps3_process_info.has_root_perm() ? 0 : 16;
 
-  const sys_spu_thread_group_attribute attr_data = *attr;
+  sys_spu_thread_group_attribute attr_data{};
+  {
+    const reduced_sys_spu_thread_group_attribute attr_reduced = *attr;
+    attr_data.name = attr_reduced.name;
+    attr_data.nsize = attr_reduced.nsize;
+    attr_data.type = attr_reduced.type;
+
+    // Read container-id member at offset 12 bytes conditionally (that's what
+    // LV2 does)
+    if (attr_data.type & SYS_SPU_THREAD_GROUP_TYPE_MEMORY_FROM_CONTAINER) {
+      attr_data.ct =
+          vm::unsafe_ptr_cast<sys_spu_thread_group_attribute>(attr)->ct;
+    }
+  }
 
   if (attr_data.nsize > 0x80 || !num) {
     return CELL_EINVAL;
+  }
+
+  std::string group_name;
+
+  if (attr_data.nsize && !vm::read_string(attr_data.name.addr(),
+                                          attr_data.nsize - 1, group_name,
+                                          true)) {
+    return {CELL_EFAULT, attr_data.name.addr()};
   }
 
   const s32 type = attr_data.type;
@@ -817,20 +964,22 @@ sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
 
   switch (type) {
   case 0x0:
-  case 0x4:
-  case 0x18: {
+  case SYS_SPU_THREAD_GROUP_TYPE_MEMORY_FROM_CONTAINER:
+  case SYS_SPU_THREAD_GROUP_TYPE_EXCLUSIVE_NON_CONTEXT: {
     break;
   }
 
-  case 0x20:
-  case 0x22:
-  case 0x24:
-  case 0x26: {
+  case SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM:
+  case (SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM | 0x2):
+  case (SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM | 0x4):
+  case (SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM | 0x6): {
     if (type == 0x22 || type == 0x26) {
       needs_root = true;
     }
 
-    min_threads = 2; // That's what appears from reversing
+    // For a single thread that is being shared with system (the cooperative
+    // victim)
+    min_threads = 2;
     break;
   }
 
@@ -869,7 +1018,8 @@ sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
       type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM;
 
   if (is_system_coop) {
-    // Constant size, unknown what it means
+    // For a single thread that is being shared with system (the cooperative
+    // victim)
     mem_size = SPU_LS_SIZE;
   } else if (type & SYS_SPU_THREAD_GROUP_TYPE_NON_CONTEXT) {
     // No memory consumed
@@ -911,16 +1061,30 @@ sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
 
   std::unique_lock lock(limits.mutex);
 
-  if (!limits.check(use_scheduler ? limits_data{.controllable = num}
-                                  : limits_data{.physical = num})) {
+  limits_data group_limits{};
+
+  if (is_system_coop) {
+    group_limits.controllable = 1;
+    group_limits.physical = num - 1;
+  } else if (use_scheduler) {
+    group_limits.controllable = num;
+  } else {
+    group_limits.physical = num;
+  }
+
+  if (!limits.check_valid(group_limits)) {
+    ct->free(mem_size);
+    return CELL_EINVAL;
+  }
+
+  if (!limits.check_busy(group_limits)) {
     ct->free(mem_size);
     return CELL_EBUSY;
   }
 
-  const auto group = idm::make_ptr<lv2_spu_group>(
-      std::string(attr_data.name.get_ptr(),
-                  std::max<u32>(attr_data.nsize, 1) - 1),
-      num, prio, type, ct, use_scheduler, mem_size);
+  const auto group =
+      idm::make_ptr<lv2_spu_group>(std::move(group_name), num, prio, type, ct,
+                                   use_scheduler, mem_size);
 
   if (!group) {
     ct->free(mem_size);
@@ -933,7 +1097,7 @@ sys_spu_thread_group_create(ppu_thread &ppu, vm::ptr<u32> id, u32 num, s32 prio,
       group->name, idm::last_id());
 
   ppu.check_state();
-  *id = idm::last_id();
+  *id = idm::last_id<lv2_spu_group>();
   return CELL_OK;
 }
 
@@ -1086,6 +1250,10 @@ error_code sys_spu_thread_group_suspend(ppu_thread &ppu, u32 id) {
     return CELL_EINVAL;
   }
 
+  if (group->type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM) {
+    return CELL_EINVAL;
+  }
+
   std::lock_guard lock(group->mutex);
 
   CellError error;
@@ -1151,6 +1319,10 @@ error_code sys_spu_thread_group_resume(ppu_thread &ppu, u32 id) {
   }
 
   if (!group->has_scheduler_context || group->type & 0xf00) {
+    return CELL_EINVAL;
+  }
+
+  if (group->type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM) {
     return CELL_EINVAL;
   }
 
@@ -1310,24 +1482,26 @@ error_code sys_spu_thread_group_terminate(ppu_thread &ppu, u32 id, s32 value) {
   }
 
   u32 prev_resv = 0;
+  u64 prev_time = 0;
 
   for (auto &thread : group->threads) {
     while (thread && group->running && thread->state & cpu_flag::wait) {
       thread_ctrl::notify(*thread);
 
       if (u32 resv = atomic_storage<u32>::load(thread->raddr)) {
-        if (prev_resv && prev_resv != resv) {
+        if (prev_resv && (prev_resv != resv || prev_time != thread->rtime)) {
           // Batch reservation notifications if possible
-          vm::reservation_notifier_notify(prev_resv);
+          vm::reservation_notifier_notify(prev_resv, prev_time);
         }
 
         prev_resv = resv;
+        prev_time = thread->rtime;
       }
     }
   }
 
   if (prev_resv) {
-    vm::reservation_notifier_notify(prev_resv);
+    vm::reservation_notifier_notify(prev_resv, prev_time);
   }
 
   group->exit_status = value;
@@ -1458,6 +1632,10 @@ error_code sys_spu_thread_group_set_priority(ppu_thread &ppu, u32 id,
     return CELL_EINVAL;
   }
 
+  if (group->type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM) {
+    return CELL_EINVAL;
+  }
+
   group->prio.atomic_op(
       [&](std::common_type_t<decltype(lv2_spu_group::prio)> &prio) {
         prio.prio = priority;
@@ -1483,6 +1661,9 @@ error_code sys_spu_thread_group_get_priority(ppu_thread &ppu, u32 id,
 
   if (!group->has_scheduler_context) {
     *priority = 0;
+  } else if (group->type & SYS_SPU_THREAD_GROUP_TYPE_COOPERATE_WITH_SYSTEM) {
+    // Regardless of the value being set in group creation
+    *priority = 15;
   } else {
     *priority = group->prio.load().prio;
   }
@@ -1655,8 +1836,7 @@ error_code sys_spu_thread_read_ls(ppu_thread &ppu, u32 id, u32 lsa,
 error_code sys_spu_thread_write_spu_mb(ppu_thread &ppu, u32 id, u32 value) {
   ppu.state += cpu_flag::wait;
 
-  sys_spu.warning("sys_spu_thread_write_spu_mb(id=0x%x, value=0x%x)", id,
-                  value);
+  sys_spu.trace("sys_spu_thread_write_spu_mb(id=0x%x, value=0x%x)", id, value);
 
   const auto [thread, group] = lv2_spu_group::get_thread(id);
 
@@ -2148,7 +2328,7 @@ error_code sys_raw_spu_create(ppu_thread &ppu, vm::ptr<u32> id,
 
   std::lock_guard lock(limits.mutex);
 
-  if (!limits.check(limits_data{.raw_spu = 1})) {
+  if (!limits.check_busy(limits_data{.raw_spu = 1})) {
     return CELL_EAGAIN;
   }
 
@@ -2204,7 +2384,7 @@ error_code sys_isolated_spu_create(ppu_thread &ppu, vm::ptr<u32> id,
 
   std::lock_guard lock(limits.mutex);
 
-  if (!limits.check(limits_data{.raw_spu = 1})) {
+  if (!limits.check_busy(limits_data{.raw_spu = 1})) {
     return CELL_EAGAIN;
   }
 
@@ -2224,6 +2404,10 @@ error_code sys_isolated_spu_create(ppu_thread &ppu, vm::ptr<u32> id,
 
   const auto thread =
       idm::make_ptr<named_thread<spu_thread>>(nullptr, index, "", index, true);
+
+  ensure(vm::get(vm::spu)->falloc(thread->vm_offset(), SPU_LS_SIZE,
+                                  &thread->shm, vm::page_size_64k));
+  thread->map_ls(*thread->shm, thread->ls);
 
   thread->gpr[3] = v128::from64(0, arg1);
   thread->gpr[4] = v128::from64(0, arg2);

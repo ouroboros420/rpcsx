@@ -130,6 +130,8 @@ namespace gl
 				case ::glsl::program_domain::glsl_compute_program:
 					base_name = "shaderlog/ComputeProgram";
 					break;
+				default:
+					fmt::throw_exception("Unexpected program type %d", static_cast<int>(type));
 				}
 
 				fs::write_file(fs::get_cache_dir() + base_name + std::to_string(m_id) + ".glsl", fs::rewrite, str, length);
@@ -220,7 +222,7 @@ namespace gl
 				return (found->second >= 0);
 			}
 
-			auto result = glGetUniformLocation(m_program.id(), name.c_str());
+			auto result = glGetUniformLocation(m_program->id(), name.c_str());
 			locations[name] = result;
 
 			if (location)
@@ -247,7 +249,7 @@ namespace gl
 				}
 			}
 
-			auto result = glGetUniformLocation(m_program.id(), name.c_str());
+			auto result = glGetUniformLocation(m_program->id(), name.c_str());
 
 			if (result < 0)
 			{

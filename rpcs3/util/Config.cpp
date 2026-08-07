@@ -40,7 +40,7 @@ namespace cfg
 		owner->m_nodes.emplace_back(this);
 	}
 
-	bool _base::from_string(std::string_view, bool)
+	bool _base::from_string(std::string_view /*value*/, bool /*dynamic*/)
 	{
 		cfg_log.fatal("cfg::_base::from_string() purecall");
 		return false;
@@ -68,7 +68,7 @@ namespace cfg
 
 	// Incrementally load config entries from YAML::Node.
 	// The config value is preserved if the corresponding YAML node doesn't exist.
-	static void decode(const YAML::Node& data, class _base& rhs, bool dynamic = false);
+	[[nodiscard]] static bool decode(const YAML::Node& data, class _base& rhs, bool dynamic, bool strict);
 } // namespace cfg
 
 std::vector<std::string> cfg::make_int_range(s64 min, s64 max)
@@ -76,12 +76,12 @@ std::vector<std::string> cfg::make_int_range(s64 min, s64 max)
 	return {std::to_string(min), std::to_string(max)};
 }
 
-bool try_to_int64(s64* out, std::string_view value, s64 min, s64 max)
+bool try_to_int64(s64* out, std::string_view value, s64 min, s64 max, std::string_view name)
 {
 	if (value.empty())
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_int64(): called with an empty string");
+			cfg_log.error("cfg::try_to_int64('%s'): called with an empty string", name);
 		return false;
 	}
 
@@ -109,7 +109,7 @@ bool try_to_int64(s64* out, std::string_view value, s64 min, s64 max)
 	if (ret.ec != std::errc() || ret.ptr != end || (start[0] == '-' && sign < 0))
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_int64('%s'): invalid integer", value);
+			cfg_log.error("cfg::try_to_int64('%s', '%s'): invalid integer", value, name);
 		return false;
 	}
 
@@ -118,7 +118,7 @@ bool try_to_int64(s64* out, std::string_view value, s64 min, s64 max)
 	if (result < min || result > max)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_int64('%s'): out of bounds (val=%d, min=%d, max=%d)", value, result, min, max);
+			cfg_log.error("cfg::try_to_int64('%s', '%s'): out of bounds (val=%d, min=%d, max=%d)", value, name, result, min, max);
 		return false;
 	}
 
@@ -132,12 +132,12 @@ std::vector<std::string> cfg::make_uint_range(u64 min, u64 max)
 	return {std::to_string(min), std::to_string(max)};
 }
 
-bool try_to_uint64(u64* out, std::string_view value, u64 min, u64 max)
+bool try_to_uint64(u64* out, std::string_view value, u64 min, u64 max, std::string_view name)
 {
 	if (value.empty())
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_uint64(): called with an empty string");
+			cfg_log.error("cfg::try_to_uint64('%s'): called with an empty string", name);
 		return false;
 	}
 
@@ -158,14 +158,14 @@ bool try_to_uint64(u64* out, std::string_view value, u64 min, u64 max)
 	if (ret.ec != std::errc() || ret.ptr != end)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_uint64('%s'): invalid integer", value);
+			cfg_log.error("cfg::try_to_uint64('%s', '%s'): invalid integer", value, name);
 		return false;
 	}
 
 	if (result < min || result > max)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_uint64('%s'): out of bounds (val=%u, min=%u, max=%u)", value, result, min, max);
+			cfg_log.error("cfg::try_to_uint64('%s', '%s'): out of bounds (val=%u, min=%u, max=%u)", value, name, result, min, max);
 		return false;
 	}
 
@@ -174,17 +174,66 @@ bool try_to_uint64(u64* out, std::string_view value, u64 min, u64 max)
 	return true;
 }
 
+bool try_to_uint128(u128* out, std::string_view value, std::string_view name)
+{
+	if (value.empty())
+	{
+		if (out) cfg_log.error("cfg::try_to_uint128('%s'): called with an empty string", name);
+		return false;
+	}
+
+	u64 result_low = 0, result_high = 0;
+	const char* start_high64 = value.data();
+	const char* end = value.data() + value.size();
+
+	if (start_high64[0] == '0' && value.size() >= 2 && (start_high64[1] == 'x' || start_high64[1] == 'X'))
+	{
+		// Hex support
+		start_high64 += 2;
+	}
+
+	const char* start_low64 = end - std::min<usz>(end - start_high64, 16);
+
+	// Hexadecimal-only
+	constexpr int base = 16;
+
+	auto ret = std::from_chars(start_low64, end, result_low, base);
+
+	if (ret.ec != std::errc() || ret.ptr != end)
+	{
+		if (out) cfg_log.error("cfg::try_to_uint128('%s', '%s'): invalid integer", value, name);
+		return false;
+	}
+
+	if (start_high64 == start_low64)
+	{
+		if (out) *out = result_low;
+		return true;
+	}
+
+	ret = std::from_chars(start_high64, start_low64, result_high, base);
+
+	if (ret.ec != std::errc() || ret.ptr != start_low64)
+	{
+		if (out) cfg_log.error("cfg::try_to_uint128('%s', '%s'): invalid integer", value, name);
+		return false;
+	}
+
+	if (out) *out = result_low + (u128{result_high} << 64);
+	return true;
+}
+
 std::vector<std::string> cfg::make_float_range(f64 min, f64 max)
 {
 	return {std::to_string(min), std::to_string(max)};
 }
 
-bool try_to_float(f64* out, std::string_view value, f64 min, f64 max)
+bool try_to_float(f64* out, std::string_view value, f64 min, f64 max, std::string_view name)
 {
 	if (value.empty())
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_float(): called with an empty string");
+			cfg_log.error("cfg::try_to_float('%s'): called with an empty string", name);
 		return false;
 	}
 
@@ -198,14 +247,14 @@ bool try_to_float(f64* out, std::string_view value, f64 min, f64 max)
 	if (end_check != str.data() + str.size())
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_float('%s'): invalid float", value);
+			cfg_log.error("cfg::try_to_float('%s', '%s'): invalid float", value, name);
 		return false;
 	}
 
 	if (result < min || result > max)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_float('%s'): out of bounds (val=%f, min=%f, max=%f)", value, result, min, max);
+			cfg_log.error("cfg::try_to_float('%s', '%s'): out of bounds (val=%f, min=%f, max=%f)", value, name, result, min, max);
 		return false;
 	}
 
@@ -214,13 +263,8 @@ bool try_to_float(f64* out, std::string_view value, f64 min, f64 max)
 	return true;
 }
 
-bool try_to_string(std::string* out, const f64& value)
+bool try_to_string(std::string* out, f64 value, std::string_view name)
 {
-#ifdef __APPLE__
-	if (out)
-		*out = std::to_string(value);
-	return true;
-#else
 	std::array<char, 32> str{};
 
 	if (auto [ptr, ec] = std::to_chars(str.data(), str.data() + str.size(), value, std::chars_format::fixed); ec == std::errc())
@@ -232,14 +276,15 @@ bool try_to_string(std::string* out, const f64& value)
 	else
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_string(): could not convert value '%f' to string. error='%s'", value, std::make_error_code(ec).message());
+			cfg_log.error("cfg::try_to_string('%s'): could not convert value '%f' to string. error='%s'", name, value, std::make_error_code(ec).message());
 		return false;
 	}
-#endif
 }
 
-bool cfg::try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, std::string_view value)
+bool cfg::try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, std::string_view value, std::string_view name)
 {
+	ensure(func);
+
 	u64 max = umax;
 	std::size_t gap = 0;
 
@@ -276,7 +321,7 @@ bool cfg::try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) f
 	const char* end = start + value.size();
 	int base = 10;
 
-	if (start[0] == '0' && (start[1] == 'x' || start[1] == 'X'))
+	if (value.size() >= 2 && start[0] == '0' && (start[1] == 'x' || start[1] == 'X'))
 	{
 		// Limited hex support
 		base = 16;
@@ -288,20 +333,33 @@ bool cfg::try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) f
 	if (ret.ec != std::errc() || ret.ptr != end)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_enum_value('%s'): invalid enum or integer", value);
+			cfg_log.error("cfg::try_to_enum_value('%s', '%s'): invalid enum or integer", value, name);
 		return false;
 	}
 
 	if (result > max)
 	{
 		if (out)
-			cfg_log.error("cfg::try_to_enum_value('%s'): out of bounds(val=%u, min=0, max=%u)", value, result, max);
+			cfg_log.error("cfg::try_to_enum_value('%s', '%s'): out of bounds(val=%u, min=0, max=%u)", value, name, result, max);
 		return false;
 	}
 
 	if (out)
 		*out = result;
 	return true;
+}
+
+std::string cfg::uint128::to_string(u128 value) noexcept
+{
+	std::string result = "0x";
+	result.resize(result.size() + 32);
+
+	for (u32 i = 0; i < 32; i++)
+	{
+		result[result.size() - 1 - i] = "0123456789ABCDEF"[static_cast<u64>(value >> (i * 4)) % 16];
+	}
+
+	return result;
 }
 
 std::vector<std::string> cfg::try_to_enum_list(decltype(&fmt_class_string<int>::format) func)
@@ -329,6 +387,27 @@ std::vector<std::string> cfg::try_to_enum_list(decltype(&fmt_class_string<int>::
 		gap = 0;
 
 		result.emplace_back(std::move(var));
+	}
+
+	return result;
+}
+
+size_t cfg::try_to_enum_size(decltype(&fmt_class_string<int>::format) func)
+{
+	size_t result = 0;
+	for (u64 i = 0;; i++)
+	{
+		std::string var;
+		func(var, i);
+
+		std::string hex;
+		fmt_class_string<u64>::format(hex, i);
+		if (var == hex)
+		{
+			break;
+		}
+
+		result++;
 	}
 
 	return result;
@@ -388,7 +467,7 @@ void cfg::encode(YAML::Emitter& out, const cfg::_base& rhs)
 		out << YAML::BeginMap;
 		for (const auto& np : static_cast<const log_entry&>(rhs).get_map())
 		{
-			if (np.second == logs::level::notice)
+			if (np.second == logs::level::_default)
 				continue;
 			out << YAML::Key << np.first;
 			out << YAML::Value << fmt::format("%s", np.second);
@@ -420,21 +499,24 @@ void cfg::encode(YAML::Emitter& out, const cfg::_base& rhs)
 	}
 }
 
-void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
+bool cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic, bool strict)
 {
 	if (dynamic && !rhs.get_is_dynamic())
 	{
-		return;
+		return true;
 	}
 
 	switch (rhs.get_type())
 	{
 	case type::node:
 	{
-		if (data.IsScalar() || data.IsSequence())
+		if (!data.IsMap())
 		{
-			return; // ???
+			cfg_log.error("node node is not a map");
+			return false;
 		}
+
+		bool success = true;
 
 		for (const auto& pair : data)
 		{
@@ -442,16 +524,26 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 				continue;
 
 			// Find the key among existing nodes
-			for (const auto& node : static_cast<node&>(rhs).get_nodes())
+			const auto& nodes = static_cast<node&>(rhs).get_nodes();
+			const auto it = std::find_if(nodes.cbegin(), nodes.cend(), [&pair](const auto& node) { return ensure(node)->get_name() == pair.first.Scalar(); });
+
+			if (it == nodes.cend())
 			{
-				if (node->get_name() == pair.first.Scalar())
+				if (strict)
 				{
-					decode(pair.second, *node, dynamic);
+					cfg_log.error("Unknown key found: '%s'", pair.first.Scalar());
+					success = false;
 				}
+				continue;
+			}
+
+			if (!decode(pair.second, *ensure(*it), dynamic, strict) && strict)
+			{
+				success = false;
 			}
 		}
 
-		break;
+		return success;
 	}
 	case type::set:
 	{
@@ -459,7 +551,10 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 
 		if (YAML::convert<decltype(values)>::decode(data, values))
 		{
-			rhs.from_list(std::move(values));
+			if (!rhs.from_list(std::move(values)) && strict)
+			{
+				return false;
+			}
 		}
 
 		break;
@@ -469,7 +564,8 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 	{
 		if (!data.IsMap())
 		{
-			return;
+			cfg_log.error("map node is not a map");
+			return false;
 		}
 
 		map_of_type<std::string> values;
@@ -487,9 +583,10 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 	}
 	case type::log:
 	{
-		if (data.IsScalar() || data.IsSequence())
+		if (!data.IsMap())
 		{
-			return; // ???
+			cfg_log.error("log node is not a map");
+			return false;
 		}
 
 		map_of_type<logs::level> values;
@@ -497,13 +594,30 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 		for (const auto& pair : data)
 		{
 			if (!pair.first.IsScalar() || !pair.second.IsScalar())
-				continue;
-
-			u64 value;
-			if (cfg::try_to_enum_value(&value, &fmt_class_string<logs::level>::format, pair.second.Scalar()))
 			{
-				values.emplace(pair.first.Scalar(), static_cast<logs::level>(static_cast<int>(value)));
+				if (strict)
+				{
+					if (!pair.first.IsScalar())
+						cfg_log.error("Key in map is not a scalar");
+					else
+						cfg_log.error("Value in map is not a scalar. key='%s'", pair.first.Scalar());
+					return false;
+				}
+				continue;
 			}
+
+			u64 value = 0;
+			if (!cfg::try_to_enum_value(&value, &fmt_class_string<logs::level>::format, pair.second.Scalar(), pair.first.Scalar()))
+			{
+				if (strict)
+				{
+					return false;
+				}
+
+				continue;
+			}
+
+			values.emplace(pair.first.Scalar(), static_cast<logs::level>(static_cast<int>(value)));
 		}
 
 		static_cast<log_entry&>(rhs).set_map(std::move(values));
@@ -513,7 +627,8 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 	{
 		if (!data.IsMap())
 		{
-			return; // ???
+			cfg_log.error("device node is not a map");
+			return false;
 		}
 
 		map_of_type<device_info> values;
@@ -521,14 +636,34 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 		for (const auto& pair : data)
 		{
 			if (!pair.first.IsScalar() || !pair.second.IsMap())
+			{
+				if (strict)
+				{
+					if (!pair.first.IsScalar())
+						cfg_log.error("Key in device map is not a scalar");
+					else
+						cfg_log.error("Value in device map is not a map. key='%s'", pair.first.Scalar());
+					return false;
+				}
 				continue;
+			}
 
 			device_info info{};
 
 			for (const auto& key_value : pair.second)
 			{
 				if (!key_value.first.IsScalar() || !key_value.second.IsScalar())
+				{
+					if (strict)
+					{
+						if (!key_value.first.IsScalar())
+							cfg_log.error("Key in device info map is not a scalar");
+						else
+							cfg_log.error("Value in device map is not a scalar. key='%s'", key_value.first.Scalar());
+						return false;
+					}
 					continue;
+				}
 
 				if (key_value.first.Scalar() == "Path")
 					info.path = key_value.second.Scalar();
@@ -555,12 +690,17 @@ void cfg::decode(const YAML::Node& data, cfg::_base& rhs, bool dynamic)
 
 		if (YAML::convert<std::string>::decode(data, value))
 		{
-			rhs.from_string(value, dynamic);
+			if (!rhs.from_string(value, dynamic) && strict)
+			{
+				return false;
+			}
 		}
 
 		break; // ???
 	}
 	}
+
+	return true;
 }
 
 std::string cfg::node::to_string() const
@@ -624,8 +764,7 @@ bool cfg::node::from_string(std::string_view value, bool dynamic)
 
 	if (error.empty())
 	{
-		cfg::decode(result, *this, dynamic);
-		return true;
+		return cfg::decode(result, *this, dynamic, false);
 	}
 
 	cfg_log.error("Failed to load node: %s", error);
@@ -640,19 +779,25 @@ void cfg::node::from_default()
 	}
 }
 
-void cfg::_bool::from_default()
+void cfg::node::restore_defaults()
 {
-	m_value = def;
+	for (auto& node : m_nodes)
+	{
+		node->restore_defaults();
+}
 }
 
-void cfg::string::from_default()
+bool cfg::node::validate(std::string_view value)
 {
-	m_value = def;
-}
+	auto [result, error] = yaml_load(std::string(value));
 
-void cfg::set_entry::from_default()
-{
-	m_set = {};
+	if (error.empty())
+	{
+		return cfg::decode(result, *this, false, true);
+	}
+
+	cfg_log.error("Failed to load node: %s", error);
+	return false;
 }
 
 std::string cfg::map_entry::get_value(std::string_view key)
@@ -700,7 +845,7 @@ void cfg::log_entry::from_default()
 
 std::pair<u16, u16> cfg::device_info::get_usb_ids() const
 {
-	auto string_to_hex = [](const std::string& str) -> u16
+	auto string_to_hex = [](std::string_view str) -> u16
 	{
 		u16 value = 0x0000;
 		if (!str.empty() && std::from_chars(str.data(), str.data() + str.size(), value, 16).ec != std::errc{})

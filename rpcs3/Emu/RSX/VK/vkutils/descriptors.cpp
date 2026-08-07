@@ -14,45 +14,43 @@ namespace vk
 		public:
 			inline void flush_all()
 			{
+				std::lock_guard lock(m_notifications_lock);
+
 				for (auto& set : m_notification_list)
 				{
 					set->flush();
 				}
+
+				m_notification_list.clear();
 			}
 
 			void register_(descriptor_set* set)
 			{
-				// Rare event, upon creation of a new set tracker.
-				// Check for spurious 'new' events when the aux context is taking over
-				for (const auto& set_ : m_notification_list)
-				{
-					if (set_ == set)
-						return;
-				}
+				std::lock_guard lock(m_notifications_lock);
 
 				m_notification_list.push_back(set);
-				rsx_log.warning("[descriptor_manager::register] Now monitoring %u descriptor sets", m_notification_list.size());
+				// rsx_log.notice("[descriptor_manager::register] Now monitoring %u descriptor sets", m_notification_list.size());
 			}
 
 			void deregister(descriptor_set* set)
 			{
-				for (auto it = m_notification_list.begin(); it != m_notification_list.end(); ++it)
-				{
-					if (*it == set)
-					{
-						*it = m_notification_list.back();
-						m_notification_list.pop_back();
-						break;
-					}
+				std::lock_guard lock(m_notifications_lock);
+
+				m_notification_list.erase_if(FN(x == set));
+				// rsx_log.notice("[descriptor_manager::deregister] Now monitoring %u descriptor sets", m_notification_list.size());
 				}
 
-				rsx_log.warning("[descriptor_manager::deregister] Now monitoring %u descriptor sets", m_notification_list.size());
+			void destroy()
+			{
+				std::lock_guard lock(m_notifications_lock);
+				m_notification_list.clear();
 			}
 
 			dispatch_manager() = default;
 
 		private:
 			rsx::simple_array<descriptor_set*> m_notification_list;
+			std::mutex m_notifications_lock;
 
 			dispatch_manager(const dispatch_manager&) = delete;
 			dispatch_manager& operator=(const dispatch_manager&) = delete;
@@ -68,6 +66,11 @@ namespace vk
 			g_fxo->get<dispatch_manager>().flush_all();
 		}
 
+		void destroy()
+		{
+			g_fxo->get<dispatch_manager>().destroy();
+		}
+
 		VkDescriptorSetLayout create_layout(const rsx::simple_array<VkDescriptorSetLayoutBinding>& bindings)
 		{
 			VkDescriptorSetLayoutCreateInfo infos = {};
@@ -78,8 +81,6 @@ namespace vk
 			VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos = {};
 			rsx::simple_array<VkDescriptorBindingFlags> binding_flags;
 
-			if (g_render_device->get_descriptor_indexing_support())
-			{
 				const auto deferred_mask = g_render_device->get_descriptor_update_after_bind_support();
 				binding_flags.resize(::size32(bindings));
 
@@ -91,18 +92,17 @@ namespace vk
 					}
 					else
 					{
-						binding_flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT;
+					binding_flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
 					}
 				}
 
-				binding_infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT;
+			binding_infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
 				binding_infos.pNext = nullptr;
 				binding_infos.bindingCount = ::size32(binding_flags);
 				binding_infos.pBindingFlags = binding_flags.data();
 
 				infos.pNext = &binding_infos;
-				infos.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT_EXT;
-			}
+			infos.flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 
 			VkDescriptorSetLayout result;
 			CHECK_RESULT(VK_GET_SYMBOL(vkCreateDescriptorSetLayout)(*g_render_device, &infos, nullptr, &result));
@@ -110,17 +110,39 @@ namespace vk
 		}
 	} // namespace descriptors
 
-	void descriptor_pool::create(const vk::render_device& dev, const rsx::simple_array<VkDescriptorPoolSize>& pool_sizes, u32 max_sets)
+	u32 descriptor_pool::autoscaling_config_t::get_pool_size()
 	{
-		ensure(max_sets > 16);
+		if (current_size < min_pool_size)
+		{
+			current_size = min_pool_size;
+			return min_pool_size;
+		}
+
+		if (current_size >= max_pool_size)
+		{
+			current_size = max_pool_size;
+			return max_pool_size;
+		}
+
+		// Try grow
+		if ((increment_steps++) < (increment_min_steps - 1u))
+		{
+			return current_size;
+		}
+
+		increment_steps = 0u;
+		current_size = std::min(current_size * 2u, max_pool_size);
+		return current_size;
+	}
+
+	void descriptor_pool::create(const vk::render_device& dev, const rsx::simple_array<VkDescriptorPoolSize>& pool_sizes, u32 min_sets, u32 max_sets)
+	{
+		m_autoscaling_config.min_pool_size = std::max(min_sets, 16u);
+		m_autoscaling_config.max_pool_size = std::max(min_sets, max_sets);
+
+		ensure(m_autoscaling_config.max_pool_size >= 16u);
 
 		m_create_info_pool_sizes = pool_sizes;
-
-		for (auto& size : m_create_info_pool_sizes)
-		{
-			ensure(size.descriptorCount < 128); // Sanity check. Remove before commit.
-			size.descriptorCount *= max_sets;
-		}
 
 		m_create_info.flags = dev.get_descriptor_update_after_bind_support() ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0;
 		m_create_info.maxSets = max_sets;
@@ -187,7 +209,7 @@ namespace vk
 
 		if (use_cache)
 		{
-			const auto alloc_size = std::min<u32>(m_create_info.maxSets - m_current_subpool_offset, max_cache_size);
+			const auto alloc_size = std::min<u32>(max_sets() - m_current_subpool_offset, max_cache_size);
 			m_allocation_request_cache.resize(alloc_size);
 			for (auto& layout_ : m_allocation_request_cache)
 			{
@@ -244,8 +266,8 @@ namespace vk
 				}
 			}
 
-			VkDescriptorPool subpool = VK_NULL_HANDLE;
-			if (VkResult result = VK_GET_SYMBOL(vkCreateDescriptorPool)(*m_owner, &m_create_info, nullptr, &subpool))
+			const auto [result, subpool] = new_subpool();
+			if (result != VK_SUCCESS)
 			{
 				if (retries-- && (result == VK_ERROR_FRAGMENTATION_EXT))
 				{
@@ -263,6 +285,7 @@ namespace vk
 
 			m_device_subpools.push_back(
 				{.handle = subpool,
+					.size = m_autoscaling_config.current_size,
 					.busy = VK_FALSE});
 
 			m_current_subpool_index = m_device_subpools.size() - 1;
@@ -272,6 +295,40 @@ namespace vk
 	done:
 		m_device_subpools[m_current_subpool_index].busy = VK_TRUE;
 		m_current_pool_handle = m_device_subpools[m_current_subpool_index].handle;
+	}
+
+	std::pair<VkResult, VkDescriptorPool> descriptor_pool::new_subpool()
+	{
+		// Try autoscaling
+		const auto prev_scaling_config = m_autoscaling_config;
+		const u32 set_count = m_autoscaling_config.get_pool_size();
+
+		// Configure request using current pool size
+		auto descriptor_pool_sizes = m_create_info_pool_sizes.map([set_count](const VkDescriptorPoolSize& pool_size_info)
+		{
+			auto ret = pool_size_info;
+			ret.descriptorCount *= set_count;
+			return ret;
+		});
+
+		m_create_info.maxSets = set_count;
+		m_create_info.poolSizeCount = descriptor_pool_sizes.size();
+		m_create_info.pPoolSizes = descriptor_pool_sizes.data();
+
+		VkDescriptorPool subpool = VK_NULL_HANDLE;
+		VkResult result = VK_GET_SYMBOL(vkCreateDescriptorPool)(*m_owner, &m_create_info, nullptr, &subpool);
+
+		if (result != VK_SUCCESS)
+		{
+			// Roll back autoscaling
+			m_autoscaling_config = prev_scaling_config;
+		}
+
+		// Cleanup
+		m_create_info.pPoolSizes = nullptr;
+		m_create_info.poolSizeCount = 0;
+
+		return { result, subpool };
 	}
 
 	descriptor_set::descriptor_set(VkDescriptorSet set)
@@ -298,11 +355,6 @@ namespace vk
 
 			m_in_use = true;
 			m_update_after_bind_mask = g_render_device->get_descriptor_update_after_bind_support();
-
-			if (m_update_after_bind_mask)
-			{
-				g_fxo->get<descriptors::dispatch_manager>().register_(this);
-			}
 		}
 		else if (m_push_type_mask & ~m_update_after_bind_mask)
 		{
@@ -334,11 +386,6 @@ namespace vk
 		}
 
 		return &m_handle;
-	}
-
-	VkDescriptorSet descriptor_set::value() const
-	{
-		return m_handle;
 	}
 
 	void descriptor_set::push(const VkBufferView& buffer_view, VkDescriptorType type, u32 binding)
@@ -413,31 +460,58 @@ namespace vk
 		VK_GET_SYMBOL(vkUpdateDescriptorSets)(*g_render_device, 1, &writer, 0, nullptr);
 	}
 
-	void descriptor_set::push(rsx::simple_array<VkCopyDescriptorSet>& copy_cmd, u32 type_mask)
+	void descriptor_set::push(const rsx::simple_array<VkCopyDescriptorSet>& copy_cmd, u32 type_mask)
 	{
 		m_push_type_mask |= type_mask;
+		m_pending_copies += copy_cmd;
+	}
 
-		if (m_pending_copies.empty()) [[likely]]
+	void descriptor_set::push(const rsx::simple_array<VkWriteDescriptorSet>& write_cmds, u32 type_mask)
+	{
+		m_push_type_mask |= type_mask;
+		m_pending_writes += write_cmds;
+	}
+
+	void descriptor_set::push(const descriptor_set_dynamic_offset_t& offset)
+	{
+		ensure(offset.location >= 0 && offset.location <= 16);
+		while (m_dynamic_offsets.size() < (static_cast<u32>(offset.location) + 1u))
 		{
-			m_pending_copies = std::move(copy_cmd);
+			m_dynamic_offsets.push_back(0);
 		}
-		else
+
+		m_dynamic_offsets[offset.location] = offset.value;
+	}
+
+	void descriptor_set::on_bind()
+	{
+		if (!m_push_type_mask)
 		{
-			const auto old_size = m_pending_copies.size();
-			const auto new_size = copy_cmd.size() + old_size;
-			m_pending_copies.resize(new_size);
-			std::copy(copy_cmd.begin(), copy_cmd.end(), m_pending_copies.begin() + old_size);
+			ensure(m_pending_writes.empty());
+			return;
 		}
+
+		// We have queued writes
+		if ((m_push_type_mask & ~m_update_after_bind_mask) ||
+			(m_pending_writes.size() >= max_cache_size) ||
+			storage_cache_pressure())
+		{
+			flush();
+			return;
+		}
+
+		// Register for async flush
+		ensure(m_update_after_bind_mask);
+		g_fxo->get<descriptors::dispatch_manager>().register_(this);
 	}
 
 	void descriptor_set::bind(const vk::command_buffer& cmd, VkPipelineBindPoint bind_point, VkPipelineLayout layout)
 	{
-		if ((m_push_type_mask & ~m_update_after_bind_mask) || (m_pending_writes.size() >= max_cache_size))
-		{
-			flush();
-		}
+		// Notify
+		on_bind();
 
-		VK_GET_SYMBOL(vkCmdBindDescriptorSets)(cmd, bind_point, layout, 0, 1, &m_handle, 0, nullptr);
+		VkDescriptorSet sets[1] = {m_handle};
+		cmd.bind_descriptor_sets(sets, m_dynamic_offsets, bind_point, layout);
 	}
 
 	void descriptor_set::flush()
@@ -447,9 +521,13 @@ namespace vk
 			return;
 		}
 
+		std::lock_guard lock(m_storage_lock);
+
 		const auto num_writes = ::size32(m_pending_writes);
 		const auto num_copies = ::size32(m_pending_copies);
 		VK_GET_SYMBOL(vkUpdateDescriptorSets)(*g_render_device, num_writes, m_pending_writes.data(), num_copies, m_pending_copies.data());
+
+		m_storage_cache_id++;
 
 		m_push_type_mask = 0;
 		m_pending_writes.clear();

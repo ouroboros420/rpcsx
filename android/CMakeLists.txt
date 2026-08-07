@@ -4,7 +4,7 @@ project("rpcsx-android")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POSITION_INDEPENDENT_CODE on)
 
-set(FFMPEG_VERSION 5.1)
+set(FFMPEG_VERSION 7.1.2)
 set(LLVM_VERSION 20.1.2)
 
 option(USE_ARCH "Specify arch to build" "")
@@ -33,36 +33,59 @@ else()
     set(RPCS3_DOWNLOAD_ARCH "x86-64")
 endif()
 
-if(NOT EXISTS ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz)
-    message(STATUS "Downloading ffmpeg-${FFMPEG_VERSION}")
-    file(DOWNLOAD
-        https://github.com/RPCS3-Android/ffmpeg-android/releases/download/${FFMPEG_VERSION}/ffmpeg-${RPCS3_DOWNLOAD_ARCH}-Android.tar.gz
-        ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
-        SHOW_PROGRESS
-    )
-endif()
-
 set(FFMPEG_PATH "${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}")
 
-make_directory(${FFMPEG_PATH})
-add_custom_command(
-    OUTPUT ${FFMPEG_PATH}/src
-    COMMAND ${CMAKE_COMMAND} -E tar xzf ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
-    DEPENDS ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
-    WORKING_DIRECTORY ${FFMPEG_PATH}
-    COMMENT "Unpacking ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz"
-)
+# FFmpeg 7.1.2 is cross-compiled locally from the 3rdparty/FFmpeg submodule
+# rather than downloaded. The RPCS3-Android prebuilt releases stop at 5.1,
+# whose API upstream's media_utils.cpp no longer targets - pinning to 5.1 meant
+# reverting that file on every merge from upstream. Built once and cached, so
+# this branch is the normal path; the download below is the fallback for a
+# clean tree that has not built FFmpeg yet.
+if(EXISTS "${FFMPEG_PATH}/libavcodec/libavcodec.a")
+    message(STATUS "Using locally built ffmpeg-${FFMPEG_VERSION} at ${FFMPEG_PATH}")
+    set(FFMPEG_PREBUILT_LOCAL on)
 
-add_custom_target(ffmpeg-unpack DEPENDS ${FFMPEG_PATH}/src)
+    # No-op target: dependants below stay valid without an unpack step.
+    add_custom_target(ffmpeg-unpack)
+else()
+    set(FFMPEG_PREBUILT_LOCAL off)
 
-function(import_ffmpeg_library name)
+    if(NOT EXISTS ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz)
+        message(STATUS "Downloading ffmpeg-${FFMPEG_VERSION}")
+        file(DOWNLOAD
+            https://github.com/RPCS3-Android/ffmpeg-android/releases/download/${FFMPEG_VERSION}/ffmpeg-${RPCS3_DOWNLOAD_ARCH}-Android.tar.gz
+            ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
+            SHOW_PROGRESS
+        )
+    endif()
+
+    make_directory(${FFMPEG_PATH})
     add_custom_command(
-        OUTPUT "${FFMPEG_PATH}/lib${name}/lib${name}.a"
-        DEPENDS ffmpeg-unpack
+        OUTPUT ${FFMPEG_PATH}/src
+        COMMAND ${CMAKE_COMMAND} -E tar xzf ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
+        DEPENDS ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz
         WORKING_DIRECTORY ${FFMPEG_PATH}
+        COMMENT "Unpacking ${CMAKE_BINARY_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.gz"
     )
 
-    add_custom_target(ffmpeg-unpack-${name} DEPENDS "${FFMPEG_PATH}/lib${name}/lib${name}.a")
+    add_custom_target(ffmpeg-unpack DEPENDS ${FFMPEG_PATH}/src)
+endif()
+
+function(import_ffmpeg_library name)
+    if(FFMPEG_PREBUILT_LOCAL)
+        # The .a files already exist; no rule may claim them as an OUTPUT or
+        # the generator reports a missing rule for an up-to-date file.
+        add_custom_target(ffmpeg-unpack-${name})
+    else()
+        add_custom_command(
+            OUTPUT "${FFMPEG_PATH}/lib${name}/lib${name}.a"
+            DEPENDS ffmpeg-unpack
+            WORKING_DIRECTORY ${FFMPEG_PATH}
+        )
+
+        add_custom_target(ffmpeg-unpack-${name} DEPENDS "${FFMPEG_PATH}/lib${name}/lib${name}.a")
+    endif()
+
     add_library(ffmpeg::${name} STATIC IMPORTED GLOBAL)
     set_property(TARGET ffmpeg::${name} PROPERTY IMPORTED_LOCATION "${FFMPEG_PATH}/lib${name}/lib${name}.a")
     set_property(TARGET ffmpeg::${name} PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_PATH}" "${FFMPEG_PATH}/src")
@@ -96,7 +119,14 @@ set(USE_DISCORD_RPC off)
 set(USE_SYSTEM_OPENCV off)
 set(USE_SYSTEM_FFMPEG off)
 set(USE_FAUDIO off)
+# USE_SDL2 is a stale name nothing reads any more - the option is USE_SDL, and
+# v0.0.41 flipped its upstream default OFF->ON. The root CMakeLists only forces
+# it off inside `if(NOT WITH_PS3)`, which Android never enters (WITH_PS3 is on
+# above), so without this the Android build starts compiling SDL3 and enabling
+# Input/sdl_pad_handler.cpp - code that has always been dead here.
 set(USE_SDL2 off)
+set(USE_SDL off)
+set(USE_SYSTEM_SDL off)
 set(BUILD_LLVM on)
 set(STATIC_LINK_LLVM on)
 set(DISABLE_LTO off)

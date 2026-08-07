@@ -41,7 +41,7 @@
 	ignore = dirty
 [submodule "rpcs3/3rdparty/hidapi"]
 	path = 3rdparty/hidapi/hidapi
-	url = ../../RPCS3/hidapi.git
+	url = ../../libusb/hidapi.git
 	branch = master
 	ignore = dirty
 [submodule "rpcs3/3rdparty/pugixml"]
@@ -72,11 +72,7 @@
 	path = 3rdparty/wolfssl/wolfssl
 	url = ../../wolfSSL/wolfssl.git
 	ignore = dirty
-[submodule "rpcs3/3rdparty/flatbuffers"]
-	path = 3rdparty/flatbuffers
-	url = ../../google/flatbuffers.git
-	ignore = dirty
-[submodule "rpcs3/3rdparty/cubeb/cubeb"]
+[submodule "3rdparty/cubeb/cubeb"]
 	path = 3rdparty/cubeb/cubeb
 	url = ../../mozilla/cubeb.git
 	ignore = dirty
@@ -126,7 +122,11 @@
 	ignore = dirty
 [submodule "rpcs3/3rdparty/GPUOpen/VulkanMemoryAllocator"]
 	path = 3rdparty/GPUOpen/VulkanMemoryAllocator
-	url = ../../Megamouse/VulkanMemoryAllocator.git
+	url = ../../GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+	ignore = dirty
+[submodule "3rdparty/feralinteractive/feralinteractive"]
+	path = 3rdparty/feralinteractive/feralinteractive
+	url = ../../FeralInteractive/gamemode.git
 	ignore = dirty
 [submodule "3rdparty/Vulkan-Headers"]
 	path = 3rdparty/Vulkan-Headers
@@ -140,3 +140,7 @@
 [submodule "3rdparty/glfw"]
 	path = 3rdparty/glfw
 	url = ../../glfw/glfw.git
+[submodule "3rdparty/protobuf/protobuf"]
+	path = 3rdparty/protobuf/protobuf
+	url = ../../protocolbuffers/protobuf.git
+	ignore = dirty

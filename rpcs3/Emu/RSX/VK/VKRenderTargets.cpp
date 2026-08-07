@@ -93,7 +93,7 @@ namespace vk
 
 			// Drop MSAA resolve/unresolve caches. Only trigger when a hard sync is guaranteed to follow else it will cause even more problems!
 			// 2-pass to ensure resources are available where they are most needed
-			auto relieve_memory_pressure = [&](auto& list, const utils::address_range& range)
+			auto relieve_memory_pressure = [&](auto& list, const utils::address_range32& range)
 			{
 				for (auto it = list.begin_range(range); it != list.end(); ++it)
 				{
@@ -183,7 +183,7 @@ namespace vk
 			});
 
 		const u64 last_finished_frame = vk::get_last_completed_frame_id();
-		invalidated_resources.remove_if([&](std::unique_ptr<vk::render_target>& rtt)
+		for (auto& rtt : invalidated_resources)
 			{
 				ensure(rtt->frame_tag != 0);
 
@@ -191,13 +191,13 @@ namespace vk
 				{
 					// Actively in use, likely for a reading pass.
 				    // Call handle_memory_pressure before calling this method.
-					return false;
+				continue;
 				}
 
 				if (rtt->frame_tag >= last_finished_frame)
 				{
 					// RTT itself still in use by the frame.
-					return false;
+				continue;
 				}
 
 				if (!rtt->old_contents.empty())
@@ -212,21 +212,34 @@ namespace vk
 					vk::get_resource_manager()->dispose(rtt->resolve_surface);
 				}
 
+			int threshold = 8;
 				switch (memory_pressure)
 				{
 				case rsx::problem_severity::low:
-					return (rtt->unused_check_count() >= 2);
+				threshold = 2;
+				break;
 				case rsx::problem_severity::moderate:
-					return (rtt->unused_check_count() >= 1);
+				threshold = 1;
+				break;
 				case rsx::problem_severity::severe:
 				case rsx::problem_severity::fatal:
 					// We're almost dead anyway. Remove forcefully.
-					vk::get_resource_manager()->dispose(rtt);
-					return true;
+				threshold = -1;
+				break;
 				default:
 					fmt::throw_exception("Unreachable");
 				}
-			});
+
+			if (threshold < 0 || (rtt->unused_check_count() >= threshold))
+			{
+				vk::get_resource_manager()->dispose(rtt);
+				ensure(!rtt);
+			}
+		}
+
+		invalidated_resources.remove_if(
+			[](auto& rtt) { return !rtt; }
+		);
 	}
 
 	bool surface_cache::is_overallocated()
@@ -254,7 +267,7 @@ namespace vk
 		std::vector<render_target*> sorted_list;
 		sorted_list.reserve(1024);
 
-		auto process_list_function = [&](auto& list, const utils::address_range& range)
+		auto process_list_function = [&](auto& list, const utils::address_range32& range)
 		{
 			for (auto it = list.begin_range(range); it != list.end(); ++it)
 			{
@@ -708,6 +721,7 @@ namespace vk
 				subres.width_in_block,
 				subres.height_in_block);
 			subres.data = std::span(ext_data);
+			upload_flags |= source_is_userptr;
 #else
 			const auto [scratch_buf, linear_data_scratch_offset] = vk::detile_memory_block(cmd, tiled_region, range, subres.width_in_block, subres.height_in_block, get_bpp());
 
@@ -719,7 +733,7 @@ namespace vk
 #endif
 		}
 
-		if (g_cfg.video.resolution_scale_percent == 100 && spp == 1) [[likely]]
+		if (resolution_scaling_config.scale_percent == 100 && spp == 1) [[likely]]
 		{
 			push_layout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 			vk::upload_image(cmd, this, {subres}, get_gcm_format(), is_swizzled, 1, aspect(), upload_heap, heap_align, upload_flags);
@@ -826,7 +840,7 @@ namespace vk
 	bool render_target::matches_dimensions(u16 _width, u16 _height) const
 	{
 		// Use forward scaling to account for rounding and clamping errors
-		const auto [scaled_w, scaled_h] = rsx::apply_resolution_scale<true>(_width, _height);
+		const auto [scaled_w, scaled_h] = rsx::apply_resolution_scale<true>(resolution_scaling_config, _width, _height);
 		return (scaled_w == width()) && (scaled_h == height());
 	}
 

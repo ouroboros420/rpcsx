@@ -106,8 +106,7 @@ std::string CgBinaryDisasm::GetCondDisAsm() const
 		swizzle = ".z";
 	else if (swizzle == ".wwww"sv)
 		swizzle = ".w";
-
-	if (swizzle == ".xyzw"sv)
+	else if (swizzle == ".xyzw"sv)
 	{
 		swizzle.clear();
 	}
@@ -267,7 +266,7 @@ std::string CgBinaryDisasm::GetSrcDisAsm(T src)
 void CgBinaryDisasm::TaskFP()
 {
 	m_size = 0;
-	u32* data = reinterpret_cast<u32*>(&m_buffer[m_offset]);
+	const u32* data = reinterpret_cast<const u32*>(&m_buffer[m_offset]);
 	ensure((m_buffer_size - m_offset) % sizeof(u32) == 0);
 
 	enum
@@ -311,7 +310,7 @@ void CgBinaryDisasm::TaskFP()
 		src2.HEX = GetData(data[3]);
 
 		m_step = 4 * sizeof(u32);
-		m_opcode = dst.opcode | (src1.opcode_is_branch << 6);
+		m_opcode = dst.opcode | (src1.opcode_hi << 6);
 
 		auto SCT = [&]()
 		{

@@ -830,13 +830,8 @@ void rec_info::stop_video_provider(bool flush)
 {
 	cellRec.notice("Stopping video provider.");
 
-	if (video_provider_thread)
-	{
-		auto& thread = *video_provider_thread;
-		thread = thread_state::aborting;
-		thread();
+	// Join thread
 		video_provider_thread.reset();
-	}
 
 	// Flush the ringbuffer if necessary.
 	// This should only happen if the video sink is not the encoder itself.
@@ -1298,11 +1293,11 @@ error_code cellRecOpen(vm::cptr<char> pDirName, vm::cptr<char> pFileName, vm::cp
 	rec.encoder->set_path(vfs::get(rec.param.filename));
 	rec.encoder->set_framerate(rec.fps);
 	rec.encoder->set_video_bitrate(rec.video_bps);
-	rec.encoder->set_video_codec(rec.video_codec_id);
+	rec.encoder->set_video_codec(rec.video_codec_id, "");
 	rec.encoder->set_sample_rate(rec.sample_rate);
 	rec.encoder->set_audio_channels(rec.channels);
 	rec.encoder->set_audio_bitrate(rec.audio_bps);
-	rec.encoder->set_audio_codec(rec.audio_codec_id);
+	rec.encoder->set_audio_codec(rec.audio_codec_id, "");
 	rec.encoder->set_output_format(rec.output_format);
 
 	sysutil_register_cb([&rec](ppu_thread& ppu) -> s32

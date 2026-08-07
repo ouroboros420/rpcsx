@@ -35,49 +35,49 @@ struct SurMixerConfig
 {
 	std::mutex mutex;
 
-	u32 audio_port;
-	s32 priority;
-	u32 ch_strips_1;
-	u32 ch_strips_2;
-	u32 ch_strips_6;
-	u32 ch_strips_8;
+	u32 audio_port = 0;
+	s32 priority = 0;
+	u32 ch_strips_1 = 0;
+	u32 ch_strips_2 = 0;
+	u32 ch_strips_6 = 0;
+	u32 ch_strips_8 = 0;
 
-	vm::ptr<CellSurMixerNotifyCallbackFunction> cb;
-	vm::ptr<void> cb_arg;
+	vm::ptr<CellSurMixerNotifyCallbackFunction> cb {};
+	vm::ptr<void> cb_arg {};
 
-	f32 mixdata[8 * 256];
-	u64 mixcount;
+	f32 mixdata[8 * 256] {};
+	u64 mixcount = 0;
 };
 
 struct SSPlayer
 {
-	bool m_created;   // SSPlayerCreate/Remove
-	bool m_connected; // AANConnect/Disconnect
-	bool m_active;    // SSPlayerPlay/Stop
-	u32 m_channels;   // 1 or 2
-	u32 m_addr;
-	u32 m_samples;
-	u32 m_loop_start;
-	u32 m_loop_mode;
-	u32 m_position;
-	float m_level;
-	float m_speed;
-	float m_x;
-	float m_y;
-	float m_z;
+	bool m_created = false; // SSPlayerCreate/Remove
+	bool m_connected = false; // AANConnect/Disconnect
+	bool m_active = false; // SSPlayerPlay/Stop
+	u32 m_channels = 0; // 1 or 2
+	u32 m_addr = 0;
+	u32 m_samples = 0;
+	u32 m_loop_start = 0;
+	u32 m_loop_mode = 0;
+	u32 m_position = 0;
+	f32 m_level = 0.0f;
+	f32 m_speed = 0.0f;
+	f32 m_x = 0.0f;
+	f32 m_y = 0.0f;
+	f32 m_z = 0.0f;
 };
 
 // TODO: use fxm
-SurMixerConfig g_surmx;
+SurMixerConfig g_surmx {};
 
 std::vector<SSPlayer> g_ssp;
 
-s32 cellAANAddData(u32 aan_handle, u32 aan_port, u32 offset, vm::ptr<float> addr, u32 samples)
+s32 cellAANAddData(u32 aan_handle, u32 aan_port, u32 offset, vm::ptr<f32> addr, u32 samples)
 {
 	libmixer.trace("cellAANAddData(aan_handle=0x%x, aan_port=0x%x, offset=0x%x, addr=*0x%x, samples=%d)", aan_handle, aan_port, offset, addr, samples);
 
 	u32 type = aan_port >> 16;
-	u32 port = aan_port & 0xffff;
+	const u32 port = aan_port & 0xffff;
 
 	switch (type)
 	{
@@ -115,7 +115,7 @@ s32 cellAANAddData(u32 aan_handle, u32 aan_port, u32 offset, vm::ptr<float> addr
 		// mono upmixing
 		for (u32 i = 0; i < samples; i++)
 		{
-			const float center = addr[i];
+			const f32 center = addr[i];
 			g_surmx.mixdata[i * 8 + 0] += center;
 			g_surmx.mixdata[i * 8 + 1] += center;
 		}
@@ -125,8 +125,8 @@ s32 cellAANAddData(u32 aan_handle, u32 aan_port, u32 offset, vm::ptr<float> addr
 		// stereo upmixing
 		for (u32 i = 0; i < samples; i++)
 		{
-			const float left = addr[i * 2 + 0];
-			const float right = addr[i * 2 + 1];
+			const f32 left = addr[i * 2 + 0];
+			const f32 right = addr[i * 2 + 1];
 			g_surmx.mixdata[i * 8 + 0] += left;
 			g_surmx.mixdata[i * 8 + 1] += right;
 		}
@@ -136,12 +136,12 @@ s32 cellAANAddData(u32 aan_handle, u32 aan_port, u32 offset, vm::ptr<float> addr
 		// 5.1 upmixing
 		for (u32 i = 0; i < samples; i++)
 		{
-			const float left = addr[i * 6 + 0];
-			const float right = addr[i * 6 + 1];
-			const float center = addr[i * 6 + 2];
-			const float low_freq = addr[i * 6 + 3];
-			const float rear_left = addr[i * 6 + 4];
-			const float rear_right = addr[i * 6 + 5];
+			const f32 left = addr[i * 6 + 0];
+			const f32 right = addr[i * 6 + 1];
+			const f32 center = addr[i * 6 + 2];
+			const f32 low_freq = addr[i * 6 + 3];
+			const f32 rear_left = addr[i * 6 + 4];
+			const f32 rear_right = addr[i * 6 + 5];
 			g_surmx.mixdata[i * 8 + 0] += left;
 			g_surmx.mixdata[i * 8 + 1] += right;
 			g_surmx.mixdata[i * 8 + 2] += center;
@@ -210,13 +210,13 @@ s32 cellSSPlayerCreate(vm::ptr<u32> handle, vm::ptr<CellSSPlayerConfig> config)
 
 	std::lock_guard lock(g_surmx.mutex);
 
-	SSPlayer p;
+	SSPlayer p {};
 	p.m_created = true;
 	p.m_connected = false;
 	p.m_active = false;
 	p.m_channels = config->channels;
 
-	g_ssp.push_back(p);
+	g_ssp.push_back(std::move(p));
 	*handle = ::size32(g_ssp) - 1;
 	return CELL_OK;
 }
@@ -371,7 +371,7 @@ struct surmixer_thread : ppu_thread
 			{
 				// u64 stamp0 = get_guest_system_time();
 
-				memset(g_surmx.mixdata, 0, sizeof(g_surmx.mixdata));
+				std::memset(g_surmx.mixdata, 0, sizeof(g_surmx.mixdata));
 				if (g_surmx.cb)
 				{
 					g_surmx.cb(*this, g_surmx.cb_arg, static_cast<u32>(g_surmx.mixcount), 256);
@@ -461,7 +461,7 @@ struct surmixer_thread : ppu_thread
 
 				// u64 stamp2 = get_guest_system_time();
 
-				auto buf = vm::_ptr<f32>(port.addr.addr() + (g_surmx.mixcount % port.num_blocks) * port.num_channels * AUDIO_BUFFER_SAMPLES * sizeof(float));
+				auto buf = vm::_ptr<f32>(port.addr.addr() + (g_surmx.mixcount % port.num_blocks) * port.num_channels * AUDIO_BUFFER_SAMPLES * sizeof(f32));
 
 				for (auto& mixdata : g_surmx.mixdata)
 				{
@@ -504,7 +504,7 @@ s32 cellSurMixerCreate(vm::cptr<CellSurMixerConfig> config)
 	port->num_channels = 8;
 	port->num_blocks = 16;
 	port->attr = 0;
-	port->size = port->num_channels * port->num_blocks * AUDIO_BUFFER_SAMPLES * sizeof(float);
+	port->size = port->num_channels * port->num_blocks * AUDIO_BUFFER_SAMPLES * sizeof(f32);
 	port->level = 1.0f;
 	port->level_set.store({1.0f, 0.0f});
 
@@ -581,7 +581,7 @@ s32 cellSurMixerStart()
 	return CELL_OK;
 }
 
-s32 cellSurMixerSetParameter(u32 param, float value)
+s32 cellSurMixerSetParameter(u32 param, f32 value)
 {
 	libmixer.todo("cellSurMixerSetParameter(param=0x%x, value=%f)", param, value);
 	return CELL_OK;
@@ -603,7 +603,7 @@ s32 cellSurMixerFinalize()
 	return CELL_OK;
 }
 
-s32 cellSurMixerSurBusAddData(u32 busNo, u32 offset, vm::ptr<float> addr, u32 samples)
+s32 cellSurMixerSurBusAddData(u32 busNo, u32 offset, vm::ptr<f32> addr, u32 samples)
 {
 	if (busNo < 8 && samples == 256 && offset == 0)
 	{

@@ -43,6 +43,11 @@ namespace np
 			m_allocs.clear();
 		}
 
+		std::tuple<u32, u32, u32> get_stats() const
+		{
+			return {m_size, m_size - m_avail, m_max_usage};
+		}
+
 		u32 allocate(u32 size)
 		{
 			std::lock_guard lock(m_mutex);
@@ -63,7 +68,7 @@ namespace np
 			u32 last_free = 0;
 			bool found_space = false;
 
-			for (auto& a : m_allocs)
+			for (const auto& a : m_allocs)
 			{
 				if ((a.first - last_free) >= alloc_size)
 				{
@@ -85,6 +90,12 @@ namespace np
 
 			m_allocs.emplace(last_free, alloc_size);
 			m_avail -= alloc_size;
+
+			const u32 usage = m_size - m_avail;
+			if (usage > m_max_usage)
+			{
+				m_max_usage = usage;
+			}
 
 			memset((static_cast<u8*>(m_pool.get_ptr())) + last_free, 0, alloc_size);
 
@@ -125,6 +136,7 @@ namespace np
 		vm::ptr<void> m_pool{};
 		u32 m_size = 0;
 		u32 m_avail = 0;
+		u32 m_max_usage = 0;
 		std::map<u32, u32> m_allocs{}; // offset/size
 	};
 } // namespace np

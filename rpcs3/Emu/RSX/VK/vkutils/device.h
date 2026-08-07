@@ -30,6 +30,8 @@ namespace vk
 
 	struct memory_type_mapping
 	{
+		std::vector<memory_heap_info> heaps;
+
 		memory_type_info host_visible_coherent;
 		memory_type_info device_local;
 		memory_type_info device_bar;
@@ -37,8 +39,6 @@ namespace vk
 		u64 device_local_total_bytes;
 		u64 host_visible_total_bytes;
 		u64 device_bar_total_bytes;
-
-		PFN_vkGetMemoryHostPointerPropertiesEXT _vkGetMemoryHostPointerPropertiesEXT;
 	};
 
 	struct descriptor_indexing_features
@@ -67,6 +67,14 @@ namespace vk
 		}
 	};
 
+	struct multidraw_features
+	{
+		bool supported;
+		u32 max_batch_size;
+
+		operator bool() const { return supported; }
+	};
+
 	class physical_device
 	{
 		VkInstance parent = VK_NULL_HANDLE;
@@ -85,6 +93,20 @@ namespace vk
 
 		custom_border_color_features custom_border_color_support{};
 
+		// VK_EXT_shader_uniform_buffer_unsized_array. Upstream's vertex/fragment
+		// programs declare runtime-sized arrays inside uniform blocks, which needs
+		// this extension. Adreno does not have it.
+		bool unsized_array_support = false;
+
+		// Largest range bindable as a uniform buffer. When unsized_array_support is
+		// false the shader generators need this to emit a concrete array bound: the
+		// data heaps bind a window of exactly this size and the shader indexes it
+		// as (dynamic_offset / element_size), so (this / element_size) IS the
+		// highest index a shader can legally reach - an exact bound, not a guess.
+		u32 max_ubo_range = 16384;
+
+		multidraw_features multidraw_support{};
+
 		struct
 		{
 			bool barycentric_coords = false;
@@ -92,20 +114,21 @@ namespace vk
 			bool debug_utils = false;
 			bool external_memory_host = false;
 			bool framebuffer_loops = false;
-			bool sampler_mirror_clamped = false;
 			bool shader_stencil_export = false;
 			bool surface_capabilities_2 = false;
 			bool synchronization_2 = false;
 			bool unrestricted_depth_range = false;
 			bool extended_device_fault = false;
 			bool texture_compression_bc = false;
+			bool portability = false;
 		} optional_features_support;
 
 		friend class render_device;
 
 	private:
 		void get_physical_device_features(bool allow_extensions);
-		void get_physical_device_properties(bool allow_extensions);
+		void get_physical_device_properties_0(bool allow_extensions);
+		void get_physical_device_properties_1(bool allow_extensions);
 
 	public:
 		physical_device() = default;
@@ -130,6 +153,8 @@ namespace vk
 
 		operator VkPhysicalDevice() const;
 		operator VkInstance() const;
+
+		bool is_integrated_gpu() const { return props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
 	};
 
 	class render_device
@@ -137,7 +162,6 @@ namespace vk
 		physical_device* pgpu = nullptr;
 		memory_type_mapping memory_map{};
 		gpu_formats_support m_formats_support{};
-		pipeline_binding_table m_pipeline_binding_table{};
 		std::unique_ptr<mem_allocator_base> m_allocator;
 		VkDevice dev = VK_NULL_HANDLE;
 
@@ -152,18 +176,6 @@ namespace vk
 		void dump_debug_info(
 			const std::vector<const char*>& requested_extensions,
 			const VkPhysicalDeviceFeatures& requested_features) const;
-
-	public:
-		// Exported device endpoints
-		PFN_vkCmdBeginConditionalRenderingEXT _vkCmdBeginConditionalRenderingEXT = nullptr;
-		PFN_vkCmdEndConditionalRenderingEXT _vkCmdEndConditionalRenderingEXT = nullptr;
-		PFN_vkSetDebugUtilsObjectNameEXT _vkSetDebugUtilsObjectNameEXT = nullptr;
-		PFN_vkQueueInsertDebugUtilsLabelEXT _vkQueueInsertDebugUtilsLabelEXT = nullptr;
-		PFN_vkCmdInsertDebugUtilsLabelEXT _vkCmdInsertDebugUtilsLabelEXT = nullptr;
-		PFN_vkCmdSetEvent2KHR _vkCmdSetEvent2KHR = nullptr;
-		PFN_vkCmdWaitEvents2KHR _vkCmdWaitEvents2KHR = nullptr;
-		PFN_vkCmdPipelineBarrier2KHR _vkCmdPipelineBarrier2KHR = nullptr;
-		PFN_vkGetDeviceFaultInfoEXT _vkGetDeviceFaultInfoEXT = nullptr;
 
 	public:
 		render_device() = default;
@@ -189,10 +201,6 @@ namespace vk
 		{
 			return m_formats_support;
 		}
-		const pipeline_binding_table& get_pipeline_binding_table() const
-		{
-			return m_pipeline_binding_table;
-		}
 		const gpu_shader_types_support& get_shader_types_support() const
 		{
 			return pgpu->shader_types_support;
@@ -200,6 +208,25 @@ namespace vk
 		const custom_border_color_features& get_custom_border_color_support() const
 		{
 			return pgpu->custom_border_color_support;
+		}
+		const multidraw_features get_multidraw_support() const
+		{
+			return pgpu->multidraw_support;
+		}
+
+		bool get_unsized_array_support() const
+		{
+			return pgpu->unsized_array_support;
+		}
+
+		// Array bound to emit for a runtime-sized uniform-block array on a device
+		// that cannot do unsized ones. The heaps bind a window of
+		// maxUniformBufferRange and the shader indexes it as
+		// (dynamic_offset / element_size), so this is exactly the highest index
+		// reachable - not an estimate.
+		u32 ubo_array_bound(u32 element_size) const
+		{
+			return std::max<u32>(1u, pgpu->max_ubo_range / element_size);
 		}
 
 		bool get_shader_stencil_export_support() const
@@ -241,10 +268,6 @@ namespace vk
 		bool get_debug_utils_support() const
 		{
 			return g_cfg.video.renderdoc_compatiblity && pgpu->optional_features_support.debug_utils;
-		}
-		bool get_descriptor_indexing_support() const
-		{
-			return pgpu->descriptor_indexing_support;
 		}
 		bool get_framebuffer_loops_support() const
 		{
@@ -314,7 +337,6 @@ namespace vk
 
 	memory_type_mapping get_memory_mapping(const physical_device& dev);
 	gpu_formats_support get_optimal_tiling_supported_formats(const physical_device& dev);
-	pipeline_binding_table get_pipeline_binding_table(const physical_device& dev);
 
 	extern const render_device* g_render_device;
 } // namespace vk

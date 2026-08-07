@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Emu/Cell/PPUModule.h"
+#include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "Emu/VFS.h"
 #include "cellSysutil.h"
@@ -72,7 +73,7 @@ struct photo_export
 	atomic_t<s32> progress = 0; // 0x0-0xFFFF for 0-100%
 };
 
-bool check_photo_path(const std::string& file_path)
+bool check_photo_path(std::string_view file_path)
 {
 	if (file_path.size() >= CELL_PHOTO_EXPORT_UTIL_HDD_PATH_MAX)
 	{
@@ -106,30 +107,16 @@ bool check_photo_path(const std::string& file_path)
 	return true;
 }
 
-std::string get_available_photo_path(const std::string& filename)
+std::string get_available_photo_path(std::string_view filename)
 {
-	const std::string photo_dir = "/dev_hdd0/photo/";
-	std::string dst_path = vfs::get(photo_dir + filename);
-
-	// Do not overwrite existing files. Add a suffix instead.
-	for (u32 i = 0; fs::exists(dst_path); i++)
+	std::string_view extension = ".png";
+	if (const auto extension_start = filename.find_last_of('.');
+		extension_start != umax)
 	{
-		const std::string suffix = fmt::format("_%d", i);
-		std::string new_filename = filename;
-
-		if (const usz pos = new_filename.find_last_of('.'); pos != std::string::npos)
-		{
-			new_filename.insert(pos, suffix);
-		}
-		else
-		{
-			new_filename.append(suffix);
+		extension = filename.substr(extension_start);
 		}
 
-		dst_path = vfs::get(photo_dir + new_filename);
-	}
-
-	return dst_path;
+	return Emu.GetCallbacks().get_photo_path(fmt::format("%s%s", Emu.GetTitle(), extension));
 }
 
 error_code cellPhotoInitialize(s32 version, u32 container, vm::ptr<CellPhotoExportUtilFinishCallback> funcFinish, vm::ptr<void> userdata)

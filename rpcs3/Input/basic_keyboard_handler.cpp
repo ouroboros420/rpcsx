@@ -7,6 +7,11 @@
 
 #ifdef _WIN32
 #include "windows.h"
+#elif __linux__
+#include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-x11.h>
+#include <private/qxkbcommon_p.h>
+#include <QGuiApplication>
 #endif
 
 LOG_CHANNEL(input_log, "Input");
@@ -37,14 +42,14 @@ void basic_keyboard_handler::Init(keyboard_consumer& consumer, const u32 max_con
 
 	info.max_connect = max_connect;
 	info.now_connect = std::min(::size32(keyboards), max_connect);
-	info.info = input::g_keyboards_intercepted ? CELL_KB_INFO_INTERCEPTED : 0; // Ownership of keyboard data: 0=Application, 1=System
-	info.status[0] = CELL_KB_STATUS_CONNECTED;                                 // (TODO: Support for more keyboards)
+	info.info        = input::g_keyboards_intercepted ? CELL_KB_INFO_INTERCEPTED : 0; // Ownership of keyboard data: 0=Application, 1=System
+	info.status[0]   = CELL_KB_STATUS_CONNECTED; // (TODO: Support for more keyboards)
 }
 
 /* Sets the target window for the event handler, and also installs an event filter on the target. */
 void basic_keyboard_handler::SetTargetWindow(QWindow* target)
 {
-	if (target != nullptr)
+	if (target)
 	{
 		m_target = target;
 		target->installEventFilter(this);
@@ -119,7 +124,7 @@ void basic_keyboard_handler::keyPressEvent(QKeyEvent* keyEvent)
 		return;
 	}
 
-	const int key = getUnmodifiedKey(keyEvent);
+	const int key = get_unmodified_key(keyEvent);
 
 	if (key < 0 || !HandleKey(static_cast<u32>(key), keyEvent->nativeScanCode(), true, keyEvent->isAutoRepeat(), keyEvent->text().toStdU32String()))
 	{
@@ -140,7 +145,7 @@ void basic_keyboard_handler::keyReleaseEvent(QKeyEvent* keyEvent)
 		return;
 	}
 
-	const int key = getUnmodifiedKey(keyEvent);
+	const int key = get_unmodified_key(keyEvent);
 
 	if (key < 0 || !HandleKey(static_cast<u32>(key), keyEvent->nativeScanCode(), false, keyEvent->isAutoRepeat(), keyEvent->text().toStdU32String()))
 	{
@@ -149,8 +154,10 @@ void basic_keyboard_handler::keyReleaseEvent(QKeyEvent* keyEvent)
 }
 
 // This should get the actual unmodified key without getting too crazy.
-// key() only shows the modifiers and the modified key (e.g. no easy way of knowing that - was pressed in 'SHIFT+-' in order to get _)
-s32 basic_keyboard_handler::getUnmodifiedKey(QKeyEvent* keyEvent)
+// key() only shows the modifiers and the modified key.
+// e.g. 'Shift+1' may result in Qt::Key_Exclam, so we lose the information that Qt::Key_1 was pressed.
+// We want to find the actual physical key that was pressed (and return Qt::Key_1 in this example).
+s32 basic_keyboard_handler::get_unmodified_key(QKeyEvent* keyEvent)
 {
 	if (!keyEvent) [[unlikely]]
 	{
@@ -166,9 +173,9 @@ s32 basic_keyboard_handler::getUnmodifiedKey(QKeyEvent* keyEvent)
 
 	u32 raw_key = static_cast<u32>(key);
 
-#ifdef _WIN32
 	if (keyEvent->modifiers() != Qt::NoModifier && !keyEvent->text().isEmpty())
 	{
+#ifdef _WIN32
 		u32 mapped_key = static_cast<u32>(MapVirtualKeyA(static_cast<UINT>(keyEvent->nativeVirtualKey()), MAPVK_VK_TO_CHAR));
 
 		if (raw_key != mapped_key)
@@ -179,8 +186,72 @@ s32 basic_keyboard_handler::getUnmodifiedKey(QKeyEvent* keyEvent)
 			}
 			raw_key = mapped_key;
 		}
-	}
+#elif __linux__
+		class kb_mapper
+		{
+		public:
+			kb_mapper()
+			{
+				m_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+			}
+
+			~kb_mapper()
+			{
+				if (m_ctx) xkb_context_unref(m_ctx);
+			}
+
+			s32 get_unmodified_key(u32 qt_native_scan_code)
+			{
+				if (!m_ctx) return -1;
+
+				auto* connection = get_connection();
+				if (!connection) return -1;
+
+				const int device_id = xkb_x11_get_core_keyboard_device_id(connection);
+
+				xkb_keymap* keymap = xkb_x11_keymap_new_from_device(m_ctx, connection, device_id, XKB_KEYMAP_COMPILE_NO_FLAGS);
+				if (!keymap) return -1;
+
+				xkb_state* state = xkb_x11_state_new_from_device(keymap, connection, device_id);
+				if (!state)
+				{
+					xkb_keymap_unref(keymap);
+					return -1;
+				}
+
+				const xkb_keycode_t code = static_cast<xkb_keycode_t>(qt_native_scan_code);
+				const xkb_layout_index_t layout = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
+				const xkb_keysym_t* syms = nullptr;
+				const int count = xkb_keymap_key_get_syms_by_level(keymap, code, layout, 0, &syms);
+
+				const auto new_key = (syms && count > 0) ? QXkbCommon::keysymToQtKey(syms[0], Qt::NoModifier, nullptr, code) : -1;
+
+				xkb_state_unref(state);
+				xkb_keymap_unref(keymap);
+
+				return new_key;
+			}
+
+		private:
+			xcb_connection_t* get_connection()
+			{
+				if (!qGuiApp) return nullptr;
+				auto* native_interface = qGuiApp->nativeInterface<QNativeInterface::QX11Application>();
+				return native_interface ? native_interface->connection() : nullptr;
+			}
+
+			xkb_context* m_ctx = nullptr;
+		};
+
+		static kb_mapper mapper = kb_mapper();
+		if (const int res = mapper.get_unmodified_key(keyEvent->nativeScanCode()); res > 0)
+		{
+			raw_key = res;
+		}
+#elif __APPLE__
+		// TODO
 #endif
+	}
 
 	return static_cast<s32>(raw_key);
 }
@@ -194,19 +265,19 @@ void basic_keyboard_handler::LoadSettings(Keyboard& keyboard)
 	buttons.emplace_back(Qt::Key_Shift, CELL_KB_MKEY_L_SHIFT);
 	buttons.emplace_back(Qt::Key_Alt, CELL_KB_MKEY_L_ALT);
 	buttons.emplace_back(Qt::Key_Meta, CELL_KB_MKEY_L_WIN);
-	// buttons.emplace_back(, CELL_KB_MKEY_R_CTRL);  // There is no way to know if it's left or right in Qt at the moment
-	// buttons.emplace_back(, CELL_KB_MKEY_R_SHIFT); // There is no way to know if it's left or right in Qt at the moment
-	// buttons.emplace_back(, CELL_KB_MKEY_R_ALT);   // There is no way to know if it's left or right in Qt at the moment
-	// buttons.emplace_back(, CELL_KB_MKEY_R_WIN);   // There is no way to know if it's left or right in Qt at the moment
+	//buttons.emplace_back(, CELL_KB_MKEY_R_CTRL);  // There is no way to know if it's left or right in Qt at the moment
+	//buttons.emplace_back(, CELL_KB_MKEY_R_SHIFT); // There is no way to know if it's left or right in Qt at the moment
+	//buttons.emplace_back(, CELL_KB_MKEY_R_ALT);   // There is no way to know if it's left or right in Qt at the moment
+	//buttons.emplace_back(, CELL_KB_MKEY_R_WIN);   // There is no way to know if it's left or right in Qt at the moment
 
 	buttons.emplace_back(Qt::Key_Super_L, CELL_KB_MKEY_L_WIN); // The super keys are supposed to be the windows keys, but they trigger the meta key instead. Let's assign the windows keys to both.
 	buttons.emplace_back(Qt::Key_Super_R, CELL_KB_MKEY_R_WIN); // The super keys are supposed to be the windows keys, but they trigger the meta key instead. Let's assign the windows keys to both.
 
 	// CELL_KB_RAWDAT
-	// buttons.emplace_back(, CELL_KEYC_NO_EVENT); // Redundant, listed for completeness
-	// buttons.emplace_back(, CELL_KEYC_E_ROLLOVER);
-	// buttons.emplace_back(, CELL_KEYC_E_POSTFAIL);
-	// buttons.emplace_back(, CELL_KEYC_E_UNDEF);
+	//buttons.emplace_back(, CELL_KEYC_NO_EVENT); // Redundant, listed for completeness
+	//buttons.emplace_back(, CELL_KEYC_E_ROLLOVER);
+	//buttons.emplace_back(, CELL_KEYC_E_POSTFAIL);
+	//buttons.emplace_back(, CELL_KEYC_E_UNDEF);
 	buttons.emplace_back(Qt::Key_Escape, CELL_KEYC_ESCAPE);
 	buttons.emplace_back(Qt::Key_Kanji, CELL_KEYC_106_KANJI);
 	buttons.emplace_back(Qt::Key_CapsLock, CELL_KEYC_CAPS_LOCK);
@@ -235,8 +306,8 @@ void basic_keyboard_handler::LoadSettings(Keyboard& keyboard)
 	buttons.emplace_back(Qt::Key_Left, CELL_KEYC_LEFT_ARROW);
 	buttons.emplace_back(Qt::Key_Down, CELL_KEYC_DOWN_ARROW);
 	buttons.emplace_back(Qt::Key_Up, CELL_KEYC_UP_ARROW);
-	// buttons.emplace_back(, CELL_KEYC_NUM_LOCK);
-	// buttons.emplace_back(, CELL_KEYC_APPLICATION); // This is probably the PS key on the PS3 keyboard
+	//buttons.emplace_back(, CELL_KEYC_NUM_LOCK);
+	//buttons.emplace_back(, CELL_KEYC_APPLICATION); // This is probably the PS key on the PS3 keyboard
 	buttons.emplace_back(Qt::Key_Kana_Shift, CELL_KEYC_KANA); // maybe Key_Kana_Lock
 	buttons.emplace_back(Qt::Key_Henkan, CELL_KEYC_HENKAN);
 	buttons.emplace_back(Qt::Key_Muhenkan, CELL_KEYC_MUHENKAN);
@@ -245,20 +316,20 @@ void basic_keyboard_handler::LoadSettings(Keyboard& keyboard)
 	buttons.emplace_back(Qt::Key_NumLock, CELL_KEYC_KPAD_NUMLOCK);
 	buttons.emplace_back(Qt::Key_division, CELL_KEYC_KPAD_SLASH);    // should ideally be slash but that's occupied obviously
 	buttons.emplace_back(Qt::Key_multiply, CELL_KEYC_KPAD_ASTERISK); // should ideally be asterisk but that's occupied obviously
-	// buttons.emplace_back(Qt::Key_Minus, CELL_KEYC_KPAD_MINUS);     // should ideally be minus but that's occupied obviously
+	//buttons.emplace_back(Qt::Key_Minus, CELL_KEYC_KPAD_MINUS);     // should ideally be minus but that's occupied obviously
 	buttons.emplace_back(Qt::Key_Plus, CELL_KEYC_KPAD_PLUS);
 	buttons.emplace_back(Qt::Key_Enter, CELL_KEYC_KPAD_ENTER);
-	// buttons.emplace_back(Qt::Key_1, CELL_KEYC_KPAD_1);
-	// buttons.emplace_back(Qt::Key_2, CELL_KEYC_KPAD_2);
-	// buttons.emplace_back(Qt::Key_3, CELL_KEYC_KPAD_3);
-	// buttons.emplace_back(Qt::Key_4, CELL_KEYC_KPAD_4);
-	// buttons.emplace_back(Qt::Key_5, CELL_KEYC_KPAD_5);
-	// buttons.emplace_back(Qt::Key_6, CELL_KEYC_KPAD_6);
-	// buttons.emplace_back(Qt::Key_7, CELL_KEYC_KPAD_7);
-	// buttons.emplace_back(Qt::Key_8, CELL_KEYC_KPAD_8);
-	// buttons.emplace_back(Qt::Key_9, CELL_KEYC_KPAD_9);
-	// buttons.emplace_back(Qt::Key_0, CELL_KEYC_KPAD_0);
-	// buttons.emplace_back(Qt::Key_Delete, CELL_KEYC_KPAD_PERIOD);
+	//buttons.emplace_back(Qt::Key_1, CELL_KEYC_KPAD_1);
+	//buttons.emplace_back(Qt::Key_2, CELL_KEYC_KPAD_2);
+	//buttons.emplace_back(Qt::Key_3, CELL_KEYC_KPAD_3);
+	//buttons.emplace_back(Qt::Key_4, CELL_KEYC_KPAD_4);
+	//buttons.emplace_back(Qt::Key_5, CELL_KEYC_KPAD_5);
+	//buttons.emplace_back(Qt::Key_6, CELL_KEYC_KPAD_6);
+	//buttons.emplace_back(Qt::Key_7, CELL_KEYC_KPAD_7);
+	//buttons.emplace_back(Qt::Key_8, CELL_KEYC_KPAD_8);
+	//buttons.emplace_back(Qt::Key_9, CELL_KEYC_KPAD_9);
+	//buttons.emplace_back(Qt::Key_0, CELL_KEYC_KPAD_0);
+	//buttons.emplace_back(Qt::Key_Delete, CELL_KEYC_KPAD_PERIOD);
 
 	// ASCII Printable characters
 	buttons.emplace_back(Qt::Key_A, CELL_KEYC_A);

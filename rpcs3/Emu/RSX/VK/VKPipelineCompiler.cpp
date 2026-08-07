@@ -34,41 +34,67 @@ namespace vk
 		{
 			for (auto&& job : m_work_queue.pop_all())
 			{
-				if (job.is_graphics_job)
+				if (!job.is_graphics_job)
 				{
-					auto compiled = int_compile_graphics_pipe(job.graphics_data, job.graphics_modules, job.pipe_layout, job.inputs, {});
+					auto compiled = int_compile_compute_pipe(job.compute_data, job.inputs, job.flags);
 					job.callback_func(compiled);
+					continue;
 				}
-				else
+
+				if (job.create_info_func)
 				{
-					auto compiled = int_compile_compute_pipe(job.compute_data, job.pipe_layout);
+					auto compiled = int_compile_graphics_pipe(job.create_info_func, job.inputs, {}, job.flags);
 					job.callback_func(compiled);
+					continue;
 				}
+
+				if (job.resolve_modules_func)
+				{
+					// This job's GLSL->SPIR-V compilation was deferred to us so that the
+					// RSX thread would not have to block on it.
+					if (!job.resolve_modules_func(job.graphics_modules))
+					{
+						std::unique_ptr<glsl::program> failed;
+						job.callback_func(failed);
+						continue;
+					}
+				}
+
+				auto compiled = int_compile_graphics_pipe(job.graphics_data, job.graphics_modules, job.inputs, {}, job.flags);
+				job.callback_func(compiled);
 			}
 
 			thread_ctrl::wait_on(m_work_queue);
 		}
 	}
 
-	std::unique_ptr<glsl::program> pipe_compiler::int_compile_compute_pipe(const VkComputePipelineCreateInfo& create_info, VkPipelineLayout pipe_layout)
+	std::unique_ptr<glsl::program> pipe_compiler::int_compile_compute_pipe(
+		const VkComputePipelineCreateInfo& create_info,
+		const std::vector<glsl::program_input>& cs_inputs,
+		op_flags flags)
 	{
-		VkPipeline pipeline;
-		VK_GET_SYMBOL(vkCreateComputePipelines)(*g_render_device, nullptr, 1, &create_info, nullptr, &pipeline);
-		return std::make_unique<vk::glsl::program>(*m_device, pipeline, pipe_layout);
+		auto program = std::make_unique<glsl::program>(*m_device, create_info, cs_inputs);
+		program->link(flags & SEPARATE_SHADER_OBJECTS);
+		return program;
 	}
 
-	std::unique_ptr<glsl::program> pipe_compiler::int_compile_graphics_pipe(const VkGraphicsPipelineCreateInfo& create_info, VkPipelineLayout pipe_layout,
-		const std::vector<glsl::program_input>& vs_inputs, const std::vector<glsl::program_input>& fs_inputs)
+	std::unique_ptr<glsl::program> pipe_compiler::int_compile_graphics_pipe(
+		const VkGraphicsPipelineCreateInfo& create_info,
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs,
+		op_flags flags)
 	{
-		VkPipeline pipeline;
-		CHECK_RESULT(VK_GET_SYMBOL(vkCreateGraphicsPipelines)(*m_device, VK_NULL_HANDLE, 1, &create_info, nullptr, &pipeline));
-		auto result = std::make_unique<vk::glsl::program>(*m_device, pipeline, pipe_layout, vs_inputs, fs_inputs);
-		result->link();
-		return result;
+		auto program = std::make_unique<glsl::program>(*m_device, create_info, vs_inputs, fs_inputs);
+		program->link(flags & SEPARATE_SHADER_OBJECTS);
+		return program;
 	}
 
-	std::unique_ptr<glsl::program> pipe_compiler::int_compile_graphics_pipe(const vk::pipeline_props& create_info, VkShaderModule modules[2], VkPipelineLayout pipe_layout,
-		const std::vector<glsl::program_input>& vs_inputs, const std::vector<glsl::program_input>& fs_inputs)
+	std::unique_ptr<glsl::program> pipe_compiler::int_compile_graphics_pipe(
+		const vk::pipeline_props &create_info,
+		VkShaderModule modules[2],
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs,
+		op_flags flags)
 	{
 		VkPipelineShaderStageCreateInfo shader_stages[2] = {};
 		shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -157,52 +183,103 @@ namespace vk
 		info.stageCount = 2;
 		info.pStages = shader_stages;
 		info.pDynamicState = &dynamic_state_info;
-		info.layout = pipe_layout;
+		info.layout = VK_NULL_HANDLE;
 		info.basePipelineIndex = -1;
 		info.basePipelineHandle = VK_NULL_HANDLE;
 		info.renderPass = vk::get_renderpass(*m_device, create_info.renderpass_key);
 
-		return int_compile_graphics_pipe(info, pipe_layout, vs_inputs, fs_inputs);
+		return int_compile_graphics_pipe(info, vs_inputs, fs_inputs, flags);
+	}
+
+	std::unique_ptr<glsl::program> pipe_compiler::int_compile_graphics_pipe(
+		graphics_pipe_create_callback_t pipe_info_create_fn,
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs,
+		op_flags flags)
+	{
+		VkGraphicsPipelineCreateInfo create_info = pipe_info_create_fn();
+		return int_compile_graphics_pipe(create_info, vs_inputs, fs_inputs, flags);
 	}
 
 	std::unique_ptr<glsl::program> pipe_compiler::compile(
 		const VkComputePipelineCreateInfo& create_info,
-		VkPipelineLayout pipe_layout,
-		op_flags flags, callback_t callback)
+		op_flags flags, callback_t callback,
+		const std::vector<glsl::program_input>& cs_inputs)
 	{
-		if (flags == COMPILE_INLINE)
+		if (flags & COMPILE_INLINE)
 		{
-			return int_compile_compute_pipe(create_info, pipe_layout);
+			return int_compile_compute_pipe(create_info, cs_inputs, flags);
 		}
 
-		m_work_queue.push(create_info, pipe_layout, callback);
+		m_work_queue.push(create_info, cs_inputs, flags, callback);
 		return {};
 	}
 
 	std::unique_ptr<glsl::program> pipe_compiler::compile(
 		const VkGraphicsPipelineCreateInfo& create_info,
-		VkPipelineLayout pipe_layout,
 		op_flags flags, callback_t /*callback*/,
-		const std::vector<glsl::program_input>& vs_inputs, const std::vector<glsl::program_input>& fs_inputs)
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs)
 	{
 		// It is very inefficient to defer this as all pointers need to be saved
-		ensure(flags == COMPILE_INLINE);
-		return int_compile_graphics_pipe(create_info, pipe_layout, vs_inputs, fs_inputs);
+		ensure(flags & COMPILE_INLINE, "Asynchronous compilation is not allowed for raw graphics pipeline input");
+		return int_compile_graphics_pipe(create_info, vs_inputs, fs_inputs, flags);
 	}
 
 	std::unique_ptr<glsl::program> pipe_compiler::compile(
 		const vk::pipeline_props& create_info,
-		VkShaderModule module_handles[2],
-		VkPipelineLayout pipe_layout,
+		VkShaderModule vs,
+		VkShaderModule fs,
 		op_flags flags, callback_t callback,
-		const std::vector<glsl::program_input>& vs_inputs, const std::vector<glsl::program_input>& fs_inputs)
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs)
 	{
-		if (flags == COMPILE_INLINE)
+		VkShaderModule modules[] = { vs, fs };
+		if (flags & COMPILE_INLINE)
 		{
-			return int_compile_graphics_pipe(create_info, module_handles, pipe_layout, vs_inputs, fs_inputs);
+			return int_compile_graphics_pipe(create_info, modules, vs_inputs, fs_inputs, flags);
 		}
 
-		m_work_queue.push(create_info, pipe_layout, module_handles, vs_inputs, fs_inputs, callback);
+		m_work_queue.push(create_info, modules, vs_inputs, fs_inputs, flags, callback);
+		return {};
+	}
+
+	std::unique_ptr<glsl::program> pipe_compiler::compile(
+		const vk::pipeline_props& create_info,
+		module_resolver_t resolve_modules,
+		op_flags flags, callback_t callback,
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs)
+	{
+		ensure(resolve_modules);
+
+		if (flags & COMPILE_INLINE)
+		{
+			VkShaderModule modules[2]{};
+			if (!resolve_modules(modules))
+			{
+				return {};
+			}
+
+			return int_compile_graphics_pipe(create_info, modules, vs_inputs, fs_inputs, flags);
+		}
+
+		m_work_queue.push(create_info, resolve_modules, vs_inputs, fs_inputs, flags, callback);
+		return {};
+	}
+
+	std::unique_ptr<glsl::program> pipe_compiler::compile(
+		graphics_pipe_create_callback_t get_create_info,
+		op_flags flags, callback_t callback,
+		const std::vector<glsl::program_input>& vs_inputs,
+		const std::vector<glsl::program_input>& fs_inputs)
+	{
+		if (flags & COMPILE_INLINE)
+		{
+			return int_compile_graphics_pipe(get_create_info, vs_inputs, fs_inputs, flags);
+		}
+
+		m_work_queue.push(get_create_info, vs_inputs, fs_inputs, flags, callback);
 		return {};
 	}
 
@@ -210,9 +287,20 @@ namespace vk
 	{
 		if (num_worker_threads == 0)
 		{
-			// Select optimal number of compiler threads
+			// Select a conservative but modern default for async pipeline compilation.
+			// Older heuristics topped out too early on high-core CPUs and left large
+			// shader bursts queued longer than necessary.
 			const auto hw_threads = utils::get_thread_count();
-			if (hw_threads > 12)
+
+			if (hw_threads >= 24)
+			{
+				num_worker_threads = 12;
+			}
+			else if (hw_threads >= 16)
+			{
+				num_worker_threads = 8;
+			}
+			else if (hw_threads > 12)
 			{
 				num_worker_threads = 6;
 			}
@@ -228,6 +316,9 @@ namespace vk
 			{
 				num_worker_threads = 1;
 			}
+
+			rsx_log.notice("Async pipeline compiler auto-selected %d worker(s) for %u host thread(s).",
+				num_worker_threads, hw_threads);
 		}
 
 		ensure(num_worker_threads >= 1);

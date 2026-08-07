@@ -197,11 +197,12 @@ struct alignas(16) spu_channel
 
 public:
 	static constexpr u32 off_wait = 32;
-	static constexpr u32 off_occupy = 32;
+	static constexpr u32 off_occupy = 33;
 	static constexpr u32 off_count = 63;
 	static constexpr u64 bit_wait = 1ull << off_wait;
 	static constexpr u64 bit_occupy = 1ull << off_occupy;
 	static constexpr u64 bit_count = 1ull << off_count;
+	static constexpr u64 occupy_ored_wait = bit_wait | bit_occupy; 
 
 	// Returns true on success
 	bool try_push(u32 value)
@@ -253,20 +254,24 @@ public:
 					// Other thread has inserted a value through jostling_value, retry
 					continue;
 				}
+
+				// Turn off waiting bit manually (must succeed because waiting bit can only be resetted by the thread pushed to jostling_value)
+				if (~this->data.fetch_and(~occupy_ored_wait) & bit_wait)
+				{
+					// Could be fatal or at emulation stopping, to be checked by the caller
+					ensure(false);
+				}
+
+				// Fallthrough to notification
+				ensure(old & bit_wait);
 			}
 
 			if (old & bit_wait)
 			{
-				// Turn off waiting bit manually (must succeed because waiting bit can only be resetted by the thread pushed to jostling_value)
-				if (!this->data.bit_test_reset(off_wait))
-				{
-					// Could be fatal or at emulation stopping, to be checked by the caller
-					return {(old & bit_count) == 0, 0, false, false};
-				}
-
 				if (!postpone_notify)
 				{
-					utils::bless<atomic_t<u32>>(&data)[1].notify_one();
+					const usz is_le = std::endian::native == std::endian::little ? 1 : 0;
+					utils::bless<atomic_t<u32>>(&data)[is_le].notify_one();
 				}
 			}
 
@@ -277,7 +282,8 @@ public:
 
 	void notify()
 	{
-		utils::bless<atomic_t<u32>>(&data)[1].notify_one();
+		const usz is_le = std::endian::native == std::endian::little ? 1 : 0;
+		utils::bless<atomic_t<u32>>(&data)[is_le].notify_one();
 	}
 
 	// Returns true on success
@@ -332,7 +338,8 @@ public:
 
 		if (old & bit_wait)
 		{
-			utils::bless<atomic_t<u32>>(&data)[1].notify_one();
+			const usz is_le = std::endian::native == std::endian::little ? 1 : 0;
+			utils::bless<atomic_t<u32>>(&data)[is_le].notify_one();
 		}
 
 		return static_cast<u32>(old);
@@ -633,7 +640,7 @@ public:
 	virtual void dump_regs(std::string&, std::any& custom_data) const override;
 	virtual std::string dump_callstack() const override;
 	virtual std::vector<std::pair<u32, u32>> dump_callstack_list() const override;
-	virtual std::string dump_misc() const override;
+	virtual void dump_misc(std::string& ret, std::any& custom_data) const override;
 	virtual void cpu_task() override final;
 	virtual void cpu_on_stop() override;
 	virtual void cpu_return() override;
@@ -641,6 +648,7 @@ public:
 	virtual ~spu_thread() override;
 	void cleanup();
 	void cpu_init();
+	void init_spu_decoder();
 
 	static const u32 id_base = 0x02000000; // TODO (used to determine thread type)
 	static const u32 id_step = 1;
@@ -713,7 +721,7 @@ public:
 	const decltype(rdata)* resrv_mem{};
 
 	// Range Lock pointer
-	atomic_t<u64, 64>* range_lock{};
+	atomic_t<u64, 128>* range_lock{};
 
 	u32 srr0 = 0;
 	u32 ch_tag_upd = 0;
@@ -773,7 +781,7 @@ public:
 	std::shared_ptr<utils::shm> shm; // SPU memory
 	const std::add_pointer_t<u8> ls; // SPU LS pointer
 	const u32 option;                // sys_spu_thread_initialize option
-	const u32 lv2_id;                // The actual id that is used by syscalls
+	u32 lv2_id; // The actual id that is used by syscalls
 	u32 spurs_addr = 0;
 	bool spurs_waited = false;
 	bool spurs_entered_wait = false;
@@ -807,19 +815,38 @@ public:
 	u32 last_getllar = umax; // LS address of last GETLLAR (if matches current GETLLAR we can let the thread rest)
 	u32 last_getllar_gpr1 = umax;
 	u32 last_getllar_addr = umax;
+	u32 last_getllar_lsa = umax;
 	u32 getllar_spin_count = 0;
 	u32 getllar_busy_waiting_switch = umax; // umax means the test needs evaluation, otherwise it's a boolean
 	u64 getllar_evaluate_time = 0;
 
+	u32 eventstat_raddr = 0;
+	u32 eventstat_getllar = 0;
+	u64 eventstat_block_counter = 0;
+	u64 eventstat_spu_group_restart = 0;
+	u64 eventstat_spin_count = 0;
+	u64 eventstat_evaluate_time = 0;
+	u32 eventstat_busy_waiting_switch = 0;
+
 	std::vector<mfc_cmd_dump> mfc_history;
 	u64 mfc_dump_idx = 0;
 	static constexpr u32 max_mfc_dump_idx = 4096;
+
+	struct alignas(16) raw_spu_log_stats_t
+	{
+		u32 mmio_offset = umax;
+		u32 mmio_value = umax;
+		u64 mmio_time = umax;
+	};
+
+	atomic_t<raw_spu_log_stats_t> mmio_stats{};
 
 	bool in_cpu_work = false;
 	bool allow_interrupts_in_cpu_work = false;
 	u8 cpu_work_iteration_count = 0;
 
 	std::array<v128, 0x4000> stack_mirror; // Return address information
+	std::array<u32, 8> raddr_busy_wait_addr{}; // Return address information
 
 	const char* current_func{}; // Current STOP or RDCH blocking function
 	u64 start_time{};           // Starting time of STOP or RDCH bloking function
@@ -834,6 +861,7 @@ public:
 	bool stop_flag_removal_protection = false;
 
 	std::array<std::array<u8, 4>, SPU_LS_SIZE / 128> getllar_wait_time{};
+	std::array<std::array<u8, 16>, SPU_LS_SIZE / 128> eventstat_wait_time{};
 
 	void push_snr(u32 number, u32 value);
 	static void do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls);
@@ -849,7 +877,7 @@ public:
 	void set_events(u32 bits);
 	void set_interrupt_status(bool enable);
 	bool check_mfc_interrupts(u32 next_pc);
-	static bool is_exec_code(u32 addr, std::span<const u8> ls_ptr, u32 base_addr = 0, bool avoid_dead_code = false); // Only a hint, do not rely on it other than debugging purposes
+	static bool is_exec_code(u32 addr, std::span<const u8> ls_ptr, u32 base_addr = 0, bool avoid_dead_code = false, bool is_range_limited = false); // A hint, do not rely on it for true execution compatibility
 	static std::vector<u32> discover_functions(u32 base_addr, std::span<const u8> ls, bool is_known_addr, u32 /*entry*/);
 	u32 get_ch_count(u32 ch);
 	s64 get_ch_value(u32 ch);
@@ -895,8 +923,9 @@ public:
 
 	// Returns true if reservation existed but was just discovered to be lost
 	// It is safe to use on any address, even if not directly accessed by SPU (so it's slower)
-	bool reservation_check(u32 addr, const decltype(rdata)& data) const;
-	static bool reservation_check(u32 addr, u32 hash, atomic_t<u64, 64>* range_lock);
+	// Optionally pass a known allocated address for internal optimization (the current Effective-Address of the MFC command)
+	bool reservation_check(u32 addr, const decltype(rdata)& data, u32 current_eal = 0) const;
+	static bool reservation_check(u32 addr, u32 hash, atomic_t<u64, 128>* range_lock);
 	usz register_cache_line_waiter(u32 addr);
 	void deregister_cache_line_waiter(usz index);
 
@@ -908,7 +937,7 @@ public:
 	static atomic_t<u32> g_raw_spu_id[5];
 	static atomic_t<u32> g_spu_work_count;
 
-	static atomic_t<u64> g_spu_waiters_by_value[6];
+	static atomic_t<u64, 128> g_spu_waiters_by_value[6];
 
 	static u32 find_raw_spu(u32 id)
 	{

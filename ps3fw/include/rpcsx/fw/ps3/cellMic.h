@@ -235,7 +235,7 @@ public:
 		if (over_size > Size)
 		{
 			m_tail += (over_size - Size);
-			if (m_tail > Size)
+			if (m_tail >= Size)
 				m_tail -= Size;
 
 			m_used = Size;
@@ -359,6 +359,11 @@ private:
 	inline u32 convert_16_bit_pcm_to_float(const std::vector<u8>& buffer,
 		u32 num_bytes);
 
+#ifndef WITHOUT_OPENAL
+	void enumerate_devices();
+	ALCdevice* open_device(const std::string& name, u32 samplingrate, ALCenum num_al_channels, u32 buf_size);
+#endif
+
 	u32 capture_audio();
 
 	void get_data(const u32 num_samples);
@@ -378,6 +383,7 @@ private:
 		std::vector<u8> buf;
 	};
 
+	std::vector<std::string> enumerated_devices;
 	std::vector<mic_device> devices;
 	std::vector<u8> temp_buf;
 	std::vector<u8> float_buf;
@@ -410,7 +416,7 @@ public:
 	void wake_up();
 
 	// Returns index of registered device
-	u32 register_device(const std::string& name);
+	u32 register_device(const std::string& device_name);
 	void unregister_device(u32 dev_num);
 	bool check_device(u32 dev_num);
 

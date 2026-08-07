@@ -1,10 +1,12 @@
 #include "stdafx.h"
+#include "Emu/system_config.h"
 #include "ip_address.h"
 #include "util/StrFmt.h"
 #include "Emu/IdManager.h"
 #include "util/endian.hpp"
 #include "util/types.hpp"
 #include "Emu/NP/rpcn_config.h"
+#include "cellos/sys_net/sys_net_helpers.h"
 #include <algorithm>
 
 #ifndef _WIN32
@@ -64,58 +66,85 @@ namespace np
 		return sockaddr_ipv6;
 	}
 
-	u32 register_ip(const flatbuffers::Vector<std::uint8_t>* vec)
+	u32 register_ip(std::string_view ip_bytes)
 	{
-		if (vec->size() == 4)
+		if (ip_bytes.size() == 4)
 		{
-			const u32 ip = static_cast<u32>(vec->Get(0)) << 24 | static_cast<u32>(vec->Get(1)) << 16 |
-			               static_cast<u32>(vec->Get(2)) << 8 | static_cast<u32>(vec->Get(3));
+			const u32 ip = static_cast<u32>(static_cast<u8>(ip_bytes[0])) << 24 |
+			               static_cast<u32>(static_cast<u8>(ip_bytes[1])) << 16 |
+			               static_cast<u32>(static_cast<u8>(ip_bytes[2])) << 8 |
+			               static_cast<u32>(static_cast<u8>(ip_bytes[3]));
 
 			u32 result_ip = std::bit_cast<u32, be_t<u32>>(ip);
 
 			return result_ip;
 		}
-		else if (vec->size() == 16)
+		else if (ip_bytes.size() == 16)
 		{
 			std::array<u8, 16> ipv6_addr{};
-			std::memcpy(ipv6_addr.data(), vec->Data(), 16);
+			std::memcpy(ipv6_addr.data(), ip_bytes.data(), 16);
 
 			auto& translator = g_fxo->get<np::ip_address_translator>();
 			return translator.register_ipv6(ipv6_addr);
 		}
 		else
 		{
-			fmt::throw_exception("Received ip address with size = %d", vec->size());
+			fmt::throw_exception("Received ip address with size = %d", ip_bytes.size());
 		}
 	}
 
+	struct ipv6_support_state
+	{
+		ipv6_support_state() = default;
+		ipv6_support_state(const ipv6_support_state&) = delete;
+		ipv6_support_state& operator=(const ipv6_support_state&) = delete;
+
+		atomic_t<IPV6_SUPPORT> status = IPV6_SUPPORT::IPV6_UNKNOWN;
+	};
+
+	// The conditions for IPv6 to be enabled are, in order:
+	// -IPv6 is not disabled in config
+	// -Internet config is Connected
+	// -PSN config is RPCN
+	// -Bind IP is not set
+	// -RPCN host has an IPv6
+	// -Can connect to ipv6.google.com:413
 	bool is_ipv6_supported(std::optional<IPV6_SUPPORT> force_state)
 	{
-		static atomic_t<IPV6_SUPPORT> ipv6_status = IPV6_SUPPORT::IPV6_UNKNOWN;
+		auto& ipv6_support = g_fxo->get<ipv6_support_state>();
 
 		if (force_state)
-			ipv6_status = *force_state;
+			ipv6_support.status = *force_state;
 
-		if (ipv6_status != IPV6_SUPPORT::IPV6_UNKNOWN)
-			return ipv6_status == IPV6_SUPPORT::IPV6_SUPPORTED;
+		if (ipv6_support.status != IPV6_SUPPORT::IPV6_UNKNOWN)
+			return ipv6_support.status == IPV6_SUPPORT::IPV6_SUPPORTED;
 
 		static shared_mutex mtx;
 		std::lock_guard lock(mtx);
 
-		if (ipv6_status != IPV6_SUPPORT::IPV6_UNKNOWN)
-			return ipv6_status == IPV6_SUPPORT::IPV6_SUPPORTED;
+		if (ipv6_support.status != IPV6_SUPPORT::IPV6_UNKNOWN)
+			return ipv6_support.status == IPV6_SUPPORT::IPV6_SUPPORTED;
+
+		auto notice_and_disable = [&](std::string_view reason) -> bool
+		{
+			IPv6_log.notice("is_ipv6_supported(): disabled cause: %s", reason);
+			ipv6_support.status = IPV6_SUPPORT::IPV6_UNSUPPORTED;
+			return false;
+		};
 
 		// IPv6 feature is only used by RPCN
 		if (!g_cfg_rpcn.get_ipv6_support())
-		{
-			IPv6_log.notice("is_ipv6_supported(): disabled through config");
-			ipv6_status = IPV6_SUPPORT::IPV6_UNSUPPORTED;
-			return false;
-		}
+			return notice_and_disable("force-disabled through config");
 
-		// We try to connect to ipv6.google.com:8080
+		if (g_cfg.net.net_active != np_internet_status::enabled || g_cfg.net.psn_status != np_psn_status::psn_rpcn)
+			return notice_and_disable("RPCN is disabled");
+
+		if (resolve_binding_ip())
+			return notice_and_disable("Bind IP is used");
+
 		addrinfo* addr_info{};
 		socket_type socket_ipv6{};
+		const addrinfo hints{.ai_family = AF_INET6};
 
 		auto cleanup = [&]()
 		{
@@ -126,20 +155,17 @@ namespace np
 				freeaddrinfo(addr_info);
 		};
 
-		auto error_and_disable = [&](const char* message) -> bool
+		auto error_and_disable = [&](std::string_view message) -> bool
 		{
-			IPv6_log.error("is_ipv6_supported(): %s", message);
-			ipv6_status = IPV6_SUPPORT::IPV6_UNSUPPORTED;
+			IPv6_log.error("is_ipv6_supported(): disabled cause: %s", message);
+			ipv6_support.status = IPV6_SUPPORT::IPV6_UNSUPPORTED;
 			cleanup();
 			return false;
 		};
 
-		addrinfo hints{.ai_family = AF_INET6};
-
-		if (getaddrinfo("ipv6.google.com", nullptr, &hints, &addr_info))
-			return error_and_disable("Failed to resolve ipv6.google.com!");
-
-		addrinfo* found = addr_info;
+		auto get_ipv6 = [](const addrinfo* addr_info) -> const addrinfo*
+		{
+			const addrinfo* found = addr_info;
 
 		while (found != nullptr)
 		{
@@ -149,8 +175,34 @@ namespace np
 			found = found->ai_next;
 		}
 
-		if (found == nullptr)
-			return error_and_disable("Failed to find IPv6 for ipv6.google.com");
+			return found;
+		};
+
+		// Check if RPCN has an IPv6 address
+		const auto parsed_host = parse_rpcn_host(g_cfg_rpcn.get_host());
+
+		if (!parsed_host)
+			return error_and_disable("failed to parse RPCN host");
+
+		const auto [hostname, _] = *parsed_host;
+
+		if (getaddrinfo(hostname.c_str(), nullptr, &hints, &addr_info))
+			return error_and_disable("failed to resolve RPCN host");
+
+		if (!get_ipv6(addr_info))
+			return error_and_disable("RPCN host doesn't support IPv6");
+
+		freeaddrinfo(addr_info);
+		addr_info = {};
+
+		// We try to connect to ipv6.google.com:8080
+		if (getaddrinfo("ipv6.google.com", nullptr, &hints, &addr_info))
+			return error_and_disable("failed to resolve ipv6.google.com");
+
+		const auto* google_ipv6_addr = get_ipv6(addr_info);
+
+		if (!google_ipv6_addr)
+			return error_and_disable("failed to find IPv6 for ipv6.google.com");
 
 		socket_type socket_or_err = ::socket(AF_INET6, SOCK_STREAM, 0);
 
@@ -162,7 +214,7 @@ namespace np
 			return error_and_disable("Failed to create IPv6 socket!");
 
 		socket_ipv6 = socket_or_err;
-		sockaddr_in6 ipv6_addr = *reinterpret_cast<const sockaddr_in6*>(found->ai_addr);
+		sockaddr_in6 ipv6_addr = *reinterpret_cast<const sockaddr_in6*>(google_ipv6_addr->ai_addr);
 		ipv6_addr.sin6_port = std::bit_cast<u16, be_t<u16>>(443);
 
 		if (::connect(socket_ipv6, reinterpret_cast<const sockaddr*>(&ipv6_addr), sizeof(ipv6_addr)) != 0)
@@ -171,7 +223,7 @@ namespace np
 		cleanup();
 
 		IPv6_log.success("Successfully tested IPv6 support!");
-		ipv6_status = IPV6_SUPPORT::IPV6_SUPPORTED;
+		ipv6_support.status = IPV6_SUPPORT::IPV6_SUPPORTED;
 		return true;
 	}
 

@@ -58,7 +58,7 @@ error_code sys_ppu_thread_stop(ppu_thread &ppu, u32 thread_id);
 error_code sys_ppu_thread_restart(ppu_thread &ppu);
 error_code _sys_ppu_thread_create(ppu_thread &ppu, vm::ptr<u64> thread_id,
                                   vm::ptr<ppu_thread_param_t> param, u64 arg,
-                                  u64 arg4, s32 prio, u32 stacksize, u64 flags,
+                                  u64 arg4, s32 prio, u64 stacksize, u64 flags,
                                   vm::cptr<char> threadname);
 error_code sys_ppu_thread_start(ppu_thread &ppu, u32 thread_id);
 error_code sys_ppu_thread_rename(ppu_thread &ppu, u32 thread_id,

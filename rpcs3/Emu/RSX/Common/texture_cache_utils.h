@@ -27,7 +27,7 @@ namespace rsx
 		hash
 	};
 
-	static inline void memory_protect(const address_range& range, utils::protection prot)
+	static inline void memory_protect(const address_range32& range, utils::protection prot)
 	{
 		ensure(range.is_page_range());
 
@@ -78,7 +78,7 @@ namespace rsx
 
 		private:
 			// Members
-			block_list* block;
+			block_list* block = nullptr;
 			list_iterator list_it = {};
 			size_type idx = u32{umax};
 			size_type array_idx = 0;
@@ -270,7 +270,7 @@ namespace rsx
 
 	private:
 		u32 index = 0;
-		address_range range = {};
+		address_range32 range = {};
 		block_container_type sections = {};
 		unowned_container_type unowned; // pointers to sections from other blocks that overlap this block
 		atomic_t<u32> exists_count = 0;
@@ -307,7 +307,7 @@ namespace rsx
 
 			m_storage = storage;
 			index = _index;
-			range = address_range::start_length(index * block_size, block_size);
+			range = address_range32::start_length(index * block_size, block_size);
 
 			AUDIT(range.is_page_range() && get_start() / block_size == index);
 		}
@@ -413,7 +413,7 @@ namespace rsx
 		}
 
 		// Address range
-		inline const address_range& get_range() const
+		inline const address_range32& get_range() const
 		{
 			return range;
 		}
@@ -433,7 +433,7 @@ namespace rsx
 		{
 			return section.overlaps(range, bounds);
 		}
-		inline bool overlaps(const address_range& _range) const
+		inline bool overlaps(const address_range32& _range) const
 		{
 			return range.overlaps(_range);
 		}
@@ -620,7 +620,7 @@ namespace rsx
 			return blocks[address / block_size];
 		}
 
-		inline block_type& block_for(const address_range& range)
+		inline block_type& block_for(const address_range32& range)
 		{
 			AUDIT(range.valid());
 			return block_for(range.start);
@@ -796,7 +796,7 @@ namespace rsx
 			// Constructors
 			range_iterator_tmpl() = default; // end iterator
 
-			explicit range_iterator_tmpl(parent_type& storage, const address_range& _range, section_bounds _bounds, bool _locked_only)
+			explicit range_iterator_tmpl(parent_type& storage, const address_range32& _range, section_bounds _bounds, bool _locked_only)
 				: range(_range), bounds(_bounds), block(&storage.block_for(range.start)), unowned_remaining(true), unowned_it(block->unowned_begin()), cur_block_it(block->begin()), locked_only(_locked_only)
 			{
 				// do a "fake" iteration to ensure the internal state is consistent
@@ -805,8 +805,8 @@ namespace rsx
 
 		private:
 			// Members
-			address_range range;
-			section_bounds bounds;
+			address_range32 range;
+			section_bounds bounds {};
 
 			block_type* block = nullptr;
 			bool needs_overlap_check = true;
@@ -944,19 +944,19 @@ namespace rsx
 		using range_iterator = range_iterator_tmpl<section_storage_type, typename block_type::unowned_iterator, typename block_type::iterator, block_type, ranged_storage>;
 		using range_const_iterator = range_iterator_tmpl<const section_storage_type, typename block_type::unowned_const_iterator, typename block_type::const_iterator, const block_type, const ranged_storage>;
 
-		inline range_iterator range_begin(const address_range& range, section_bounds bounds, bool locked_only = false)
+		inline range_iterator range_begin(const address_range32& range, section_bounds bounds, bool locked_only = false)
 		{
 			return range_iterator(*this, range, bounds, locked_only);
 		}
 
-		inline range_const_iterator range_begin(const address_range& range, section_bounds bounds, bool locked_only = false) const
+		inline range_const_iterator range_begin(const address_range32& range, section_bounds bounds, bool locked_only = false) const
 		{
 			return range_const_iterator(*this, range, bounds, locked_only);
 		}
 
 		inline range_const_iterator range_begin(u32 address, section_bounds bounds, bool locked_only = false) const
 		{
-			return range_const_iterator(*this, address_range::start_length(address, 1), bounds, locked_only);
+			return range_const_iterator(*this, address_range32::start_length(address, 1), bounds, locked_only);
 		}
 
 		constexpr range_iterator range_end()
@@ -1002,9 +1002,9 @@ namespace rsx
 	class buffered_section
 	{
 	private:
-		address_range locked_range;
-		address_range cpu_range = {};
-		address_range confirmed_range;
+		address_range32 locked_range;
+		address_range32 cpu_range = {};
+		address_range32 confirmed_range;
 
 		utils::protection protection = utils::protection::rw;
 
@@ -1012,14 +1012,14 @@ namespace rsx
 		u64 mem_hash = 0;
 
 		bool locked = false;
-		void init_lockable_range(const address_range& range);
+		void init_lockable_range(const address_range32& range);
 		u64 fast_hash_internal() const;
 
 	public:
 		buffered_section() = default;
 		~buffered_section() = default;
 
-		void reset(const address_range& memory_range);
+		void reset(const address_range32& memory_range);
 
 	protected:
 		void invalidate_range();
@@ -1031,7 +1031,7 @@ namespace rsx
 		bool sync() const;
 
 		void discard();
-		const address_range& get_bounds(section_bounds bounds) const;
+		const address_range32& get_bounds(section_bounds bounds) const;
 
 		bool is_locked(bool actual_page_flags = false) const;
 
@@ -1043,12 +1043,12 @@ namespace rsx
 			return get_bounds(bounds).overlaps(address);
 		}
 
-		inline bool overlaps(const address_range& other, section_bounds bounds) const
+		inline bool overlaps(const address_range32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).overlaps(other);
 		}
 
-		inline bool overlaps(const address_range_vector& other, section_bounds bounds) const
+		inline bool overlaps(const address_range_vector32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).overlaps(other);
 		}
@@ -1058,12 +1058,12 @@ namespace rsx
 			return get_bounds(bounds).overlaps(other.get_bounds(bounds));
 		}
 
-		inline bool inside(const address_range& other, section_bounds bounds) const
+		inline bool inside(const address_range32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).inside(other);
 		}
 
-		inline bool inside(const address_range_vector& other, section_bounds bounds) const
+		inline bool inside(const address_range_vector32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).inside(other);
 		}
@@ -1073,12 +1073,12 @@ namespace rsx
 			return get_bounds(bounds).inside(other.get_bounds(bounds));
 		}
 
-		inline s32 signed_distance(const address_range& other, section_bounds bounds) const
+		inline s32 signed_distance(const address_range32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).signed_distance(other);
 		}
 
-		inline u32 distance(const address_range& other, section_bounds bounds) const
+		inline u32 distance(const address_range32& other, section_bounds bounds) const
 		{
 			return get_bounds(bounds).distance(other);
 		}
@@ -1101,18 +1101,18 @@ namespace rsx
 			return cpu_range.valid() ? cpu_range.length() : 0;
 		}
 
-		inline const address_range& get_locked_range() const
+		inline const address_range32& get_locked_range() const
 		{
 			AUDIT(locked);
 			return locked_range;
 		}
 
-		inline const address_range& get_section_range() const
+		inline const address_range32& get_section_range() const
 		{
 			return cpu_range;
 		}
 
-		const address_range& get_confirmed_range() const
+		const address_range32& get_confirmed_range() const
 		{
 			return confirmed_range.valid() ? confirmed_range : cpu_range;
 		}
@@ -1125,7 +1125,7 @@ namespace rsx
 			return {confirmed_range.start - cpu_range.start, confirmed_range.length()};
 		}
 
-		inline bool matches(const address_range& range) const
+		inline bool matches(const address_range32& range) const
 		{
 			return cpu_range.valid() && cpu_range == range;
 		}
@@ -1135,7 +1135,7 @@ namespace rsx
 			return protection;
 		}
 
-		inline address_range get_min_max(const address_range& current_min_max, section_bounds bounds) const
+		inline address_range32 get_min_max(const address_range32& current_min_max, section_bounds bounds) const
 		{
 			return get_bounds(bounds).get_min_max(current_min_max);
 		}
@@ -1207,7 +1207,7 @@ namespace rsx
 		rsx::texture_upload_context context = rsx::texture_upload_context::shader_read;
 		rsx::texture_dimension_extended image_type = rsx::texture_dimension_extended::texture_dimension_2d;
 
-		address_range_vector flush_exclusions; // Address ranges that will be skipped during flush
+		address_range_vector32 flush_exclusions; // Address ranges that will be skipped during flush
 
 		predictor_type* m_predictor = nullptr;
 		usz m_predictor_key_hash = 0;
@@ -1242,7 +1242,7 @@ namespace rsx
 		/**
 		 * Reset
 		 */
-		void reset(const address_range& memory_range)
+		void reset(const address_range32& memory_range)
 		{
 			AUDIT(memory_range.valid());
 			AUDIT(!is_locked());
@@ -1499,7 +1499,7 @@ namespace rsx
 				set_dirty(false);
 			}
 
-			if (context == rsx::texture_upload_context::framebuffer_storage && !Emu.IsStopped())
+			if (context == rsx::texture_upload_context::framebuffer_storage)
 			{
 				// Lock, unlock
 				auto surface = derived()->get_render_target();
@@ -1621,7 +1621,7 @@ namespace rsx
 
 		void on_miss()
 		{
-			rsx_log.warning("Cache miss at address 0x%X. This is gonna hurt...", get_section_base());
+			// rsx_log.trace("Cache miss at address 0x%X. This is gonna hurt...", get_section_base());
 			m_tex_cache->on_miss(*derived());
 		}
 
@@ -1661,7 +1661,7 @@ namespace rsx
 		void imp_flush_memcpy(u32 vm_dst, u8* src, u32 len) const
 		{
 			u8* dst = get_ptr<u8>(vm_dst);
-			address_range copy_range = address_range::start_length(vm_dst, len);
+			address_range32 copy_range = address_range32::start_length(vm_dst, len);
 
 			if (flush_exclusions.empty() || !copy_range.overlaps(flush_exclusions))
 			{
@@ -1677,7 +1677,7 @@ namespace rsx
 
 			// Otherwise, we need to filter the memcpy with our flush exclusions
 			// Should be relatively rare
-			address_range_vector vec;
+			address_range_vector32 vec;
 			vec.merge(copy_range);
 			vec.exclude(flush_exclusions);
 
@@ -1797,7 +1797,7 @@ namespace rsx
 			cleanup_flush();
 		}
 
-		void add_flush_exclusion(const address_range& rng)
+		void add_flush_exclusion(const address_range32& rng)
 		{
 			AUDIT(is_locked() && is_flushable());
 			const auto _rng = rng.get_intersect(get_section_range());
@@ -1928,7 +1928,7 @@ namespace rsx
 		/**
 		 * Comparison
 		 */
-		inline bool matches(const address_range& memory_range) const
+		inline bool matches(const address_range32& memory_range) const
 		{
 			return valid_range() && rsx::buffered_section::matches(memory_range);
 		}
@@ -1970,7 +1970,7 @@ namespace rsx
 			return matches(format, width, height, depth, mipmaps);
 		}
 
-		bool matches(const address_range& memory_range, u32 format, u32 width, u32 height, u32 depth, u32 mipmaps) const
+		bool matches(const address_range32& memory_range, u32 format, u32 width, u32 height, u32 depth, u32 mipmaps) const
 		{
 			if (!valid_range())
 				return false;

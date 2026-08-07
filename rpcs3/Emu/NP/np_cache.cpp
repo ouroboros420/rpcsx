@@ -4,6 +4,7 @@
 #include "Emu/NP/np_allocator.h"
 #include "Emu/NP/np_cache.h"
 #include "Emu/NP/np_helpers.h"
+#include "Emu/NP/np_structs_extra.h"
 
 LOG_CHANNEL(np_cache);
 
@@ -31,8 +32,8 @@ namespace np
 		}
 
 		joinDate.tick = sce_member->joinDate.tick;
-		memberId = sce_member->memberId;
-		teamId = sce_member->teamId;
+		memberId      = sce_member->memberId;
+		teamId        = sce_member->teamId;
 		if (sce_member->roomGroup)
 		{
 			group_id = sce_member->roomGroup->groupId;
@@ -42,7 +43,7 @@ namespace np
 			group_id = 0;
 		}
 
-		natType = sce_member->natType;
+		natType  = sce_member->natType;
 		flagAttr = sce_member->flagAttr;
 
 		for (u32 i = 0; i < sce_member->roomMemberBinAttrInternalNum; i++)
@@ -53,7 +54,7 @@ namespace np
 
 	void room_cache::update(const SceNpMatching2RoomDataInternal* sce_roomdata)
 	{
-		num_slots = sce_roomdata->maxSlot;
+		num_slots     = sce_roomdata->maxSlot;
 		mask_password = sce_roomdata->passwordSlotMask;
 
 		groups.clear();
@@ -119,7 +120,12 @@ namespace np
 		rooms[room_id].password = password;
 	}
 
-	std::pair<error_code, std::optional<SceNpMatching2RoomSlotInfo>> cache_manager::get_slots(SceNpMatching2RoomId room_id)
+	void cache_manager::update_opt_param(SceNpMatching2RoomId room_id, const SceNpMatching2SignalingOptParam* sce_opt_param)
+	{
+		rooms[room_id].opt_param = *sce_opt_param;
+	}
+
+	std::pair<error_code, std::optional<SceNpMatching2RoomSlotInfo>> cache_manager::get_slots(SceNpMatching2RoomId room_id) const
 	{
 		std::lock_guard lock(mutex);
 
@@ -128,7 +134,7 @@ namespace np
 			return {SCE_NP_MATCHING2_ERROR_ROOM_NOT_FOUND, {}};
 		}
 
-		const auto& room = rooms[room_id];
+		const auto& room = ::at32(rooms, room_id);
 
 		SceNpMatching2RoomSlotInfo slots{};
 
@@ -139,26 +145,28 @@ namespace np
 		{
 			join_mask |= (1ull << ((member.first >> 4) - 1));
 		}
-		slots.joinedSlotMask = join_mask;
+		slots.joinedSlotMask   = join_mask;
 		slots.passwordSlotMask = room.mask_password;
 
 		u64 joinable_slot_mask = (static_cast<u64>(1) << room.num_slots) - 1;
-		u16 num_private_slots = std::popcount(room.mask_password & joinable_slot_mask);
-		u16 num_public_slots = room.num_slots - num_private_slots;
+		u16 num_private_slots  = std::popcount(room.mask_password & joinable_slot_mask);
+		u16 num_public_slots   = room.num_slots - num_private_slots;
 
-		slots.publicSlotNum = num_public_slots;
+		slots.publicSlotNum  = num_public_slots;
 		slots.privateSlotNum = num_private_slots;
 
 		u16 open_private_slots = num_private_slots - std::popcount(join_mask & room.mask_password);
-		u16 open_public_slots = num_public_slots - std::popcount(join_mask & (~room.mask_password));
+		u16 open_public_slots  = num_public_slots - std::popcount(join_mask & (~room.mask_password));
 
-		slots.openPublicSlotNum = open_public_slots;
+		slots.openPublicSlotNum  = open_public_slots;
 		slots.openPrivateSlotNum = open_private_slots;
+
+		extra_nps::print_SceNpMatching2RoomSlotInfo(&slots);
 
 		return {CELL_OK, slots};
 	}
 
-	std::pair<error_code, std::vector<SceNpMatching2RoomMemberId>> cache_manager::get_memberids(u64 room_id, s32 sort_method)
+	std::pair<error_code, std::vector<SceNpMatching2RoomMemberId>> cache_manager::get_memberids(u64 room_id, s32 sort_method) const
 	{
 		std::lock_guard lock(mutex);
 
@@ -167,7 +175,7 @@ namespace np
 			return {SCE_NP_MATCHING2_ERROR_ROOM_NOT_FOUND, {}};
 		}
 
-		const auto& room = rooms[room_id];
+		const auto& room = ::at32(rooms, room_id);
 
 		std::vector<SceNpMatching2RoomMemberId> vec_memberids;
 
@@ -203,7 +211,7 @@ namespace np
 		return {CELL_OK, vec_memberids};
 	}
 
-	std::pair<error_code, std::optional<SceNpMatching2SessionPassword>> cache_manager::get_password(SceNpMatching2RoomId room_id)
+	std::pair<error_code, std::optional<SceNpMatching2SessionPassword>> cache_manager::get_password(SceNpMatching2RoomId room_id) const
 	{
 		std::lock_guard lock(mutex);
 
@@ -212,15 +220,29 @@ namespace np
 			return {SCE_NP_MATCHING2_ERROR_ROOM_NOT_FOUND, {}};
 		}
 
-		if (!rooms[room_id].owner)
+		const auto& room = ::at32(rooms, room_id);
+
+		if (!room.owner)
 		{
 			return {SCE_NP_MATCHING2_ERROR_NOT_ALLOWED, {}};
 		}
 
-		return {CELL_OK, rooms[room_id].password};
+		return {CELL_OK, room.password};
 	}
 
-	error_code cache_manager::get_member_and_attrs(SceNpMatching2RoomId room_id, SceNpMatching2RoomMemberId member_id, const std::vector<SceNpMatching2AttributeId>& binattrs_list, SceNpMatching2RoomMemberDataInternal* ptr_member, u32 addr_data, u32 size_data, bool include_onlinename, bool include_avatarurl)
+	std::pair<error_code, std::optional<SceNpMatching2SignalingOptParam>> cache_manager::get_opt_param(SceNpMatching2RoomId room_id) const
+	{
+		std::lock_guard lock(mutex);
+
+		if (!rooms.contains(room_id))
+		{
+			return {SCE_NP_MATCHING2_ERROR_ROOM_NOT_FOUND, {}};
+		}
+
+		return {CELL_OK, ::at32(rooms, room_id).opt_param};
+	}
+
+	error_code cache_manager::get_member_and_attrs(SceNpMatching2RoomId room_id, SceNpMatching2RoomMemberId member_id, const std::vector<SceNpMatching2AttributeId>& binattrs_list, SceNpMatching2RoomMemberDataInternal* ptr_member, u32 addr_data, u32 size_data, bool include_onlinename, bool include_avatarurl) const
 	{
 		std::lock_guard lock(mutex);
 
@@ -229,7 +251,7 @@ namespace np
 			return SCE_NP_MATCHING2_ERROR_ROOM_NOT_FOUND;
 		}
 
-		if (!rooms[room_id].members.contains(member_id))
+		if (!::at32(rooms, room_id).members.contains(member_id))
 		{
 			return SCE_NP_MATCHING2_ERROR_ROOM_MEMBER_NOT_FOUND;
 		}
@@ -242,10 +264,10 @@ namespace np
 			memset(ptr_member, 0, sizeof(SceNpMatching2RoomMemberDataInternal));
 			memcpy(&ptr_member->userInfo.npId, &member.userInfo.npId, sizeof(SceNpId));
 			ptr_member->joinDate.tick = member.joinDate.tick;
-			ptr_member->memberId = member.memberId;
-			ptr_member->teamId = member.teamId;
-			ptr_member->natType = member.natType;
-			ptr_member->flagAttr = member.flagAttr;
+			ptr_member->memberId      = member.memberId;
+			ptr_member->teamId        = member.teamId;
+			ptr_member->natType       = member.natType;
+			ptr_member->flagAttr      = member.flagAttr;
 		}
 
 		u32 needed_data_size = 0;
@@ -310,7 +332,7 @@ namespace np
 		if (num_binattrs)
 		{
 			ptr_member->roomMemberBinAttrInternal.set(mem.allocate(sizeof(SceNpMatching2RoomMemberBinAttrInternal) * num_binattrs));
-			ptr_member->roomMemberBinAttrInternalNum = num_binattrs;
+			ptr_member->roomMemberBinAttrInternalNum         = num_binattrs;
 			SceNpMatching2RoomMemberBinAttrInternal* bin_ptr = ptr_member->roomMemberBinAttrInternal.get_ptr();
 
 			u32 actual_cnt = 0;
@@ -320,8 +342,8 @@ namespace np
 				{
 					const auto& bin = ::at32(member.bins, binattrs_list[i]);
 					bin_ptr[actual_cnt].updateDate.tick = bin.updateDate.tick;
-					bin_ptr[actual_cnt].data.id = bin.id;
-					bin_ptr[actual_cnt].data.size = ::size32(bin.data);
+					bin_ptr[actual_cnt].data.id         = bin.id;
+					bin_ptr[actual_cnt].data.size       = ::size32(bin.data);
 					bin_ptr[actual_cnt].data.ptr.set(mem.allocate(::size32(bin.data)));
 					std::memcpy(bin_ptr[actual_cnt].data.ptr.get_ptr(), bin.data.data(), bin.data.size());
 					actual_cnt++;
@@ -332,7 +354,7 @@ namespace np
 		return not_an_error(needed_data_size);
 	}
 
-	std::pair<error_code, std::optional<SceNpId>> cache_manager::get_npid(u64 room_id, u16 member_id)
+	std::pair<error_code, std::optional<SceNpId>> cache_manager::get_npid(u64 room_id, u16 member_id) const
 	{
 		std::lock_guard lock(mutex);
 
@@ -351,13 +373,13 @@ namespace np
 		return {CELL_OK, ::at32(::at32(rooms, room_id).members, member_id).userInfo.npId};
 	}
 
-	std::optional<u16> cache_manager::get_memberid(u64 room_id, const SceNpId& npid)
+	std::optional<u16> cache_manager::get_memberid(u64 room_id, const SceNpId& npid) const
 	{
 		std::lock_guard lock(mutex);
 
 		if (!rooms.contains(room_id))
 		{
-			np_cache.error("np_cache::get_memberid cache miss room_id: room_id(%d)/npid(%s)", room_id, static_cast<const char*>(npid.handle.data));
+			np_cache.error("np_cache::get_memberid cache miss room_id: room_id(%d)/npid(%s)", room_id, np::npid_to_string(npid));
 			return std::nullopt;
 		}
 
@@ -369,7 +391,7 @@ namespace np
 				return id;
 		}
 
-		np_cache.error("np_cache::get_memberid cache miss member_id: room_id(%d)/npid(%s)", room_id, static_cast<const char*>(npid.handle.data));
+		np_cache.error("np_cache::get_memberid cache miss member_id: room_id(%d)/npid(%s)", room_id, np::npid_to_string(npid));
 		return std::nullopt;
 	}
 

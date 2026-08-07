@@ -548,7 +548,7 @@ namespace utils
 		template <typename T>
 			requires(std::is_copy_constructible_v<std::remove_const_t<T>>) && (std::is_constructible_v<std::remove_const_t<T>> || Bitcopy<std::remove_const_t<T>> ||
 																				  std::is_constructible_v<std::remove_const_t<T>, exact_t<serial&>> || TupleAlike<std::remove_const_t<T>>)
-		operator T() noexcept
+		explicit operator T() noexcept
 		{
 			AUDIT(!is_writing());
 

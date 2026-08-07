@@ -17,6 +17,19 @@ namespace rsx
 
 namespace vk
 {
+	/**
+	 * "[]" when the device supports unsized arrays in uniform blocks, otherwise a
+	 * concrete "[N]" sized to the bindable window.
+	 *
+	 * Upstream declares these arrays unsized unconditionally, which requires
+	 * VK_EXT_shader_uniform_buffer_unsized_array. Adreno does not have it, so
+	 * every game pipeline failed to compile (VK_ERROR_UNKNOWN) and nothing but
+	 * overlays ever drew. element_size is the same divisor the C++ side already
+	 * uses to turn a dynamic offset into a shader index, so the bound is exact,
+	 * not an estimate.
+	 */
+	std::string ubo_array_dim(u32 element_size);
+
 	// Forward declarations
 	struct buffer;
 	class command_buffer;
@@ -74,10 +87,11 @@ namespace vk
 
 	enum image_upload_options
 	{
-		upload_contents_async = 1,
-		initialize_image_layout = 2,
-		preserve_image_layout = 4,
-		source_is_gpu_resident = 8,
+		upload_contents_async   = 0x0001,
+		initialize_image_layout = 0x0002,
+		preserve_image_layout   = 0x0004,
+		source_is_gpu_resident  = 0x0008,
+		source_is_userptr       = 0x0010,
 
 		// meta-flags
 		upload_contents_inline = 0,
@@ -89,7 +103,7 @@ namespace vk
 		VkImageAspectFlags flags, vk::data_heap& upload_heap, u32 heap_align, rsx::flags32_t image_setup_flags);
 
 	std::pair<buffer*, u32> detile_memory_block(
-		const vk::command_buffer& cmd, const rsx::GCM_tile_reference& tiled_region, const utils::address_range& range,
+		const vk::command_buffer& cmd, const rsx::GCM_tile_reference& tiled_region, const utils::address_range32& range,
 		u16 width, u16 height, u8 bpp);
 
 	// Other texture management helpers

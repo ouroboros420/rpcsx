@@ -210,9 +210,13 @@ basic_mouse_handler::mouse_button basic_mouse_handler::get_mouse_button(const cf
 
 	if (it != mouse_list.cend())
 	{
+		u32 btn = it->first;
+		if (btn >= mouse::button) btn -= mouse::button;
+
 		return mouse_button{
-			.code = static_cast<int>(it->first),
-			.is_key = false};
+			.code = static_cast<int>(btn),
+			.is_key = false
+		};
 	}
 
 	if (const u32 key = keyboard_pad_handler::GetKeyCode(QString::fromStdString(name)))

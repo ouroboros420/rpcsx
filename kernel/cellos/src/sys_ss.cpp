@@ -26,7 +26,7 @@ struct lv2_update_manager {
     if (std::from_chars(version_str.data(),
                         version_str.data() + version_str.size(),
                         system_sw_version, 16)
-            .ec != std::errc{})
+            .ec == std::errc{})
       system_sw_version <<= 40;
     else
       system_sw_version = 0;
@@ -78,6 +78,7 @@ struct lv2_update_manager {
     std::unique_lock unique_lock(malloc_mutex);
 
     if (malloc_set.count(addr)) {
+      malloc_set.erase(addr);
       return vm::dealloc(addr, vm::main);
     }
 
@@ -200,8 +201,10 @@ error_code sys_ss_get_console_id(vm::ptr<u8> buf) {
 error_code sys_ss_get_open_psid(vm::ptr<CellSsOpenPSID> psid) {
   sys_ss.notice("sys_ss_get_open_psid(psid=*0x%x)", psid);
 
-  psid->high = g_cfg.sys.console_psid_high;
-  psid->low = g_cfg.sys.console_psid_low;
+  const u128 configured_psid = g_cfg.sys.console_psid.get();
+
+  psid->high = static_cast<u64>(configured_psid >> 64);
+  psid->low = static_cast<u64>(configured_psid);
 
   return CELL_OK;
 }
@@ -246,18 +249,19 @@ error_code sys_ss_appliance_info_manager(u32 code, vm::ptr<u8> buffer) {
   }
   case 0x19005: {
     // AIM_get_open_ps_id
-    be_t<u64> psid[2] = {+g_cfg.sys.console_psid_high,
-                         +g_cfg.sys.console_psid_low};
-    std::memcpy(buffer.get_ptr(), psid, 16);
+    const be_t<u128> psid = g_cfg.sys.console_psid.get();
+    std::memcpy(buffer.get_ptr(), &psid, 16);
     break;
   }
   case 0x19006: {
     // qa values (dex only) ??
     [[fallthrough]];
   }
-  default:
+  default: {
     sys_ss.todo("sys_ss_appliance_info_manager(code=0x%x, buffer=*0x%x)", code,
                 buffer);
+    break;
+  }
   }
 
   return CELL_OK;
@@ -516,7 +520,7 @@ error_code sys_ss_individual_info_manager(u64 pkg_id, u64 a2,
   // Read EID
   case 0x17002: {
     // TODO
-    vm::_ref<u64>(a5) = a4; // Write back size of buffer
+    vm::write<u64>(static_cast<u32>(a5), a4); // Write back size of buffer
     break;
   }
   // Get EID size

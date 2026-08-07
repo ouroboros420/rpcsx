@@ -4,13 +4,13 @@
 
 struct cfg_rpcn : cfg::node
 {
-	cfg::uint32 version{this, "Version", 1};
+	cfg::uint32 version{this, "Version", 2};
 	cfg::string host{this, "Host", "np.rpcs3.net"};
 	cfg::string npid{this, "NPID", ""};
 	cfg::string password{this, "Password", ""};
 	cfg::string token{this, "Token", ""};
-	cfg::string hosts{this, "Hosts", "Official RPCN Server|np.rpcs3.net|||RPCN Test Server|test-np.rpcs3.net"};
-	cfg::_bool ipv6_support{this, "IPv6 support", true};
+	cfg::string hosts{this, "Hosts", "Official RPCN Server|np.rpcs3.net"};
+	cfg::_bool ipv6_support{this, "Experimental IPv6 support", false};
 
 	void load();
 	void save() const;
@@ -35,5 +35,7 @@ private:
 	static std::string generate_npid();
 	void set_hosts(const std::vector<std::pair<std::string, std::string>>& vec_hosts);
 };
+
+std::optional<std::pair<std::string, u16>> parse_rpcn_host(std::string_view host);
 
 extern cfg_rpcn g_cfg_rpcn;

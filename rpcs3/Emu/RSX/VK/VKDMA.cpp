@@ -29,7 +29,7 @@ namespace vk
 		free();
 	}
 
-	void* dma_block::map_range(const utils::address_range& range)
+	void* dma_block::map_range(const utils::address_range32& range)
 	{
 		if (inheritance_info.parent)
 		{
@@ -144,7 +144,7 @@ namespace vk
 		inheritance_info.block_offset = (addr - parent->base_address);
 	}
 
-	void dma_block::flush(const utils::address_range& range)
+	void dma_block::flush(const utils::address_range32& range)
 	{
 		if (inheritance_info.parent)
 		{
@@ -160,7 +160,7 @@ namespace vk
 		// NOTE: Do not unmap. This can be extremely slow on some platforms.
 	}
 
-	void dma_block::load(const utils::address_range& range)
+	void dma_block::load(const utils::address_range32& range)
 	{
 		if (inheritance_info.parent)
 		{
@@ -176,7 +176,7 @@ namespace vk
 		// NOTE: Do not unmap. This can be extremely slow on some platforms.
 	}
 
-	dma_mapping_handle dma_block::get(const utils::address_range& range)
+	dma_mapping_handle dma_block::get(const utils::address_range32& range)
 	{
 		if (inheritance_info.parent)
 		{
@@ -266,7 +266,7 @@ namespace vk
 		s_allocated_dma_pool_size += allocated_memory->size();
 	}
 
-	void* dma_block_EXT::map_range(const utils::address_range& range)
+	void* dma_block_EXT::map_range(const utils::address_range32& range)
 	{
 		return vm::get_super_ptr<void>(range.start);
 	}
@@ -276,12 +276,12 @@ namespace vk
 		// NOP
 	}
 
-	void dma_block_EXT::flush(const utils::address_range&)
+	void dma_block_EXT::flush(const utils::address_range32&)
 	{
 		// NOP
 	}
 
-	void dma_block_EXT::load(const utils::address_range&)
+	void dma_block_EXT::load(const utils::address_range32&)
 	{
 		// NOP
 	}
@@ -338,7 +338,7 @@ namespace vk
 		// Not much contention expected here, avoid searching twice
 		std::lock_guard lock(g_dma_mutex);
 
-		const auto map_range = utils::address_range::start_length(local_address, length);
+		const auto map_range = utils::address_range32::start_length(local_address, length);
 		auto first_block = (local_address & s_dma_block_mask);
 
 		if (auto found = g_dma_pool.find(first_block); found != g_dma_pool.end())
@@ -456,7 +456,7 @@ namespace vk
 			if (auto found = g_dma_pool.find(block); found != g_dma_pool.end())
 			{
 				const auto sync_end = std::min(limit, found->second->end());
-				const auto range = utils::address_range::start_end(local_address, sync_end);
+				const auto range = utils::address_range32::start_end(local_address, sync_end);
 
 				if constexpr (load)
 				{

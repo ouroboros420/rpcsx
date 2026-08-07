@@ -1,49 +1,130 @@
 #include "stdafx.h"
 #include "pad_config.h"
 #include "Emu/system_utils.hpp"
-
-LOG_CHANNEL(input_log, "Input");
+#include "Emu/Io/PadHandler.h"
 
 extern std::string g_input_config_override;
 
-std::vector<std::string> cfg_pad::get_buttons(const std::string& str)
+std::vector<pad::combo> cfg_pad::get_combos(std::string_view button_string)
 {
-	std::vector<std::string> vec = fmt::split(str, {","});
+	if (button_string.empty())
+		return {};
 
-	// Handle special case: string contains separator itself as configured value
-	if (str == "," || str.find(",,") != umax)
+	// Handle special case: string contains separator itself as configured value (it's why I don't use fmt::split here)
+	const auto split = [](std::string_view str, char sep)
 	{
-		vec.push_back(",");
+		std::set<std::string> buttons;
+		bool was_sep = true;
+		usz btn_start = 0ULL;
+		usz i = 0ULL;
+
+		for (; i < str.size(); i++)
+		{
+			const char c = str[i];
+
+			if (c == sep)
+			{
+				if (!was_sep)
+				{
+					was_sep = true;
+					buttons.insert(std::string(str.substr(btn_start, i - btn_start)));
+					continue;
+				}
+			}
+
+			if (was_sep)
+			{
+				was_sep = false;
+				btn_start = i;
+			}
+		
+			if (i == (str.size() - 1))
+			{
+				buttons.insert(std::string(str.substr(btn_start, i - btn_start + 1)));
+			}
+		}
+
+		return buttons;
+	};
+
+	std::vector<pad::combo> combos;
+
+	// Get all combos (seperated by ',')
+	const std::set<std::string> combo_strings = split(button_string, ',');
+
+	for (const std::string& combo_string : combo_strings)
+	{
+		// Get all keys for this combo (seperated by '&')
+		std::set<std::string> combo = split(combo_string, '&');
+		if (!combo.empty())
+		{
+			combos.push_back(pad::combo{std::move(combo)});
+		}
 	}
 
+	return combos;
+}
+
+std::string cfg_pad::get_button_string(std::vector<pad::combo>& combos)
+{
+	std::vector<std::string> combo_strings;
+
 	// Remove duplicates
-	std::sort(vec.begin(), vec.end());
-	vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+	std::sort(combos.begin(), combos.end());
+	combos.erase(std::unique(combos.begin(), combos.end()), combos.end());
 
-	return vec;
+	for (const pad::combo& combo : combos)
+	{
+		// Merge all keys for this combo (seperated by '&')
+		combo_strings.push_back(combo.to_string());
+	}
+
+	// Merge combos (seperated by ',')
+	return fmt::merge(combo_strings, ",");
 }
 
-std::string cfg_pad::get_buttons(std::vector<std::string> vec)
+std::string cfg_pad::make_button_string(const std::unordered_map<u32, std::string>& button_list, const std::vector<std::set<u32>>& button_combos)
 {
-	// Remove duplicates
-	std::sort(vec.begin(), vec.end());
-	vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+	std::vector<pad::combo> combos;
 
-	return fmt::merge(vec, ",");
+	for (const std::set<u32>& button_combo : button_combos)
+	{
+		if (button_combo.empty()) continue;
+
+		pad::combo combo {};
+
+		for (u32 button : button_combo)
+		{
+			combo.add_button(::at32(button_list, button));
+		}
+
+		combos.push_back(std::move(combo));
+	}
+
+	return get_button_string(combos);
 }
 
-u8 cfg_pad::get_large_motor_speed(const std::array<VibrateMotor, 2>& motor_speed) const
+u8 cfg_pad::get_motor_speed(VibrateMotor& motor, f32 multiplier) const
 {
-	const u8 idx = switch_vibration_motors ? 1 : 0;
-	const f32 multiplier = multiplier_vibration_motor_large / 100.0f;
-	return static_cast<u8>(std::clamp(motor_speed[idx].m_value * multiplier, 0.0f, 255.0f));
+	// If motor is small, use either 0 or 255.
+	const u8 value = motor.is_large_motor ? motor.value : (motor.value > 0 ? 255 : 0);
+
+	// Ignore lower range. Scale remaining range to full range.
+	const f32 adjusted = PadHandlerBase::ScaledInput(value, static_cast<f32>(vibration_threshold.get()), 255.0f, 0.0f, 255.0f);
+
+	// Apply multiplier
+	motor.adjusted_value = static_cast<u8>(std::clamp(adjusted * multiplier, 0.0f, 255.0f));
+	return motor.adjusted_value;
 }
 
-u8 cfg_pad::get_small_motor_speed(const std::array<VibrateMotor, 2>& motor_speed) const
+u8 cfg_pad::get_large_motor_speed(std::array<VibrateMotor, 2>& motors) const
 {
-	const u8 idx = switch_vibration_motors ? 0 : 1;
-	const f32 multiplier = multiplier_vibration_motor_small / 100.0f;
-	return static_cast<u8>(std::clamp(motor_speed[idx].m_value * multiplier, 0.0f, 255.0f));
+	return get_motor_speed(motors[switch_vibration_motors ? 1 : 0], multiplier_vibration_motor_large / 100.0f);
+}
+
+u8 cfg_pad::get_small_motor_speed(std::array<VibrateMotor, 2>& motors) const
+{
+	return get_motor_speed(motors[switch_vibration_motors ? 0 : 1], multiplier_vibration_motor_small / 100.0f);
 }
 
 bool cfg_input::load(const std::string& title_id, const std::string& config_file, bool strict)
@@ -78,7 +159,7 @@ bool cfg_input::load(const std::string& title_id, const std::string& config_file
 
 	from_default();
 
-	if (fs::file cfg_file{cfg_name, fs::read})
+	if (fs::file cfg_file{ cfg_name, fs::read })
 	{
 		input_log.notice("Loading input configuration: '%s'", cfg_name);
 
@@ -130,7 +211,7 @@ cfg_input_configurations::cfg_input_configurations()
 
 bool cfg_input_configurations::load()
 {
-	if (fs::file cfg_file{path, fs::read})
+	if (fs::file cfg_file{ path, fs::read })
 	{
 		return from_string(cfg_file.to_string());
 	}

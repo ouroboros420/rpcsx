@@ -17,12 +17,12 @@
 #include <errno.h>
 #endif
 
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#elif defined(__clang__)
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
 #else
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -84,7 +84,8 @@ std::string fmt::win_error_to_string(unsigned long error, void* module_handle)
 	if (FormatMessageW((module_handle ? FORMAT_MESSAGE_FROM_HMODULE : FORMAT_MESSAGE_FROM_SYSTEM) | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS,
 			module_handle, error, 0, reinterpret_cast<LPWSTR>(&message_buffer), 0, nullptr))
 	{
-		message = fmt::format("%s (0x%x)", fmt::trim(wchar_to_utf8(message_buffer), " \t\n\r\f\v"), error);
+		const std::string utf8 = wchar_to_utf8(message_buffer);
+		message = fmt::format("%s (0x%x)", fmt::trim_sv(utf8, " \t\n\r\f\v"), error);
 	}
 	else
 	{
@@ -629,6 +630,13 @@ namespace fmt
 		thread_ctrl::emergency_exit(out);
 	}
 
+	[[noreturn]] void raw_verify_error(std::source_location loc, std::source_location propagated_loc, const char8_t* msg, usz object)
+	{
+		std::string out;
+		fmt::append(out, "%s (object: 0x%x)%s%s", msg ? msg : u8"Verification failed", object, loc, propagated_loc);
+		thread_ctrl::emergency_exit(out);
+	}
+
 	[[noreturn]] void raw_range_error(std::source_location loc, std::string_view index, usz container_size)
 	{
 		std::string out;
@@ -750,6 +758,12 @@ void fmt::raw_append(std::string& out, const char* fmt, const fmt_type_info* sup
 
 std::string fmt::replace_all(std::string_view src, std::string_view from, std::string_view to, usz count)
 {
+	if (src.empty())
+		return {};
+
+	if (from.empty() || count == 0)
+		return std::string(src);
+
 	std::string target;
 	target.reserve(src.size() + to.size());
 
@@ -819,6 +833,50 @@ std::vector<std::string> fmt::split(std::string_view source, std::initializer_li
 	return result;
 }
 
+std::vector<std::string_view> fmt::split_sv(std::string_view source, std::initializer_list<std::string_view> separators, bool is_skip_empty)
+{
+	std::vector<std::string_view> result;
+
+	for (usz index = 0; index < source.size();)
+	{
+		usz pos = -1;
+		usz sep_size = 0;
+
+		for (auto& separator : separators)
+		{
+			if (usz pos0 = source.find(separator, index); pos0 < pos)
+			{
+				pos = pos0;
+				sep_size = separator.size();
+			}
+		}
+
+		if (!sep_size)
+		{
+			result.emplace_back(&source[index], source.size() - index);
+			return result;
+		}
+
+		std::string_view piece = {&source[index], pos - index};
+
+		index = pos + sep_size;
+
+		if (piece.empty() && is_skip_empty)
+		{
+			continue;
+		}
+
+		result.emplace_back(std::move(piece));
+	}
+
+	if (result.empty() && !is_skip_empty)
+	{
+		result.emplace_back();
+	}
+
+	return result;
+}
+
 std::string fmt::trim(const std::string& source, std::string_view values)
 {
 	const usz begin = source.find_first_not_of(values);
@@ -826,7 +884,27 @@ std::string fmt::trim(const std::string& source, std::string_view values)
 	if (begin == source.npos)
 		return {};
 
-	return source.substr(begin, source.find_last_not_of(values) + 1);
+	const usz end = source.find_last_not_of(values);
+
+	if (end == source.npos)
+		return source.substr(begin);
+
+	return source.substr(begin, end + 1 - begin);
+}
+
+std::string_view fmt::trim_sv(std::string_view source, std::string_view values)
+{
+	const usz begin = source.find_first_not_of(values);
+
+	if (begin == source.npos)
+		return {};
+
+	const usz end = source.find_last_not_of(values);
+
+	if (end == source.npos)
+		return source.substr(begin);
+
+	return source.substr(begin, end + 1 - begin);
 }
 
 std::string fmt::trim_front(const std::string& source, std::string_view values)
@@ -839,10 +917,37 @@ std::string fmt::trim_front(const std::string& source, std::string_view values)
 	return source.substr(begin);
 }
 
+std::string_view fmt::trim_front_sv(std::string_view source, std::string_view values)
+{
+	const usz begin = source.find_first_not_of(values);
+
+	if (begin == source.npos)
+		return {};
+
+	return source.substr(begin);
+}
+
 void fmt::trim_back(std::string& source, std::string_view values)
 {
 	const usz index = source.find_last_not_of(values);
+
+	if (index == source.npos)
+	{
+		source.clear();
+		return;
+	}
+
 	source.resize(index + 1);
+}
+
+std::string_view fmt::trim_back_sv(std::string_view source, std::string_view values)
+{
+	const usz index = source.find_last_not_of(values);
+	if (index == std::string_view::npos)
+		return {};
+
+	source.remove_suffix(source.size() - (index + 1));
+	return source;
 }
 
 std::string fmt::to_upper(std::string_view string)
@@ -864,45 +969,6 @@ std::string fmt::to_lower(std::string_view string)
 std::string fmt::truncate(std::string_view src, usz length)
 {
 	return std::string(src.begin(), src.begin() + std::min(src.size(), length));
-}
-
-bool fmt::match(const std::string& source, const std::string& mask)
-{
-	usz source_position = 0, mask_position = 0;
-
-	for (; source_position < source.size() && mask_position < mask.size(); ++mask_position, ++source_position)
-	{
-		switch (mask[mask_position])
-		{
-		case '?': break;
-
-		case '*':
-			for (usz test_source_position = source_position; test_source_position < source.size(); ++test_source_position)
-			{
-				if (match(source.substr(test_source_position), mask.substr(mask_position + 1)))
-				{
-					return true;
-				}
-			}
-			return false;
-
-		default:
-			if (source[source_position] != mask[mask_position])
-			{
-				return false;
-			}
-
-			break;
-		}
-	}
-
-	if (source_position != source.size())
-		return false;
-
-	if (mask_position != mask.size())
-		return false;
-
-	return true;
 }
 
 std::string get_file_extension(const std::string& file_path)

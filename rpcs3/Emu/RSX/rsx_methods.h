@@ -223,9 +223,9 @@ namespace rsx
 			return decode<NV4097_SET_SHADER_WINDOW>().window_shader_origin();
 		}
 
-		window_pixel_center shader_window_pixel() const
+		window_pixel_center pixel_center() const
 		{
-			return decode<NV4097_SET_SHADER_WINDOW>().window_shader_pixel_center();
+			return decode<NV4097_SET_SHADER_WINDOW>().pixel_center();
 		}
 
 		u16 shader_window_height() const
@@ -699,6 +699,11 @@ namespace rsx
 		user_clip_plane_op clip_plane_5_enabled() const
 		{
 			return decode<NV4097_SET_USER_CLIP_PLANE_CONTROL>().clip_plane5();
+		}
+
+		u32 clip_planes_mask() const
+		{
+			return registers[NV4097_SET_USER_CLIP_PLANE_CONTROL];
 		}
 
 		front_face front_face_mode() const
@@ -1311,6 +1316,16 @@ namespace rsx
 		bool polygon_stipple_enabled() const
 		{
 			return decode<NV4097_SET_POLYGON_STIPPLE>().enabled();
+		}
+
+		polygon_mode polygon_mode_front() const
+		{
+			return decode<NV4097_SET_FRONT_POLYGON_MODE>().front_polygon_mode();
+		}
+
+		polygon_mode polygon_mode_back() const
+		{
+			return decode<NV4097_SET_BACK_POLYGON_MODE>().back_polygon_mode();
 		}
 	};
 

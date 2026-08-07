@@ -1979,13 +1979,6 @@ error_code cellSearchGetMusicSelectionContext(
 			});
 		if (content != searchObject->content_ids.cend() && content->second)
 		{
-			// Check if the type of the found content is correct
-			if (content->second->type != CELL_SEARCH_CONTENTTYPE_MUSIC)
-			{
-				return {CELL_SEARCH_ERROR_INVALID_CONTENTTYPE,
-					"Type: %d, Expected: CELL_SEARCH_CONTENTTYPE_MUSIC"};
-			}
-
 			// Check if the type of the found content matches our search content type
 			if (content->second->type != first_content->type)
 			{
@@ -1995,11 +1988,47 @@ error_code cellSearchGetMusicSelectionContext(
 			}
 
 			// Use the found content
-			context.playlist.push_back(content->second->infoPath.contentPath);
-			cellSearch.notice("cellSearchGetMusicSelectionContext(): Hash=%08X, "
-							  "Assigning found track: Type=0x%x, Path=%s",
-				content_hash, +content->second->type,
-				context.playlist.back());
+			if (content->second->type == CELL_SEARCH_CONTENTTYPE_MUSICLIST)
+			{
+				const std::string path = content->second->infoPath.contentPath;
+				const std::string vfs_path = vfs::get(path);
+				if (!fs::is_dir(vfs_path))
+				{
+					return {CELL_SEARCH_ERROR_CONTENT_NOT_FOUND,
+						"Not a directory: Path='%s'", vfs_path};
+				}
+
+				for (auto&& dir_entry : fs::dir{vfs_path})
+				{
+					if (dir_entry.name == "." || dir_entry.name == "..")
+					{
+						continue;
+					}
+
+					std::string track = path + "/" + dir_entry.name;
+					cellSearch.notice(
+						"cellSearchGetMusicSelectionContext(): Hash=%08X, "
+						"Assigning found track: Type=0x%x, Path='%s'",
+						content_hash, +content->second->type, track);
+					context.playlist.push_back(std::move(track));
+				}
+			}
+			else if (content->second->type == CELL_SEARCH_CONTENTTYPE_MUSIC)
+			{
+				context.playlist.push_back(content->second->infoPath.contentPath);
+				cellSearch.notice(
+					"cellSearchGetMusicSelectionContext(): Hash=%08X, "
+					"Assigning found track: Type=0x%x, Path='%s'",
+					content_hash, +content->second->type,
+					context.playlist.back());
+			}
+			else
+			{
+				return {CELL_SEARCH_ERROR_INVALID_CONTENTTYPE,
+					"Type: %d, Expected: CELL_SEARCH_CONTENTTYPE_MUSIC or "
+					"CELL_SEARCH_CONTENTTYPE_MUSICLIST",
+					+content->second->type};
+			}
 		}
 		else if (first_content->type == CELL_SEARCH_CONTENTTYPE_MUSICLIST)
 		{
@@ -2014,7 +2043,7 @@ error_code cellSearchGetMusicSelectionContext(
 			shared_ptr<search_content_t> content = get_random_content();
 			context.playlist.push_back(content->infoPath.contentPath);
 			cellSearch.notice("cellSearchGetMusicSelectionContext(): Hash=%08X, "
-							  "Assigning random track: Type=0x%x, Path=%s",
+							  "Assigning random track: Type=0x%x, Path='%s'",
 				content_hash, +content->type, context.playlist.back());
 		}
 		else
@@ -2023,7 +2052,7 @@ error_code cellSearchGetMusicSelectionContext(
 			// TODO: whole playlist
 			context.playlist.push_back(first_content->infoPath.contentPath);
 			cellSearch.notice("cellSearchGetMusicSelectionContext(): Hash=%08X, "
-							  "Assigning first track: Type=0x%x, Path=%s",
+							  "Assigning first track: Type=0x%x, Path='%s'",
 				content_hash, +first_content->type,
 				context.playlist.back());
 		}
@@ -2041,7 +2070,7 @@ error_code cellSearchGetMusicSelectionContext(
 		shared_ptr<search_content_t> content = get_random_content();
 		context.playlist.push_back(content->infoPath.contentPath);
 		cellSearch.notice("cellSearchGetMusicSelectionContext(): Assigning random "
-						  "track: Type=0x%x, Path=%s",
+						  "track: Type=0x%x, Path='%s'",
 			+content->type, context.playlist.back());
 	}
 	else
@@ -2050,7 +2079,7 @@ error_code cellSearchGetMusicSelectionContext(
 		// TODO: whole playlist
 		context.playlist.push_back(first_content->infoPath.contentPath);
 		cellSearch.notice("cellSearchGetMusicSelectionContext(): Assigning first "
-						  "track: Type=0x%x, Path=%s",
+						  "track: Type=0x%x, Path='%s'",
 			+first_content->type, context.playlist.back());
 	}
 

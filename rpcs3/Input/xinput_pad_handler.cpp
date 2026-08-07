@@ -100,7 +100,7 @@ void xinput_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rs_up.def = ::at32(button_list, XInputKeyCodes::RSYPos);
 	cfg->start.def = ::at32(button_list, XInputKeyCodes::Start);
 	cfg->select.def = ::at32(button_list, XInputKeyCodes::Back);
-	cfg->ps.def = ::at32(button_list, XInputKeyCodes::Guide);
+	cfg->ps.def       = cfg_pad::make_button_string(button_list, {{XInputKeyCodes::Guide}, {XInputKeyCodes::Start, XInputKeyCodes::Back}});
 	cfg->square.def = ::at32(button_list, XInputKeyCodes::X);
 	cfg->cross.def = ::at32(button_list, XInputKeyCodes::A);
 	cfg->circle.def = ::at32(button_list, XInputKeyCodes::B);
@@ -127,8 +127,6 @@ void xinput_pad_handler::init_config(cfg_pad* cfg)
 	cfg->rstickdeadzone.def = XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE;      // between 0 and 32767
 	cfg->ltriggerthreshold.def = XINPUT_GAMEPAD_TRIGGER_THRESHOLD;      // between 0 and 255
 	cfg->rtriggerthreshold.def = XINPUT_GAMEPAD_TRIGGER_THRESHOLD;      // between 0 and 255
-	cfg->lpadsquircling.def = 8000;
-	cfg->rpadsquircling.def = 8000;
 
 	// apply defaults
 	cfg->from_default();
@@ -201,9 +199,9 @@ int xinput_pad_handler::GetDeviceNumber(const std::string& padId)
 	return device_number;
 }
 
-std::unordered_map<u64, u16> xinput_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
+std::unordered_map<u32, u16> xinput_pad_handler::get_button_values(const std::shared_ptr<PadDevice>& device)
 {
-	PadButtonValues values;
+	std::unordered_map<u32, u16> values;
 	XInputDevice* dev = static_cast<XInputDevice*>(device.get());
 	if (!dev || dev->state != ERROR_SUCCESS) // the state has to be aquired with update_connection before calling this function
 		return values;
@@ -217,9 +215,9 @@ std::unordered_map<u64, u16> xinput_pad_handler::get_button_values(const std::sh
 	return get_button_values_base(dev->state_base, m_trigger_recognition_mode);
 }
 
-xinput_pad_handler::PadButtonValues xinput_pad_handler::get_button_values_base(const XINPUT_STATE& state, trigger_recognition_mode trigger_mode)
+std::unordered_map<u32, u16> xinput_pad_handler::get_button_values_base(const XINPUT_STATE& state, trigger_recognition_mode trigger_mode)
 {
-	PadButtonValues values;
+	std::unordered_map<u32, u16> values;
 
 	// Triggers
 	if (trigger_mode == trigger_recognition_mode::any || trigger_mode == trigger_recognition_mode::one_directional)
@@ -291,9 +289,9 @@ xinput_pad_handler::PadButtonValues xinput_pad_handler::get_button_values_base(c
 	return values;
 }
 
-xinput_pad_handler::PadButtonValues xinput_pad_handler::get_button_values_scp(const SCP_EXTN& state, trigger_recognition_mode trigger_mode)
+std::unordered_map<u32, u16> xinput_pad_handler::get_button_values_scp(const SCP_EXTN& state, trigger_recognition_mode trigger_mode)
 {
-	PadButtonValues values;
+	std::unordered_map<u32, u16> values;
 
 	// Triggers
 	if (trigger_mode == trigger_recognition_mode::any || trigger_mode == trigger_recognition_mode::one_directional)
@@ -359,7 +357,7 @@ xinput_pad_handler::PadButtonValues xinput_pad_handler::get_button_values_scp(co
 	return values;
 }
 
-pad_preview_values xinput_pad_handler::get_preview_values(const std::unordered_map<u64, u16>& data)
+pad_preview_values xinput_pad_handler::get_preview_values(const std::unordered_map<u32, u16>& data, const std::vector<std::string>& /*buttons*/)
 {
 	return {
 		::at32(data, LT),
@@ -454,17 +452,17 @@ std::shared_ptr<PadDevice> xinput_pad_handler::get_device(const std::string& dev
 	return dev;
 }
 
-bool xinput_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool xinput_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == XInputKeyCodes::LT;
 }
 
-bool xinput_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool xinput_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	return keyCode == XInputKeyCodes::RT;
 }
 
-bool xinput_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool xinput_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -478,7 +476,7 @@ bool xinput_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*d
 	}
 }
 
-bool xinput_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
+bool xinput_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u32 keyCode)
 {
 	switch (keyCode)
 	{
@@ -563,8 +561,8 @@ void xinput_pad_handler::apply_pad_data(const pad_ensemble& binding)
 
 	// The left motor is the low-frequency rumble motor. The right motor is the high-frequency rumble motor.
 	// The two motors are not the same, and they create different vibration effects. Values range between 0 to 65535.
-	const u8 speed_large = cfg->get_large_motor_speed(pad->m_vibrateMotors);
-	const u8 speed_small = cfg->get_small_motor_speed(pad->m_vibrateMotors);
+	const u8 speed_large = cfg->get_large_motor_speed(pad->m_vibrate_motors);
+	const u8 speed_small = cfg->get_small_motor_speed(pad->m_vibrate_motors);
 
 	dev->new_output_data |= dev->large_motor != speed_large || dev->small_motor != speed_small;
 

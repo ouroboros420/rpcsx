@@ -58,7 +58,7 @@ namespace rsx
 		RSX(ctx)->reset();
 		RSX(ctx)->on_frame_end(arg);
 		RSX(ctx)->request_emu_flip(arg);
-		vm::_ref<atomic_t<u128>>(RSX(ctx)->label_addr + 0x10).store(u128{});
+		vm::_ptr<atomic_t<u128>>(RSX(ctx)->label_addr + 0x10)->store(u128{});
 	}
 
 	void user_command(context* ctx, u32, u32 arg)
@@ -709,9 +709,8 @@ namespace rsx
 			state_signals[NV4097_SET_POINT_SIZE] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_ALPHA_FUNC] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_ALPHA_REF] = rsx::fragment_state_dirty;
-			state_signals[NV4097_SET_ALPHA_TEST_ENABLE] = rsx::fragment_state_dirty;
-			state_signals[NV4097_SET_ANTI_ALIASING_CONTROL] = rsx::fragment_state_dirty | rsx::pipeline_config_dirty;
-			state_signals[NV4097_SET_SHADER_PACKER] = rsx::fragment_state_dirty;
+			state_signals[NV4097_SET_ALPHA_TEST_ENABLE] = rsx::fragment_program_state_dirty;
+			state_signals[NV4097_SET_SHADER_PACKER] = rsx::fragment_program_state_dirty;
 			state_signals[NV4097_SET_SHADER_WINDOW] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_FOG_MODE] = rsx::fragment_state_dirty;
 			state_signals[NV4097_SET_SCISSOR_HORIZONTAL] = rsx::scissor_config_state_dirty;
@@ -726,7 +725,7 @@ namespace rsx
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 0] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 1] = rsx::vertex_state_dirty;
 			state_signals[NV4097_SET_VIEWPORT_OFFSET + 2] = rsx::vertex_state_dirty;
-			state_signals[NV4097_SET_POLYGON_STIPPLE] = rsx::fragment_state_dirty;
+			state_signals[NV4097_SET_POLYGON_STIPPLE] = rsx::fragment_program_state_dirty;
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 0] = rsx::polygon_stipple_pattern_dirty;
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 1] = rsx::polygon_stipple_pattern_dirty;
 			state_signals[NV4097_SET_POLYGON_STIPPLE_PATTERN + 2] = rsx::polygon_stipple_pattern_dirty;
@@ -1707,6 +1706,7 @@ namespace rsx
 		bind(NV4097_SET_BLEND_EQUATION, nv4097::set_blend_equation);
 		bind(NV4097_SET_BLEND_FUNC_SFACTOR, nv4097::set_blend_factor);
 		bind(NV4097_SET_BLEND_FUNC_DFACTOR, nv4097::set_blend_factor);
+		bind(NV4097_SET_ANTI_ALIASING_CONTROL, nv4097::set_aa_control);
 
 		// NV308A (0xa400..0xbffc!)
 		bind_array(NV308A_COLOR, 1, 256 * 7, nv308a::color::impl);

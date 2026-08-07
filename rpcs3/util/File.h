@@ -66,13 +66,13 @@ namespace fs
 	// File attributes (TODO)
 	struct stat_t
 	{
-		bool is_directory;
-		bool is_symlink;
-		bool is_writable;
-		u64 size;
-		s64 atime;
-		s64 mtime;
-		s64 ctime;
+		bool is_directory = false;
+		bool is_symlink = false;
+		bool is_writable = false;
+		u64 size = 0;
+		s64 atime = 0;
+		s64 mtime = 0;
+		s64 ctime = 0;
 
 		using enable_bitcopy = std::true_type;
 
@@ -159,7 +159,7 @@ namespace fs
 	// Virtual device
 	struct device_base
 	{
-		const std::string fs_prefix;
+		std::string fs_prefix;
 
 		device_base();
 		virtual ~device_base();
@@ -187,7 +187,7 @@ namespace fs
 	} pod_tag;
 
 	// Get virtual device for specified path (nullptr for real path)
-	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path);
+	shared_ptr<device_base> get_virtual_device(const std::string& path, std::string_view* device_path = nullptr);
 
 	// Set virtual device with specified name (nullptr for deletion)
 	shared_ptr<device_base> set_virtual_device(const std::string& name, shared_ptr<device_base> device);
@@ -200,6 +200,9 @@ namespace fs
 	{
 		return std::string{get_parent_dir_view(path, parent_level)};
 	}
+
+	// Return "path" plus an ending delimiter (if missing) if "path" is an existing directory. Otherwise, an empty string
+	std::string get_path_if_dir(const std::string& path);
 
 	// Get file information
 	bool get_stat(const std::string& path, stat_t& info);
@@ -215,6 +218,12 @@ namespace fs
 
 	// Check whether the path points to an existing symlink
 	bool is_symlink(const std::string& path);
+
+	// Check whether the path points to a raw device
+	bool is_optical_raw_device(const std::string& path);
+
+	// Check whether the path points to an optical drive. If so, provide the raw device in "raw_device" if requested
+	bool get_optical_raw_device(const std::string& path, std::string* raw_device = nullptr);
 
 	// Get filesystem information
 	bool statfs(const std::string& path, device_stat& info);
@@ -259,6 +268,8 @@ namespace fs
 
 		// Open file with specified mode
 		explicit file(const std::string& path, rx::EnumBitSet<open_mode> mode = ::fs::read);
+
+		file(std::unique_ptr<file_base>&& ptr) : m_file(std::move(ptr)) {}
 
 		static file from_native_handle(native_handle handle);
 
@@ -524,6 +535,9 @@ namespace fs
 		}
 	};
 
+	// Enable sparse-file semantics when required by the host platform.
+	bool set_sparse(const file& file);
+
 	class dir final
 	{
 		std::unique_ptr<dir_base> m_dir{};
@@ -745,6 +759,7 @@ namespace fs
 		notempty,
 		readonly,
 		isdir,
+		notdir,
 		toolong,
 		nospace,
 		xdev,

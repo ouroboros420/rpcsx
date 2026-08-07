@@ -15,6 +15,17 @@
 
 namespace vk
 {
+	std::string ubo_array_dim(u32 element_size)
+	{
+		const auto* pdev = vk::get_current_renderer();
+		if (!pdev || pdev->get_unsized_array_support())
+		{
+			return "[]";
+		}
+
+		return fmt::format("[%u]", pdev->ubo_array_bound(element_size));
+	}
+
 	extern chip_class g_chip_class;
 
 	std::unordered_map<u32, std::unique_ptr<vk::compute_task>> g_compute_tasks;
@@ -90,6 +101,7 @@ namespace vk
 		g_drv_no_primitive_restart = false;
 		g_drv_sanitize_fp_values = false;
 		g_drv_disable_fence_reset = false;
+		g_drv_strict_query_scopes = !!g_cfg.video.strict_rendering_mode;
 		g_drv_emulate_cond_render = (g_cfg.video.relaxed_zcull_sync && !g_render_device->get_conditional_render_support());
 		g_num_processed_frames = 0;
 		g_num_total_frames = 0;

@@ -1,14 +1,16 @@
 #pragma once
 
 #include "io_buffer.h"
+#include "simple_array.hpp"
 #include "../color_utils.h"
 #include "../RSXTexture.h"
 
-#include <stack>
 #include <vector>
 
 namespace rsx
 {
+	using flags32_t = u32;
+
 	enum texture_upload_context : u32
 	{
 		shader_read = 1,
@@ -126,6 +128,56 @@ namespace rsx
 
 	using namespace format_class_;
 
+	enum format_features : u8
+	{
+		RSX_FORMAT_FEATURE_SIGNED_COMPONENTS    = (1 << 0),
+		RSX_FORMAT_FEATURE_BIASED_NORMALIZATION = (1 << 1),
+		RSX_FORMAT_FEATURE_GAMMA_CORRECTION     = (1 << 2),
+		RSX_FORMAT_FEATURE_16BIT_CHANNELS       = (1 << 3),  // Complements RSX_FORMAT_FEATURE_SIGNED_COMPONENTS
+	};
+
+	enum host_format_features : u8
+	{
+		RSX_HOST_FORMAT_FEATURE_SNORM = (1 << 0),
+		RSX_HOST_FORMAT_FEATURE_SRGB  = (1 << 1),
+	};
+
+	using enum format_features;
+
+	struct texture_format_ex
+	{
+		texture_format_ex() = default;
+		texture_format_ex(u32 bits)
+			: format_bits(bits)
+		{}
+
+		bool valid() const { return format_bits != 0; }
+		u32 format() const { return format_bits & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN); }
+
+		bool hw_SNORM_possible() const;
+		bool hw_SRGB_possible() const;
+
+		bool host_snorm_format_active() const { return host_features & RSX_HOST_FORMAT_FEATURE_SNORM; }
+		bool host_srgb_format_active() const { return host_features & RSX_HOST_FORMAT_FEATURE_SRGB; }
+
+		operator bool() const { return valid(); }
+
+		bool operator == (const texture_format_ex& that) const
+		{
+			return this->format_bits == that.format_bits &&
+				this->features == that.features &&
+				this->host_features == that.host_features &&
+				this->encoded_remap == that.encoded_remap;
+		}
+
+	//private:
+		u32 format_bits = 0;
+		u32 features = 0;
+		u32 encoded_remap = 0;
+		u32 texel_remap_control = 0;
+		u32 host_features = 0;
+	};
+
 	// Sampled image descriptor
 	class sampled_image_descriptor_base
 	{
@@ -141,7 +193,7 @@ namespace rsx
 #pragma pack(pop)
 
 		// Texure matrix stack
-		std::stack<texcoord_xform_t> m_texcoord_xform_stack;
+		rsx::simple_array<texcoord_xform_t> m_texcoord_xform_stack;
 
 	public:
 		virtual ~sampled_image_descriptor_base() = default;
@@ -149,14 +201,14 @@ namespace rsx
 
 		void push_texcoord_xform()
 		{
-			m_texcoord_xform_stack.push(texcoord_xform);
+			m_texcoord_xform_stack.push_back(texcoord_xform);
 		}
 
 		void pop_texcoord_xform()
 		{
 			ensure(!m_texcoord_xform_stack.empty());
-			std::memcpy(&texcoord_xform, &m_texcoord_xform_stack.top(), sizeof(texcoord_xform_t));
-			m_texcoord_xform_stack.pop();
+			std::memcpy(&texcoord_xform, &m_texcoord_xform_stack.back(), sizeof(texcoord_xform_t));
+			m_texcoord_xform_stack.pop_back();
 		}
 
 		texture_upload_context upload_context = texture_upload_context::shader_read;
@@ -168,6 +220,7 @@ namespace rsx
 		u64 surface_cache_tag = 0;
 
 		texcoord_xform_t texcoord_xform;
+		texture_format_ex format_ex;
 	};
 
 	struct typeless_xfer
@@ -232,6 +285,21 @@ namespace rsx
 		usz alignment;
 	};
 
+	struct image_section_attributes_t
+	{
+		u32 address;
+		u32 gcm_format;
+		u32 pitch;
+		u16 width;
+		u16 height;
+		u16 depth;
+		u16 mipmaps;
+		u16 slice_h;
+		u8  bpp;
+		bool swizzled;
+		bool edge_clamped;
+	};
+
 	/**
 	 * Get size to store texture in a linear fashion.
 	 * Storage is assumed to use a rowPitchAlignment boundary for every row of texture.
@@ -246,6 +314,7 @@ namespace rsx
 	 */
 	std::vector<subresource_layout> get_subresources_layout(const rsx::fragment_texture& texture);
 	std::vector<subresource_layout> get_subresources_layout(const rsx::vertex_texture& texture);
+	std::vector<subresource_layout> get_subresources_layout(const image_section_attributes_t& attrs, texture_dimension_extended type);
 
 	texture_memory_info upload_texture_subresource(rsx::io_buffer& dst_buffer, const subresource_layout& src_layout, int format, bool is_swizzled, texture_uploader_capabilities& caps);
 
@@ -258,7 +327,18 @@ namespace rsx
 	u8 get_format_sample_count(rsx::surface_antialiasing antialias);
 	u32 get_max_depth_value(rsx::surface_depth_format2 format);
 	bool is_depth_stencil_format(rsx::surface_depth_format2 format);
-	bool is_int8_remapped_format(u32 format); // Returns true if the format is treated as INT8 by the RSX remapper.
+
+	/**
+	* Format feature support. There is not simple format to determine what is supported here, results are from hw tests
+	* Returns a bitmask of supported features.
+	*/
+	rsx::flags32_t get_format_features(u32 texture_format);
+
+	/**
+	 * Returns a channel mask in ARGB that can be SNORM-converted
+	 * Some formats have a hardcoded constant in one lane which we cannot SNORM-interpret in hardware.
+	 */
+	u32 get_host_format_snorm_mask(u32 format);
 
 	/**
 	 * Returns number of texel rows encoded in one pitch-length line of bytes
@@ -286,6 +366,9 @@ namespace rsx
 	 */
 	std::pair<u32, bool> get_compatible_gcm_format(rsx::surface_color_format format);
 	std::pair<u32, bool> get_compatible_gcm_format(rsx::surface_depth_format2 format);
+
+	rsx::surface_color_format get_compatible_surface_color_format(u32 gcm_format);
+	rsx::surface_depth_format2 get_compatible_surface_depth_format(u32 gcm_format);
 
 	format_class classify_format(rsx::surface_depth_format2 format);
 	format_class classify_format(u32 gcm_format);

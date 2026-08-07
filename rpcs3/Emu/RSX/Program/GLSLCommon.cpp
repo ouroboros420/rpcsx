@@ -43,8 +43,6 @@ namespace glsl
 	{
 		switch (elementCount)
 		{
-		default:
-			abort();
 		case 1:
 			return "float";
 		case 2:
@@ -53,6 +51,8 @@ namespace glsl
 			return "vec3";
 		case 4:
 			return "vec4";
+		default:
+			fmt::throw_exception("Unexpected element count %d", elementCount);
 		}
 	}
 
@@ -60,8 +60,6 @@ namespace glsl
 	{
 		switch (elementCount)
 		{
-		default:
-			abort();
 		case 1:
 			return "float16_t";
 		case 2:
@@ -70,10 +68,12 @@ namespace glsl
 			return "f16vec3";
 		case 4:
 			return "f16vec4";
+		default:
+			fmt::throw_exception("Unexpected element count %d", elementCount);
 		}
 	}
 
-	std::string compareFunctionImpl(COMPARE f, const std::string& Op0, const std::string& Op1, bool scalar)
+	std::string compareFunctionImpl(COMPARE f, std::string_view Op0, std::string_view Op1, bool scalar)
 	{
 		if (scalar)
 		{
@@ -175,12 +175,12 @@ namespace glsl
 			enabled_options.push_back("_ENABLE_LIT_EMULATION");
 		}
 
-		OS << "#define _select mix\n";
-		OS << "#define _saturate(x) clamp(x, 0., 1.)\n";
-		OS << "#define _get_bits(x, off, count) bitfieldExtract(x, off, count)\n";
-		OS << "#define _set_bits(x, y, off, count) bitfieldInsert(x, y, off, count)\n";
-		OS << "#define _test_bit(x, y) (_get_bits(x, y, 1) != 0)\n";
-		OS << "#define _rand(seed) fract(sin(dot(seed.xy, vec2(12.9898f, 78.233f))) * 43758.5453f)\n\n";
+		if (props.require_clip_plane_functions)
+		{
+			OS << "#define CLIP_PLANE_DISABLED 1\n"
+				  "#define is_user_clip_enabled(idx) (_get_bits(get_user_clip_config(), idx * 2, 2) != CLIP_PLANE_DISABLED)\n"
+				  "#define user_clip_factor(idx) (float(_get_bits(get_user_clip_config(), idx * 2, 2)) - 1.f)\n\n";
+		}
 
 		if (props.domain == glsl::program_domain::glsl_fragment_program)
 		{
@@ -196,6 +196,8 @@ namespace glsl
 					{"ALPHA_TEST_FUNC_LENGTH      ", rsx::ROP_control_bits::ALPHA_FUNC_NUM_BITS},
 					{"MSAA_SAMPLE_CTRL_OFFSET     ", rsx::ROP_control_bits::MSAA_SAMPLE_CTRL_OFFSET},
 					{"MSAA_SAMPLE_CTRL_LENGTH     ", rsx::ROP_control_bits::MSAA_SAMPLE_CTRL_NUM_BITS},
+					{"FRAG_DEPTH_24_BIT           ", rsx::ROP_control_bits::FRAG_DEPTH_24_BIT},
+					{"FRAG_DEPTH_FLOAT_BIT        ", rsx::ROP_control_bits::FRAG_DEPTH_FLOAT_BIT},
 					{"ROP_CMD_MASK                ", rsx::ROP_control_bits::ROP_CMD_MASK}});
 
 			program_common::define_glsl_constants<const char*>(OS,
@@ -209,12 +211,12 @@ namespace glsl
 				enabled_options.push_back("_32_BIT_OUTPUT");
 			}
 
-			if (!props.fp32_outputs)
+			if (props.ROP_sRGB_packing)
 			{
 				enabled_options.push_back("_ENABLE_FRAMEBUFFER_SRGB");
 			}
 
-			if (props.disable_early_discard)
+			if (props.disable_early_discard && props.ROP_discard)
 			{
 				enabled_options.push_back("_DISABLE_EARLY_DISCARD");
 			}
@@ -224,7 +226,25 @@ namespace glsl
 				enabled_options.push_back("_ENABLE_ROP_OUTPUT_ROUNDING");
 			}
 
-			enabled_options.push_back("_ENABLE_POLYGON_STIPPLE");
+			if (props.ROP_alpha_test)
+			{
+				enabled_options.push_back("_ENABLE_ALPHA_TEST");
+			}
+
+			if (props.ROP_polygon_stipple_test)
+			{
+				enabled_options.push_back("_ENABLE_POLYGON_STIPPLE");
+			}
+
+			if (props.emulate_depth_compare)
+			{
+				enabled_options.push_back("_ENABLE_DEPTH_COMPARE");
+			}
+
+			if (props.depth_buffer_multisampled)
+			{
+				enabled_options.push_back("_ENABLE_DEPTH_BUFFER_MULTISAMPLED");
+			}
 		}
 
 		// Import common header
@@ -269,12 +289,12 @@ namespace glsl
 			return;
 		}
 
-		if (props.emulate_coverage_tests)
+		if (props.ROP_alpha_to_coverage_test)
 		{
-			enabled_options.push_back("_EMULATE_COVERAGE_TEST");
+			enabled_options.push_back("_ENABLE_ALPHA_TO_COVERAGE_TEST");
 		}
 
-		if (!props.fp32_outputs || props.require_linear_to_srgb)
+		if (props.ROP_sRGB_packing || props.require_linear_to_srgb)
 		{
 			enabled_options.push_back("_ENABLE_LINEAR_TO_SRGB");
 		}
@@ -287,6 +307,11 @@ namespace glsl
 		if (props.require_wpos)
 		{
 			enabled_options.push_back("_ENABLE_WPOS");
+		}
+
+		if (props.ROP_alpha_test || (props.require_msaa_ops && props.require_tex_shadow_ops))
+		{
+			enabled_options.push_back("_ENABLE_COMPARISON_FUNC");
 		}
 
 		if (props.require_fog_read)
@@ -339,7 +364,12 @@ namespace glsl
 					{"FILTERED_MAG_BIT", rsx::texture_control_bits::FILTERED_MAG},
 					{"FILTERED_MIN_BIT", rsx::texture_control_bits::FILTERED_MIN},
 					{"INT_COORDS_BIT  ", rsx::texture_control_bits::UNNORMALIZED_COORDS},
-					{"CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT}});
+					{"CLAMP_COORDS_BIT", rsx::texture_control_bits::CLAMP_TEXCOORDS_BIT},
+
+					{"FORMAT_FEATURE_SIGNED_BIT", rsx::texture_control_bits::FF_SIGNED_BIT},
+					{"FORMAT_FEATURE_GAMMA_BIT", rsx::texture_control_bits::FF_GAMMA_BIT},
+					{"FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT", rsx::texture_control_bits::FF_BIASED_RENORM_BIT},
+					{"FORMAT_FEATURE_16BIT_CHANNELS_BIT", rsx::texture_control_bits::FF_16BIT_CHANNELS_BIT}});
 
 			if (props.require_texture_expand)
 			{
@@ -374,6 +404,26 @@ namespace glsl
 			if (props.require_shadowProj_ops)
 			{
 				enabled_options.push_back("_ENABLE_SHADOWPROJ");
+			}
+
+			if (props.require_alpha_kill)
+			{
+				enabled_options.push_back("_ENABLE_TEXTURE_ALPHA_KILL");
+			}
+
+			if (props.require_color_format_convert)
+			{
+				enabled_options.push_back("_ENABLE_FORMAT_CONVERSION");
+			}
+
+			if (props.require_depth_conversion)
+			{
+				enabled_options.push_back("_ENABLE_DEPTH_FORMAT_RECONSTRUCTION");
+			}
+
+			if (props.require_msaa_ops)
+			{
+				enabled_options.push_back("_ENABLE_TEXTURE_MULTISAMPLE");
 			}
 
 			program_common::define_glsl_switches(OS, enabled_options);
@@ -415,8 +465,6 @@ namespace glsl
 	{
 		switch (f)
 		{
-		default:
-			abort();
 		case FUNCTION::DP2:
 			return "$Ty(dot($0.xy, $1.xy))";
 		case FUNCTION::DP2A:
@@ -519,6 +567,8 @@ namespace glsl
 			return "textureLod($t, $0.xyz, 0)";
 		case FUNCTION::VERTEX_TEXTURE_FETCH2DMS:
 			return "texelFetch($t, ivec2($0.xy * textureSize($t)), 0)";
+		default:
+			fmt::throw_exception("Unexpected function request: %d", static_cast<int>(f));
 		}
 
 		rsx_log.error("Unexpected function request: %d", static_cast<int>(f));
@@ -578,7 +628,7 @@ namespace glsl
 					}
 				}
 
-				varying_list.push_back({reg_location, var_name, PT.type});
+				varying_list.push_back({ reg_location, std::move(var_name), PT.type });
 			}
 		}
 

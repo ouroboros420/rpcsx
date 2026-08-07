@@ -27,10 +27,13 @@ namespace cfg
 	std::vector<std::string> make_float_range(f64 min, f64 max);
 
 	// Internal hack
-	bool try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, std::string_view);
+	bool try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, std::string_view value, std::string_view name = {});
 
 	// Internal hack
 	std::vector<std::string> try_to_enum_list(decltype(&fmt_class_string<int>::format) func);
+
+	// Internal hack
+	size_t try_to_enum_size(decltype(&fmt_class_string<int>::format) func);
 
 	// Config tree entry type.
 	enum class type : unsigned
@@ -40,6 +43,7 @@ namespace cfg
 		_enum,    // cfg::_enum type
 		_int,     // cfg::_int type
 		uint,     // cfg::uint type
+		uint128, // cfg::uint128 type
 		string,   // cfg::string type
 		set,      // cfg::set_entry type
 		map,      // cfg::map_entry type
@@ -107,6 +111,9 @@ namespace cfg
 		// Reset defaults
 		virtual void from_default() = 0;
 
+		// Restore default members
+		virtual void restore_defaults() = 0;
+
 		// Convert to string (optional)
 		virtual std::string to_string() const
 		{
@@ -123,7 +130,7 @@ namespace cfg
 		}
 
 		// Try to convert from string (optional)
-		virtual bool from_string(std::string_view, bool /*dynamic*/ = false);
+		virtual bool from_string(std::string_view value, bool dynamic = false);
 
 		// Get string list (optional)
 		virtual std::vector<std::string> to_list() const
@@ -173,17 +180,24 @@ namespace cfg
 
 		// Set default values
 		void from_default() override;
+
+		// Restore default members
+		void restore_defaults() override;
+
+		// Try to convert from string and validate
+		bool validate(std::string_view value);
 	};
 
 	class _bool final : public _base
 	{
 		atomic_t<bool> m_value;
+		bool original_def;
 
 	public:
 		bool def;
 
 		_bool(node* owner, std::string name, bool def = false, bool dynamic = false)
-			: _base(type::_bool, owner, std::move(name), dynamic), m_value(def), def(def)
+			: _base(type::_bool, owner, std::move(name), dynamic), m_value(def), original_def(def), def(def)
 		{
 		}
 
@@ -197,7 +211,15 @@ namespace cfg
 			return m_value;
 		}
 
-		void from_default() override;
+		void from_default() override
+		{
+			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
+		}
 
 		std::string to_string() const override
 		{
@@ -260,12 +282,13 @@ namespace cfg
 	class _enum : public _base
 	{
 		atomic_t<T> m_value;
+		T original_def;
 
 	public:
-		const T def;
+		T def;
 
-		_enum(node* owner, const std::string& name, T value = {}, bool dynamic = false)
-			: _base(type::_enum, owner, name, dynamic), m_value(value), def(value)
+		_enum(node* owner, const std::string& name, T def = {}, bool dynamic = false)
+			: _base(type::_enum, owner, name, dynamic), m_value(def), original_def(def), def(def)
 		{
 		}
 
@@ -292,6 +315,11 @@ namespace cfg
 		void from_default() override
 		{
 			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
 		}
 
 		std::string to_string() const override
@@ -322,7 +350,7 @@ namespace cfg
 		{
 			u64 result;
 
-			if (try_to_enum_value(&result, &fmt_class_string<T>::format, value))
+			if (try_to_enum_value(&result, &fmt_class_string<T>::format, value, m_name))
 			{
 				// No narrowing check, it's hard to do right there
 				m_value = static_cast<T>(static_cast<std::underlying_type_t<T>>(result));
@@ -346,6 +374,11 @@ namespace cfg
 		{
 			return try_to_enum_list(&fmt_class_string<T>::format);
 		}
+
+		size_t size() const
+		{
+			return try_to_enum_size(&fmt_class_string<T>::format);
+		}
 	};
 
 	// Signed 32/64-bit integer entry with custom Min/Max range.
@@ -360,6 +393,7 @@ namespace cfg
 		atomic_t<int_type> m_value;
 		std::function<s64()> m_min_fn;
 		std::function<s64()> m_max_fn;
+		int_type original_def;
 
 	public:
 		int_type def;
@@ -371,7 +405,7 @@ namespace cfg
 		_int(node* owner, const std::string& name, int_type def = std::min<int_type>(Max, std::max<int_type>(Min, 0)), bool dynamic = false,
 			std::function<s64()> min_fn = nullptr,
 			std::function<s64()> max_fn = nullptr)
-			: _base(type::_int, owner, name, dynamic), m_value(def), m_min_fn(std::move(min_fn)), m_max_fn(std::move(max_fn)), def(def)
+			: _base(type::_int, owner, name, dynamic), m_value(def), m_min_fn(std::move(min_fn)), m_max_fn(std::move(max_fn)), original_def(def), def(def)
 		{
 		}
 
@@ -388,6 +422,11 @@ namespace cfg
 		void from_default() override
 		{
 			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
 		}
 
 		std::string to_string() const override
@@ -434,7 +473,7 @@ namespace cfg
 		bool from_string(std::string_view value, bool /*dynamic*/ = false) override
 		{
 			s64 result;
-			if (try_to_int64(&result, value, Min, Max))
+			if (try_to_int64(&result, value, Min, Max, m_name))
 			{
 				m_value = static_cast<int_type>(result);
 				return true;
@@ -462,7 +501,7 @@ namespace cfg
 
 		void set(const s64& value)
 		{
-			ensure(value >= Min && value <= Max);
+			if (value < Min || value > Max) fmt::throw_exception("'%s': value %d out of bounds (min=%d, max=%d)", m_name, value, Min, Max);
 			m_value = static_cast<int_type>(value);
 		}
 
@@ -480,6 +519,7 @@ namespace cfg
 
 		using float_type = f64;
 		atomic_t<float_type> m_value;
+		float_type original_def;
 
 	public:
 		float_type def;
@@ -489,7 +529,7 @@ namespace cfg
 		static constexpr float_type min = Min;
 
 		_float(node* owner, const std::string& name, float_type def = std::min<float_type>(Max, std::max<float_type>(Min, 0)), bool dynamic = false)
-			: _base(type::_int, owner, name, dynamic), m_value(def), def(def)
+			: _base(type::_int, owner, name, dynamic), m_value(def), original_def(def), def(def)
 		{
 		}
 
@@ -508,10 +548,15 @@ namespace cfg
 			m_value = def;
 		}
 
+		void restore_defaults() override
+		{
+			def = original_def;
+		}
+
 		std::string to_string() const override
 		{
 			std::string result;
-			if (try_to_string(&result, m_value))
+			if (try_to_string(&result, m_value, m_name))
 			{
 				return result;
 			}
@@ -533,7 +578,7 @@ namespace cfg
 		std::string def_to_string() const override
 		{
 			std::string result;
-			if (try_to_string(&result, def))
+			if (try_to_string(&result, def, m_name))
 			{
 				return result;
 			}
@@ -544,7 +589,7 @@ namespace cfg
 		bool from_string(std::string_view value, bool /*dynamic*/ = false) override
 		{
 			f64 result;
-			if (try_to_float(&result, value, Min, Max))
+			if (try_to_float(&result, value, Min, Max, m_name))
 			{
 				m_value = static_cast<float_type>(result);
 				return true;
@@ -572,7 +617,7 @@ namespace cfg
 
 		void set(const f64& value)
 		{
-			ensure(value >= Min && value <= Max);
+			if (value < Min || value > Max) fmt::throw_exception("'%s': value %d out of bounds (min=%d, max=%d)", m_name, value, Min, Max);
 			m_value = static_cast<float_type>(value);
 		}
 
@@ -598,6 +643,7 @@ namespace cfg
 		using int_type = std::conditional_t<Max <= u32{umax}, u32, u64>;
 
 		atomic_t<int_type> m_value;
+		int_type original_def;
 
 	public:
 		int_type def;
@@ -607,7 +653,7 @@ namespace cfg
 		static constexpr u64 min = Min;
 
 		uint(node* owner, const std::string& name, int_type def = std::max<int_type>(Min, 0), bool dynamic = false)
-			: _base(type::uint, owner, name, dynamic), m_value(def), def(def)
+			: _base(type::uint, owner, name, dynamic), m_value(def), original_def(def), def(def)
 		{
 		}
 
@@ -624,6 +670,11 @@ namespace cfg
 		void from_default() override
 		{
 			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
 		}
 
 		std::string to_string() const override
@@ -650,7 +701,7 @@ namespace cfg
 		bool from_string(std::string_view value, bool /*dynamic*/ = false) override
 		{
 			u64 result;
-			if (try_to_uint64(&result, value, Min, Max))
+			if (try_to_uint64(&result, value, Min, Max, m_name))
 			{
 				m_value = static_cast<int_type>(result);
 				return true;
@@ -678,7 +729,7 @@ namespace cfg
 
 		void set(const u64& value)
 		{
-			ensure(value >= Min && value <= Max);
+			if (value < Min || value > Max) fmt::throw_exception("'%s': value %d out of bounds (min=%d, max=%d)", m_name, value, Min, Max);
 			m_value = static_cast<int_type>(value);
 		}
 
@@ -694,16 +745,121 @@ namespace cfg
 	// Alias for 64 bit int
 	using uint64 = uint<0, u64{umax}>;
 
+	// Unsigned 128-bit integer entry.
+	class uint128 final : public _base
+	{
+		using int_type = u128;
+
+		atomic_t<int_type> m_value{};
+		int_type original_def = 0;
+
+	public:
+		int_type def;
+
+		uint128(node* owner, const std::string& name, int_type def = 0, bool dynamic = false)
+			: _base(type::uint128, owner, name, dynamic)
+			, m_value(def)
+			, original_def(def)
+			, def(def)
+		{
+		}
+
+		operator int_type() const
+		{
+			return m_value;
+		}
+
+		operator ullong() const
+		{
+			return static_cast<ullong>(m_value.load());
+		}
+
+		int_type get() const
+		{
+			return m_value;
+		}
+
+		void from_default() override
+		{
+			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
+		}
+
+		static std::string to_string(u128 value) noexcept;
+
+		std::string to_string() const override
+		{
+			return to_string(m_value.load());
+		}
+
+		std::string def_to_string() const override
+		{
+			return to_string(def);
+		}
+
+		bool from_string(std::string_view value, bool /*dynamic*/ = false) override
+		{
+			u128 result;
+			if (try_to_uint128(&result, value, m_name))
+			{
+				m_value = result;
+				return true;
+			}
+
+			return false;
+		}
+
+		void set(u128 value)
+		{
+			m_value = value;
+		}
+
+		std::vector<std::string> to_list() const override
+		{
+			// Should not be used
+			return make_uint_range(0, 1);
+		}
+
+		// to_json/from_json are RPCSX additions to cfg::_base and are pure
+		// virtual, so every setting type must implement them. Upstream added
+		// this class without them (it has no JSON layer), which would leave
+		// cfg::uint128 abstract here. Serialized as a string because a u128
+		// does not fit any JSON number type.
+		nlohmann::ordered_json to_json() const override
+		{
+			return {
+				{"type", "string"},
+				{"value", to_string()},
+				{"default", def_to_string()},
+			};
+		}
+
+		bool from_json(const nlohmann::json& json, bool dynamic = false) override
+		{
+			if (!json.is_string())
+			{
+				return false;
+			}
+
+			return from_string(json.get<std::string>(), dynamic);
+		}
+	};
+
 	// Simple string entry with mutex
 	class string : public _base
 	{
 		atomic_ptr<std::string> m_value;
+		std::string original_def;
 
 	public:
 		std::string def;
 
 		string(node* owner, std::string name, std::string def = {}, bool dynamic = false)
-			: _base(type::string, owner, std::move(name), dynamic), m_value(def), def(std::move(def))
+			: _base(type::string, owner, std::move(name), dynamic), m_value(def), original_def(def), def(std::move(def))
 		{
 		}
 
@@ -712,9 +868,22 @@ namespace cfg
 			return *m_value.load().get();
 		}
 
-		void from_default() override;
+		void from_default() override
+		{
+			m_value = def;
+		}
+
+		void restore_defaults() override
+		{
+			def = original_def;
+		}
 
 		std::string to_string() const override
+		{
+			return *m_value.load().get();
+		}
+
+		std::string get() const
 		{
 			return *m_value.load().get();
 		}
@@ -749,6 +918,11 @@ namespace cfg
 			m_value = json.get<nlohmann::json::string_t>();
 			return true;
 		}
+
+		void set(std::string_view value)
+		{
+			m_value = std::string(value);
+		}
 	};
 
 	// Simple set entry (TODO: template for various types)
@@ -773,7 +947,14 @@ namespace cfg
 			m_set = std::move(set);
 		}
 
-		void from_default() override;
+		void from_default() override
+		{
+			m_set = {};
+		}
+
+		void restore_defaults() override
+		{
+		}
 
 		std::vector<std::string> to_list() const override
 		{
@@ -870,6 +1051,10 @@ namespace cfg
 		void erase(std::string_view key);
 
 		void from_default() override;
+
+		void restore_defaults() override
+		{
+		}
 	};
 
 	class node_map_entry final : public map_entry
@@ -949,6 +1134,10 @@ namespace cfg
 		void set_map(map_of_type<logs::level>&& map);
 
 		void from_default() override;
+
+		void restore_defaults() override
+		{
+		}
 	};
 
 	struct device_info
@@ -1050,5 +1239,9 @@ namespace cfg
 		void set_map(map_of_type<device_info>&& map);
 
 		void from_default() override;
+
+		void restore_defaults() override
+		{
+		}
 	};
 } // namespace cfg

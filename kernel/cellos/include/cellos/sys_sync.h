@@ -413,6 +413,7 @@ public:
   // Can be called before the actual sleep call in order to move it out of mutex
   // scope
   static void prepare_for_sleep(cpu_thread &cpu);
+  static ppu_thread *get_running_ppu(u32 index);
 
   struct notify_all_t {
     notify_all_t() noexcept { g_postpone_notify_barrier = true; }
@@ -436,6 +437,11 @@ public:
           cpu = &g_to_notify;
         }
       }
+    }
+
+    static void enqueue_on_top(const void *waiter) {
+      g_to_notify[0] = waiter;
+      g_to_notify[1] = nullptr;
     }
 
     ~notify_all_t() noexcept { lv2_obj::notify_all(); }

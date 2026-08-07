@@ -2,6 +2,7 @@
 
 #include "vkutils/commands.h"
 #include "vkutils/descriptors.h"
+#include "VKDataHeapManager.h"
 #include "VKResourceManager.h"
 
 #include "Emu/RSX/Common/simple_array.hpp"
@@ -22,7 +23,6 @@
 #define VK_INDEX_RING_BUFFER_SIZE_M 16
 
 #define VK_MAX_ASYNC_CB_COUNT 512
-#define VK_MAX_ASYNC_FRAMES 2
 
 #define FRAME_PRESENT_TIMEOUT 10000000ull // 10 seconds
 #define GENERAL_WAIT_TIMEOUT 2000000ull   // 2 seconds
@@ -73,7 +73,7 @@ namespace vk
 			}
 
 			++reset_id;
-			CHECK_RESULT(VK_GET_SYMBOL(vkResetCommandBuffer)(commands, 0));
+			vk::command_buffer::reset();
 		}
 
 		bool poke()
@@ -164,11 +164,37 @@ namespace vk
 
 		void sync()
 		{
-			if (command_buffer_to_wait->reset_id == command_buffer_sync_id)
+			if (command_buffer_to_wait->reset_id != command_buffer_sync_id)
+			{
+				return;
+			}
+
+			// Cheap, and the answer cannot change for the lifetime of the device.
+			static const bool s_tile_based = vk::is_tile_based_renderer(vk::get_driver_vendor());
+
+			if (!s_tile_based)
 			{
 				// Allocation stack is FIFO and very long so no need to actually wait for fence signal
 				command_buffer_to_wait->flush();
+				return;
 			}
+
+			// NOTE: do not "fix" this by waiting on the submission fence here.
+			//
+			// It is tempting: on a tile-based renderer nothing resolves until the
+			// tiling pass ends, so this flush returns before the result exists and
+			// get_query_result() then spins for the rest of the pass (~48% of all
+			// CPU samples on Adreno/Turnip). Replacing the flush with
+			// wait(GENERAL_WAIT_TIMEOUT) does cut total CPU cycles roughly in half
+			// and the RSX thread stops burning a core entirely - measured.
+			//
+			// It also hangs the emulator. wait() waits for GPU *completion*, but
+			// the command buffer holding the query is not necessarily submitted
+			// yet, and the thread responsible for submitting it is this one. The
+			// wait then only ends via its timeout, which presents as a freeze at
+			// low CPU. Any real fix has to guarantee the work is in flight before
+			// blocking on it.
+			command_buffer_to_wait->flush();
 		}
 	};
 
@@ -177,80 +203,47 @@ namespace vk
 		VkSemaphore acquire_signal_semaphore = VK_NULL_HANDLE;
 		VkSemaphore present_wait_semaphore = VK_NULL_HANDLE;
 
-		vk::descriptor_set descriptor_set;
-
 		rsx::flags32_t flags = 0;
-
-		std::vector<std::unique_ptr<vk::buffer_view>> buffer_views_to_clean;
 
 		u32 present_image = -1;
 		command_buffer_chunk* swap_command_buffer = nullptr;
 
-		// Heap pointers
-		s64 attrib_heap_ptr = 0;
-		s64 vtx_env_heap_ptr = 0;
-		s64 frag_env_heap_ptr = 0;
-		s64 frag_const_heap_ptr = 0;
-		s64 vtx_const_heap_ptr = 0;
-		s64 vtx_layout_heap_ptr = 0;
-		s64 frag_texparam_heap_ptr = 0;
-		s64 index_heap_ptr = 0;
-		s64 texture_upload_heap_ptr = 0;
-		s64 rasterizer_env_heap_ptr = 0;
-		s64 instancing_heap_ptr = 0;
-
+		data_heap_manager::managed_heap_snapshot_t heap_snapshot;
 		u64 last_frame_sync_time = 0;
+
+		void init(VkDevice dev)
+		{
+			VkSemaphoreCreateInfo semaphore_info = {};
+			semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+			VK_GET_SYMBOL(vkCreateSemaphore)(dev, &semaphore_info, nullptr, &present_wait_semaphore);
+			VK_GET_SYMBOL(vkCreateSemaphore)(dev, &semaphore_info, nullptr, &acquire_signal_semaphore);
+		}
+
+		void destroy(VkDevice dev)
+		{
+			VK_GET_SYMBOL(vkDestroySemaphore)(dev, present_wait_semaphore, nullptr);
+			VK_GET_SYMBOL(vkDestroySemaphore)(dev, acquire_signal_semaphore, nullptr);
+		}
 
 		// Copy shareable information
 		void grab_resources(frame_context_t& other)
 		{
 			present_wait_semaphore = other.present_wait_semaphore;
 			acquire_signal_semaphore = other.acquire_signal_semaphore;
-			descriptor_set.swap(other.descriptor_set);
 			flags = other.flags;
-
-			attrib_heap_ptr = other.attrib_heap_ptr;
-			vtx_env_heap_ptr = other.vtx_env_heap_ptr;
-			frag_env_heap_ptr = other.frag_env_heap_ptr;
-			vtx_layout_heap_ptr = other.vtx_layout_heap_ptr;
-			frag_texparam_heap_ptr = other.frag_texparam_heap_ptr;
-			frag_const_heap_ptr = other.frag_const_heap_ptr;
-			vtx_const_heap_ptr = other.vtx_const_heap_ptr;
-			index_heap_ptr = other.index_heap_ptr;
-			texture_upload_heap_ptr = other.texture_upload_heap_ptr;
-			rasterizer_env_heap_ptr = other.rasterizer_env_heap_ptr;
-			instancing_heap_ptr = other.instancing_heap_ptr;
+			heap_snapshot = other.heap_snapshot;
 		}
 
-		// Exchange storage (non-copyable)
-		void swap_storage(frame_context_t& other)
+		void tag_frame_end()
 		{
-			std::swap(buffer_views_to_clean, other.buffer_views_to_clean);
-		}
-
-		void tag_frame_end(
-			s64 attrib_loc, s64 vtxenv_loc, s64 fragenv_loc, s64 vtxlayout_loc,
-			s64 fragtex_loc, s64 fragconst_loc, s64 vtxconst_loc, s64 index_loc,
-			s64 texture_loc, s64 rasterizer_loc, s64 instancing_loc)
-		{
-			attrib_heap_ptr = attrib_loc;
-			vtx_env_heap_ptr = vtxenv_loc;
-			frag_env_heap_ptr = fragenv_loc;
-			vtx_layout_heap_ptr = vtxlayout_loc;
-			frag_texparam_heap_ptr = fragtex_loc;
-			frag_const_heap_ptr = fragconst_loc;
-			vtx_const_heap_ptr = vtxconst_loc;
-			index_heap_ptr = index_loc;
-			texture_upload_heap_ptr = texture_loc;
-			rasterizer_env_heap_ptr = rasterizer_loc;
-			instancing_heap_ptr = instancing_loc;
-
+			heap_snapshot = data_heap_manager::get_heap_snapshot();
 			last_frame_sync_time = rsx::get_shared_tag();
 		}
 
 		void reset_heap_ptrs()
 		{
 			last_frame_sync_time = 0;
+			heap_snapshot.clear();
 		}
 	};
 
@@ -287,6 +280,7 @@ namespace vk
 
 		void consumer_wait() const
 		{
+			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
 			while (num_waiters.load() != 0)
 			{
 				rx::pause();
@@ -295,6 +289,7 @@ namespace vk
 
 		void producer_wait() const
 		{
+			// NOTE: Upstream uses utils::spin_wait() here, which does not exist in rx/asm.hpp.
 			while (pending_state.load())
 			{
 				std::this_thread::yield();

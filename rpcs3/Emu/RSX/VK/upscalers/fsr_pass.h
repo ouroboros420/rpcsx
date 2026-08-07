@@ -17,11 +17,10 @@ namespace vk
 			const vk::image_view* m_output_image = nullptr;
 			size2u m_input_size;
 			size2u m_output_size;
-			u32 m_constants_buf[20];
+			std::array<u32, 20> m_constants_buf {};
 
-			std::vector<std::pair<VkDescriptorType, u8>> get_descriptor_layout() override;
-			void declare_inputs() override;
-			void bind_resources() override;
+			std::vector<glsl::program_input> get_inputs() override;
+			void bind_resources(const vk::command_buffer&) override;
 
 			virtual void configure(const vk::command_buffer& cmd) = 0;
 

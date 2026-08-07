@@ -1,24 +1,28 @@
 #pragma once
 
-#include "util/types.hpp"
-#include "util/atomic.hpp"
-#include "util/endian.hpp"
-#include "util/Config.h"
-#include "util/StrFmt.h"
-#include "util/File.h"
-#include "util/logs.hpp"
-#include "util/shared_ptr.hpp"
-#include "util/typeindices.hpp"
-#include "util/fixed_typemap.hpp"
-#include "util/auto_typemap.hpp"
+#include "util/types.hpp"         // IWYU pragma: export
+#include "util/atomic.hpp"        // IWYU pragma: export
+#include "util/endian.hpp"        // IWYU pragma: export
+#include "util/Config.h"          // IWYU pragma: export
+#include "util/StrFmt.h"          // IWYU pragma: export
+#include "util/File.h"            // IWYU pragma: export
+#include "util/logs.hpp"          // IWYU pragma: export
+#include "util/shared_ptr.hpp"    // IWYU pragma: export
+#include "util/typeindices.hpp"   // IWYU pragma: export
+#include "util/fixed_typemap.hpp" // IWYU pragma: export
+#include "util/auto_typemap.hpp"  // IWYU pragma: export
 
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <memory>
-#include <vector>
-#include <array>
-#include <functional>
-#include <unordered_map>
-#include <algorithm>
-#include <string_view>
+#include <cstdlib>       // IWYU pragma: export
+#include <cstring>       // IWYU pragma: export
+#include <string>        // IWYU pragma: export
+#include <memory>        // IWYU pragma: export
+#include <vector>        // IWYU pragma: export
+#include <array>         // IWYU pragma: export
+#include <functional>    // IWYU pragma: export
+#include <unordered_map> // IWYU pragma: export
+#include <algorithm>     // IWYU pragma: export
+#include <string_view>   // IWYU pragma: export
+
+#if defined(__INTELLISENSE__) && !defined(LLVM_AVAILABLE)
+#define LLVM_AVAILABLE
+#endif

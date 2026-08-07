@@ -252,68 +252,58 @@ lv2_socket_p2p::recvfrom(s32 flags, u32 len, bool is_lock) {
   return {{native_result, res_buf, sn_addr}};
 }
 
-std::optional<s32>
-lv2_socket_p2p::sendto(s32 flags, const std::vector<u8> &buf,
-                       std::optional<sys_net_sockaddr> opt_sn_addr,
-                       bool is_lock) {
-  std::unique_lock<shared_mutex> lock(mutex, std::defer_lock);
+std::optional<s32> lv2_socket_p2p::sendto(s32 flags, const std::vector<u8>& buf, std::optional<sys_net_sockaddr> opt_sn_addr, bool is_lock)
+{
+	std::unique_lock<shared_mutex> lock(mutex, std::defer_lock);
 
-  if (is_lock) {
-    lock.lock();
-  }
+	if (is_lock)
+	{
+		lock.lock();
+	}
 
-  ensure(opt_sn_addr);
-  ensure(socket); // ensures it has been bound
-  ensure(
-      buf.size() <=
-      static_cast<usz>(
-          65535 -
-          VPORT_P2P_HEADER_SIZE)); // catch games using full payload for future
-                                   // fragmentation implementation if necessary
-  const u16 p2p_port =
-      reinterpret_cast<const sys_net_sockaddr_in *>(&*opt_sn_addr)->sin_port;
-  const u16 p2p_vport =
-      reinterpret_cast<const sys_net_sockaddr_in_p2p *>(&*opt_sn_addr)
-          ->sin_vport;
+	ensure(opt_sn_addr);
+	ensure(native_socket); // ensures it has been bound
+	ensure(buf.size() <= static_cast<usz>(65535 - VPORT_P2P_HEADER_SIZE)); // catch games using full payload for future fragmentation implementation if necessary
+	const u16 p2p_port  = reinterpret_cast<const sys_net_sockaddr_in*>(&*opt_sn_addr)->sin_port;
+	const u16 p2p_vport = reinterpret_cast<const sys_net_sockaddr_in_p2p*>(&*opt_sn_addr)->sin_vport;
 
-  auto native_addr = sys_net_addr_to_native_addr(*opt_sn_addr);
+	auto native_addr = sys_net_addr_to_native_addr(*opt_sn_addr);
 
-  char ip_str[16];
-  inet_ntop(AF_INET, &native_addr.sin_addr, ip_str, sizeof(ip_str));
-  sys_net.trace("[P2P] Sending a packet to %s:%d:%d", ip_str, p2p_port,
-                p2p_vport);
+	char ip_str[16];
+	inet_ntop(AF_INET, &native_addr.sin_addr, ip_str, sizeof(ip_str));
+	sys_net.trace("[P2P] Sending a packet to %s:%d:%d", ip_str, p2p_port, p2p_vport);
 
-  std::vector<u8> p2p_data(buf.size() + VPORT_P2P_HEADER_SIZE);
-  const le_t<u16> p2p_vport_le = p2p_vport;
-  const le_t<u16> src_vport_le = vport;
-  const le_t<u16> p2p_flags_le = P2P_FLAG_P2P;
-  memcpy(p2p_data.data(), &p2p_vport_le, sizeof(u16));
-  memcpy(p2p_data.data() + sizeof(u16), &src_vport_le, sizeof(u16));
-  memcpy(p2p_data.data() + sizeof(u16) + sizeof(u16), &p2p_flags_le,
-         sizeof(u16));
-  memcpy(p2p_data.data() + VPORT_P2P_HEADER_SIZE, buf.data(), buf.size());
+	std::vector<u8> p2p_data(buf.size() + VPORT_P2P_HEADER_SIZE);
+	const le_t<u16> p2p_vport_le = p2p_vport;
+	const le_t<u16> src_vport_le = vport;
+	const le_t<u16> p2p_flags_le = P2P_FLAG_P2P;
+	memcpy(p2p_data.data(), &p2p_vport_le, sizeof(u16));
+	memcpy(p2p_data.data() + sizeof(u16), &src_vport_le, sizeof(u16));
+	memcpy(p2p_data.data() + sizeof(u16) + sizeof(u16), &p2p_flags_le, sizeof(u16));
+	memcpy(p2p_data.data() + VPORT_P2P_HEADER_SIZE, buf.data(), buf.size());
 
-  int native_flags = 0;
-  if (flags & SYS_NET_MSG_WAITALL) {
-    native_flags |= MSG_WAITALL;
-  }
+	int native_flags = 0;
+	if (flags & SYS_NET_MSG_WAITALL)
+	{
+		native_flags |= MSG_WAITALL;
+	}
 
-  auto native_result = np::sendto_possibly_ipv6(
-      native_socket, reinterpret_cast<const char *>(p2p_data.data()),
-      ::size32(p2p_data), &native_addr, native_flags);
+	auto native_result = np::sendto_possibly_ipv6(native_socket, reinterpret_cast<const char*>(p2p_data.data()), ::size32(p2p_data), &native_addr, native_flags);
 
-  if (native_result >= 0) {
-    return {std::max<s32>(native_result - VPORT_P2P_HEADER_SIZE, 0l)};
-  }
+	if (native_result >= 0)
+	{
+		return {std::max<s32>(native_result - VPORT_P2P_HEADER_SIZE, 0l)};
+	}
 
-  s32 result = get_last_error(!so_nbio && (flags & SYS_NET_MSG_DONTWAIT) == 0);
+	s32 result = get_last_error(!so_nbio && (flags & SYS_NET_MSG_DONTWAIT) == 0);
 
-  if (result) {
-    return {-result};
-  }
+	if (result)
+	{
+		return {-result};
+	}
 
-  // Note that this can only happen if the send buffer is full
-  return std::nullopt;
+	// Note that this can only happen if the send buffer is full
+	return std::nullopt;
 }
 
 std::optional<s32>
@@ -358,8 +348,8 @@ s32 lv2_socket_p2p::shutdown([[maybe_unused]] s32 how) {
   return CELL_OK;
 }
 
-s32 lv2_socket_p2p::poll(sys_net_pollfd &sn_pfd,
-                         [[maybe_unused]] pollfd &native_pfd) {
+void lv2_socket_p2p::poll(sys_net_pollfd &sn_pfd,
+                          [[maybe_unused]] pollfd &native_pfd) {
   std::lock_guard lock(mutex);
   ensure(vport);
 
@@ -374,8 +364,6 @@ s32 lv2_socket_p2p::poll(sys_net_pollfd &sn_pfd,
   if (sn_pfd.events & SYS_NET_POLLOUT) {
     sn_pfd.revents |= SYS_NET_POLLOUT;
   }
-
-  return sn_pfd.revents ? 1 : 0;
 }
 
 std::tuple<bool, bool, bool>

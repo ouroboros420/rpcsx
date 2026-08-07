@@ -157,13 +157,15 @@ namespace gl
 			dst = data.get();
 			dst->properties_encoding = match_key;
 			m_temporary_surfaces.emplace_back(std::move(data));
+
+			dst->set_name(fmt::format("[Temp View] id=%u, fmt=0x%x", dst->id(), gcm_format));
 		}
 
 		dst->add_ref();
 
 		if (copy)
 		{
-			std::vector<copy_region_descriptor> region =
+			rsx::simple_array<copy_region_descriptor> region =
 				{{.src = src,
 					.xform = rsx::surface_transform::coordinate_transform,
 					.src_x = x,
@@ -182,11 +184,21 @@ namespace gl
 			auto components = get_component_mapping(gcm_format, rsx::component_order::default_);
 			dst->set_native_component_layout(components);
 		}
+		else
+		{
+			dst->set_native_component_layout(src->get_native_component_layout());
+		}
 
 		return dst->get_view(remap);
 	}
 
-	void texture_cache::copy_transfer_regions_impl(gl::command_context& cmd, gl::texture* dst_image, const std::vector<copy_region_descriptor>& sources) const
+	void texture_cache::initialize_subresource_from_memory(gl::command_context& cmd, gl::texture* dst, const deferred_subresource& desc, rsx::texture_dimension_extended type) const
+	{
+		const auto subresources_layout = rsx::get_subresources_layout(desc, type);
+		gl::upload_texture(cmd, dst, desc.gcm_format, desc.swizzled, subresources_layout);
+	}
+
+	void texture_cache::copy_transfer_regions_impl(gl::command_context& cmd, gl::texture* dst_image, const rsx::simple_array<copy_region_descriptor>& sources) const
 	{
 		const auto dst_bpp = dst_image->pitch() / dst_image->width();
 		const auto dst_aspect = dst_image->aspect();

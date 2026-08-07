@@ -4,7 +4,15 @@
 #include "../../rsx_utils.h"
 #include "shared.h"
 
-#include "3rdparty/GPUOpen/VulkanMemoryAllocator/src/vk_mem_alloc.h"
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#endif
+#define VMA_VULKAN_VERSION 1002000
+#include <vk_mem_alloc.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 namespace vk
 {
@@ -41,6 +49,7 @@ namespace vk
 		const_iterator end() const;
 		u32 first() const;
 		size_t count() const;
+		u64 total_bytes() const;
 
 		operator bool() const;
 		bool operator==(const memory_type_info& other) const;
@@ -50,17 +59,34 @@ namespace vk
 		void rebalance();
 	};
 
+	struct memory_heap_info
+	{
+		u32 index;
+		u32 flags;
+		u64 size;
+	};
+
+	struct memory_allocation_request
+	{
+		u64 size = 0;
+		u64 alignment = 1;
+		const memory_type_info* memory_type = nullptr;
+		vmm_allocation_pool pool = VMM_ALLOCATION_POOL_UNDEFINED;
+		bool throw_on_fail = true;
+		bool recover_vmem_on_fail = true;
+	};
+
 	class mem_allocator_base
 	{
 	public:
 		using mem_handle_t = void*;
 
-		mem_allocator_base(const vk::render_device& dev, VkPhysicalDevice /*pdev*/);
+		mem_allocator_base(const vk::render_device& dev, VkPhysicalDevice pdev);
 		virtual ~mem_allocator_base() = default;
 
 		virtual void destroy() = 0;
 
-		virtual mem_handle_t alloc(u64 block_sz, u64 alignment, const memory_type_info& memory_type, vmm_allocation_pool pool, bool throw_on_fail) = 0;
+		virtual mem_handle_t alloc(const memory_allocation_request& request) = 0;
 		virtual void free(mem_handle_t mem_handle) = 0;
 		virtual void* map(mem_handle_t mem_handle, u64 offset, u64 size) = 0;
 		virtual void unmap(mem_handle_t mem_handle) = 0;
@@ -82,12 +108,12 @@ namespace vk
 	class mem_allocator_vma : public mem_allocator_base
 	{
 	public:
-		mem_allocator_vma(const vk::render_device& dev, VkPhysicalDevice pdev);
+		mem_allocator_vma(const vk::render_device& dev, VkPhysicalDevice pdev, VkInstance inst);
 		~mem_allocator_vma() override = default;
 
 		void destroy() override;
 
-		mem_handle_t alloc(u64 block_sz, u64 alignment, const memory_type_info& memory_type, vmm_allocation_pool pool, bool throw_on_fail) override;
+		mem_handle_t alloc(const memory_allocation_request& request) override;
 
 		void free(mem_handle_t mem_handle) override;
 		void* map(mem_handle_t mem_handle, u64 offset, u64 /*size*/) override;
@@ -103,6 +129,7 @@ namespace vk
 	private:
 		VmaAllocator m_allocator;
 		std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> stats;
+		u32 m_rebar_heap_idx = UINT32_MAX;
 	};
 
 	// Memory Allocator - built-in Vulkan device memory allocate/free
@@ -115,7 +142,7 @@ namespace vk
 
 		void destroy() override {}
 
-		mem_handle_t alloc(u64 block_sz, u64 /*alignment*/, const memory_type_info& memory_type, vmm_allocation_pool pool, bool throw_on_fail) override;
+		mem_handle_t alloc(const memory_allocation_request& request) override;
 
 		void free(mem_handle_t mem_handle) override;
 		void* map(mem_handle_t mem_handle, u64 offset, u64 size) override;
@@ -128,7 +155,7 @@ namespace vk
 
 	struct memory_block
 	{
-		memory_block(VkDevice dev, u64 block_sz, u64 alignment, const memory_type_info& memory_type, vmm_allocation_pool pool, bool nullable = false);
+		memory_block(VkDevice dev, const memory_allocation_request& alloc_request);
 		virtual ~memory_block();
 
 		virtual VkDeviceMemory get_vk_device_memory();

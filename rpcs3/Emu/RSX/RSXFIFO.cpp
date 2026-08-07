@@ -13,7 +13,6 @@
 #include "rx/asm.hpp"
 
 #include <thread>
-#include <bitset>
 
 using spu_rdata_t = std::byte[128];
 
@@ -140,7 +139,7 @@ namespace rsx
 				u32 bytes_read = 0;
 
 				// Find the next set bit after every iteration
-				for (int i = 0;; i = (std::countr_zero<u32>(rx::rol8(to_fetch, 0 - i - 1)) + i + 1) % 8)
+				for (int i = 0;; i = (std::countr_zero<u32>(std::rotl<u8>(to_fetch, 0 - i - 1)) + i + 1) % 8)
 				{
 					// If a reservation is being updated, try to load another
 					const auto& res = vm::reservation_acquire(addr1 + i * 128);
@@ -204,7 +203,7 @@ namespace rsx
 				}
 			}
 
-			const auto ret = read_from_ptr<be_t<u32>>(+m_cache[0], addr - m_cache_addr);
+			const auto ret = read_from_ptr_unsafe<be_t<u32>>(+m_cache[0], addr - m_cache_addr);
 			return {true, ret};
 		}
 
@@ -690,12 +689,12 @@ namespace rsx
 			}
 
 			// Check for flow control
-			if (std::bitset<2> jump_type; jump_type
-					.set(0, (cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
-					.set(1, (cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
+			if (bit_set<2> jump_type; jump_type
+				.set_unsafe(0, (cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
+				.set_unsafe(1, (cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
 					.any())
 			{
-				const u32 offs = cmd & (jump_type.test(0) ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
+				const u32 offs = cmd & (jump_type.test_unsafe(0) ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
 				if (offs == fifo_ctrl->get_pos())
 				{
 					// Jump to self. Often preceded by NOP

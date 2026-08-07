@@ -3150,7 +3150,7 @@ namespace rsx
 				return to_window_origin(window_shader_origin_raw());
 			}
 
-			auto window_shader_pixel_center() const
+			auto pixel_center() const
 			{
 				return to_window_pixel_center(window_shader_pixel_center_raw());
 			}
@@ -3163,7 +3163,7 @@ namespace rsx
 
 		static void dump(std::string& out, const decoded_type& decoded)
 		{
-			fmt::append(out, "Viewport: height: %u origin: %s pixel center: %s", decoded.window_shader_height(), decoded.window_shader_origin(), decoded.window_shader_pixel_center());
+			fmt::append(out, "Viewport: height: %u origin: %s pixel center: %s", decoded.window_shader_height(), decoded.window_shader_origin(), decoded.pixel_center());
 		}
 	};
 
@@ -3833,12 +3833,12 @@ namespace rsx
 
 			u8 sw_height_log2() const
 			{
-				return bf_decoder<16, 8>(value);
+			return bf_decoder<24, 8>(value);
 			}
 
 			u8 sw_width_log2() const
 			{
-				return bf_decoder<24, 8>(value);
+			return bf_decoder<16, 8>(value);
 			}
 		};
 

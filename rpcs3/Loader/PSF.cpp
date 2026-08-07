@@ -249,7 +249,10 @@ namespace psf
 				if (indices[i].param_fmt == format::string)
 				{
 					// Find null terminator
-					value.resize(std::strlen(value.c_str()));
+					if (usz nts = value.find_first_of('\0'); nts != umax)
+					{
+						value.resize(nts);
+					}
 				}
 
 				result.sfo.emplace(std::piecewise_construct,
@@ -390,24 +393,13 @@ namespace psf
 		return found->second.as_integer();
 	}
 
-	bool check_registry(const registry& psf, std::function<bool(bool ok, const std::string& key, const entry& value)> validate, std::source_location src_loc)
+	bool check_registry(const registry& psf, std::source_location src_loc)
 	{
 		bool psf_ok = true;
 
 		for (const auto& [key, value] : psf)
 		{
-			bool entry_ok = value.is_valid();
-
-			if (validate)
-			{
-				// Validate against a custom condition as well (forward error)
-				if (!validate(entry_ok, key, value))
-				{
-					entry_ok = false;
-				}
-			}
-
-			if (!entry_ok)
+			if (!value.is_valid())
 			{
 				if (value.type() == format::string)
 				{
@@ -418,10 +410,7 @@ namespace psf
 					// TODO: Better logging of other types
 					psf_log.error("Entry %s is invalid.%s", key, value.as_string(), src_loc);
 				}
-			}
 
-			if (!entry_ok)
-			{
 				// Do not break, run over all entries in order to report all errors
 				psf_ok = false;
 			}

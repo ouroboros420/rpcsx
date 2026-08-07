@@ -10,11 +10,15 @@
 #include "cellos/sys_process.h"
 #include "Thread.h"
 #include "util/JIT.h"
-#include <thread>
 #include <cfenv>
 
 #ifdef ARCH_ARM64
 #include "Emu/CPU/Backends/AArch64/AArch64Signal.h"
+#endif
+
+#ifdef __cpp_lib_stacktrace
+#include "rpcs3_version.h"
+#include <stacktrace>
 #endif
 
 #ifdef _WIN32
@@ -23,6 +27,7 @@
 #include <process.h>
 #include <sysinfoapi.h>
 
+#include "stack_trace.h"
 #include "util/dyn_lib.hpp"
 
 DYNAMIC_IMPORT_RENAME("Kernel32.dll", SetThreadDescriptionImport, "SetThreadDescription", HRESULT(HANDLE hThread, PCWSTR lpThreadDescription));
@@ -105,8 +110,13 @@ thread_local u64 g_tls_fault_rsx = 0;
 thread_local u64 g_tls_fault_spu = 0;
 thread_local u64 g_tls_wait_time = 0;
 thread_local u64 g_tls_wait_fail = 0;
-thread_local bool g_tls_access_violation_recovered = false;
+thread_local u64 g_tls_access_violation_recovered = umax;
 extern thread_local std::string (*g_tls_log_prefix)();
+
+namespace stx
+{
+	atomic_t<u32> g_launch_retainer{0};
+}
 
 // Report error and call std::abort(), defined in main.cpp
 [[noreturn]] void report_fatal_error(std::string_view text, bool is_html = false, bool include_help_text = true);
@@ -1197,27 +1207,303 @@ usz get_x64_access_size(x64_context* context, x64_op_t op, x64_reg_t reg, usz d_
 
 #elif defined(ARCH_ARM64)
 
-#if defined(__APPLE__)
+#ifdef _WIN32
+#define RIP(context) (reinterpret_cast<CONTEXT*>((context))->Pc)
+#define GPR(context, index) (reinterpret_cast<CONTEXT*>((context))->X[index])
+#elif defined(__APPLE__)
 // https://github.com/bombela/backward-cpp/issues/200
 #define RIP(context) ((context)->uc_mcontext->__ss.__pc)
+#define GPR(context, index) ((context)->uc_mcontext->__ss.__x[(index)])
 #elif defined(__FreeBSD__)
 #define RIP(context) ((context)->uc_mcontext.mc_gpregs.gp_elr)
+#define GPR(context, index) ((context)->uc_mcontext.mc_gpregs.gp_x[(index)])
 #elif defined(__NetBSD__)
 #define RIP(context) ((context)->uc_mcontext.__gregs[_REG_PC])
+#define GPR(context, index) ((context)->uc_mcontext.__gregs[(index)])
 #elif defined(__OpenBSD__)
 #define RIP(context) ((context)->sc_elr)
+#define GPR(context, index) ((context)->sc_x[(index)])
 #else
 #define RIP(context) ((context)->uc_mcontext.pc)
+#define GPR(context, index) ((context)->uc_mcontext.regs[(index)])
 #endif
 
-#endif /* ARCH_ */
+enum mem_a64_op_t
+{
+	A64_INVALID = 0,
+	A64_LOAD,
+	A64_STORE,
+};
+
+struct a64_mem_info_t
+{
+	mem_a64_op_t op;
+	u32 mem_size;   // Bytes accessed in memory
+	u32 reg_size;   // Register width (4 or 8 bytes)
+	u32 reg_num;
+	bool reg_signed;
+};
+
+a64_mem_info_t decode_a64_mem_inst(u32 inst)
+{
+	a64_mem_info_t r{ A64_INVALID, 0, 0, inst % 32, false };
+
+	// Exclude SIMD/FP loads/stores
+	if ((inst >> 26) & 1)
+	{
+		return r;
+	}
+
+	// Scalar load/store immediate, unsigned offset variants only:
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	// class bits[29:24] = 111001
+	if ((inst & 0x3B000000) == 0x39000000)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STR
+			r.op = A64_STORE;
+			r.reg_size = r.mem_size;
+			return r;
+		}
+		case 1:
+		{
+			// LDR unsigned zero-extend
+			// size=3 (64-bit) -> Xt; everything else -> Wt
+			r.op = A64_LOAD;
+			r.reg_size = (size == 3) ? 8u : 4u;
+			r.reg_signed = false;
+			return r;
+		}
+		case 2:
+		case 3:
+		{
+			if (size == 3)
+			{
+				return r;
+			}
+
+			if (size == 2 && opc == 3)
+			{
+				// Invalid LDRSW
+				return r;
+			}
+
+			// LDRSB/LDRSH/LDRSW
+			// size determines extension type:
+			// 00 LDRSB
+			// 01 LDRSH
+			// 10 LDRSW
+			r.op = A64_LOAD;
+
+			if (size == 2)
+			{
+				// LDUSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDRSB/LDRSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			r.reg_signed = true;
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// Scalar load/store unscaled immediate (LDUR/STUR)
+	// size[31:30]
+	// V[26]
+	// opc[23:22]
+	if ((inst & 0x3B200C00u) == 0x38000000u)
+	{
+		const u32 size = (inst >> 30) & 3;
+		const u32 opc  = (inst >> 22) & 3;
+
+		r.mem_size = 1u << size;
+
+		switch (opc)
+		{
+		case 0:
+		{
+			// STURB/STURH/STUR Wt/STUR Xt
+			r.op = A64_STORE;
+
+			// Source register width
+			r.reg_size = r.mem_size;
+			return r;
+		}
+
+		case 1:
+		{
+			// LDURB/LDURH/LDUR Wt/LDUR Xt
+			r.op = A64_LOAD;
+
+			// Destination register width
+			r.reg_size = (size == 3) ? 8 : 4;
+			r.reg_signed = false;
+			return r;
+		}
+
+		case 2:
+		case 3:
+		{
+			// LDURSB/LDURSH/LDURSW
+			if (size == 3)
+			{
+				return r;
+			}
+
+			r.op = A64_LOAD;
+			r.reg_signed = true;
+
+			if (size == 2)
+			{
+				// LDURSW
+				r.reg_size = 8;
+			}
+			else
+			{
+				// LDURSB/LDURSH
+				// opc=2 -> Wt, opc=3 -> Xt
+				r.reg_size = (opc == 3) ? 4 : 8;
+			}
+
+			return r;
+		}
+		default:
+			return r;
+		}
+	}
+
+	// 
+	// Literal loads:
+	// 
+	// LDR Wt, label
+	// LDR Xt, label
+	// LDRSW Xt, label
+	//
+
+	// This is not needed for MMIO (which is the only use for this function)
+
+	// if ((inst & 0x3B000000) == 0x18000000)
+	// {
+	// 	u32 opc = (inst >> 30) & 3;
+
+	// 	r.op = A64_LOAD;
+
+	// 	switch (opc)
+	// 	{
+	// 	case 0: // LDR Wt literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 4;
+	// 		return r;
+	// 	}
+	// 	case 1: // LDR Xt literal
+	// 	{
+	// 		r.mem_size = 8;
+	// 		r.reg_size = 8;
+	// 		return r;
+	// 	}
+	// 	case 2: // LDRSW literal
+	// 	{
+	// 		r.mem_size = 4;
+	// 		r.reg_size = 8;
+	// 		r.reg_signed = true;
+	// 		return r;
+	// 	}
+	// 	default:
+	// 	{
+	// 		break;
+	// 	}
+	// 	}
+	// }
+
+	return r;
+}
+
+void put_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size, bool reg_signed, u32 mem_size, u64 value)
+{
+	ensure(mem_size == 1 || mem_size == 2 || mem_size == 4 || mem_size == 8);
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_size >= mem_size);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register" 
+		ensure(false);
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	// Mask for sign-extending the value
+	const u64 sign_bit = value & (make_mask(mem_size) / 2 + 1);
+	const u64 sign_mask = (reg_signed && sign_bit != 0 && reg_size > mem_size) ? (make_mask(reg_size) & ~make_mask(mem_size)) : 0;
+
+	u64 temp_reg_value = 0;
+	temp_reg_value |= (value & make_mask(mem_size)); // Set value (adjusted by size)
+	temp_reg_value |= sign_mask; // Apply sign-extension
+	GPR(context, reg_index) = temp_reg_value;
+}
+
+u64 get_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size)
+{
+	ensure(reg_size == 1 || reg_size == 2 || reg_size == 4 || reg_size == 8);
+	ensure(reg_index < 32);
+
+	if (reg_index == 31)
+	{
+		// XZR "register"
+		return 0;
+	}
+
+	auto make_mask = [](u32 bytes) -> u64
+	{
+		if (bytes == 8)
+		{
+			return umax;
+		}
+
+		const u64 bits = bytes * 8;
+		return (u64{1} << bits) - 1;
+	};
+
+	return (GPR(context, reg_index) & make_mask(reg_size));
+}
+
+#endif /* ARCH_ARM64 */
 
 namespace rsx
 {
 	extern std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
 }
 
-bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noexcept
+bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t* context) noexcept
 {
 	g_tls_fault_all++;
 
@@ -1253,7 +1539,7 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 		}
 	} spu_protection{cpu};
 
-	if (addr < RAW_SPU_BASE_ADDR && vm::check_addr(addr) && rsx::g_access_violation_handler)
+	if (!is_exec && addr < RAW_SPU_BASE_ADDR && vm::check_addr(addr) && rsx::g_access_violation_handler)
 	{
 		bool state_changed = false;
 
@@ -1320,7 +1606,7 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 		{
 			auto thread = idm::get_unlocked<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
 
-			if (!thread)
+		if (!thread || is_exec)
 			{
 				break;
 			}
@@ -1332,11 +1618,7 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 				return false;
 			}
 
-			if (a_size != 4)
-			{
-				// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
-				break;
-			}
+		bool handled = true;
 
 			switch (op)
 			{
@@ -1346,15 +1628,38 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			case X64OP_LOAD_TEST:
 			{
 				u32 value;
-				if (is_writing || !thread->read_reg(addr, value))
+			const u32 addr_aligned = addr & -4;
+
+			if (addr % 4 + a_size > 4)
+			{
+				handled = false;
+				break;
+			}
+
+			if (is_writing || !thread->read_reg(addr_aligned, value))
 				{
 					return false;
 				}
 
+			// Adjust value for 8-bit and 16-bit reads
+			value >>= ((4 - a_size) * 8) - ((addr % 4) * 8);
+			value &= a_size == 4 ? u32{umax} : ((1u << (a_size * 8)) - 1);
+
 				if (op != X64OP_LOAD_BE)
+				{
+				if (a_size == 4)
 				{
 					value = stx::se_storage<u32>::swap(value);
 				}
+				else if (a_size == 2)
+				{
+					value = stx::se_storage<u16>::swap(value);
+				}
+				else
+				{
+					ensure(a_size == 1);
+				}
+			}
 
 				if (op == X64OP_LOAD_CMP)
 				{
@@ -1388,12 +1693,35 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			case X64OP_BEXTR:
 			{
 				u32 value;
-				if (is_writing || !thread->read_reg(addr, value))
+			const u32 addr_aligned = addr & -4;
+
+			if (addr % 4 + a_size > 4)
+			{
+				handled = false;
+				break;
+			}
+
+			if (is_writing || !thread->read_reg(addr_aligned, value))
 				{
 					return false;
 				}
 
-				value = stx::se_storage<u32>::swap(value);
+			// Adjust value for 8-bit and 16-bit reads
+			value >>= ((4 - a_size) * 8) - ((addr % 4) * 8);
+			value &= a_size == 4 ? u32{umax} : ((1u << (a_size * 8)) - 1);
+
+			if (a_size == 4)
+			{
+				value = std::bit_cast<be_t<u32>>(value);
+			}
+			else if (a_size == 2)
+			{
+				value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
+			}
+			else
+			{
+				ensure(a_size == 1);
+			}
 
 				u64 ctrl;
 				if (!get_x64_reg_value(context, s_tls_reg3, d_size, i_size, ctrl))
@@ -1419,6 +1747,13 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			case X64OP_STORE:
 			case X64OP_STORE_BE:
 			{
+			if (a_size != 4)
+			{
+				// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+				handled = false;
+				break;
+			}
+
 				u64 reg_value;
 				if (!is_writing || !get_x64_reg_value(context, reg, d_size, i_size, reg_value))
 				{
@@ -1437,11 +1772,18 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			case X64OP_STOS:
 			default:
 			{
-				sig_log.error("Invalid or unsupported operation (op=%d, reg=%d, d_size=%lld, i_size=%lld)", +op, +reg, d_size, i_size);
+			sig_log.error("Invalid or unsupported operation (op=%d, addr=0x%x, reg=%d, d_size=%lld, i_size=%lld, a_size=%d)", +op, addr, +reg, d_size, i_size, a_size);
 				report_opcode();
 				return false;
 			}
 			}
+
+		if (!handled)
+		{
+			sig_log.error("Invalid or unsupported operation (op=%d, addr=0x%x, reg=%d, d_size=%lld, i_size=%lld, a_size=%d)", +op, addr, +reg, d_size, i_size, a_size);
+			report_opcode();
+			break;
+		}
 
 			// skip processed instruction
 			RIP(context) += i_size;
@@ -1449,11 +1791,133 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			return true;
 		}
 	while (0);
-#else
-	static_cast<void>(context);
+#elif defined(ARCH_ARM64)
+	const u8* const code = reinterpret_cast<u8*>(RIP(context));
+
+	const u32 instruction = read_from_ptr_unsafe<u32>(code);
+
+	const auto [op, mem_size, reg_size, reg_index, reg_signed] = decode_a64_mem_inst(instruction);
+
+	auto report_opcode = [&]()
+	{
+		sig_log.error("decode_a64_mem_inst(%p): unsupported opcode: %s", code, +std::bit_cast<be_t<u32>>(instruction));
+	};
+
+	if (0x1'0000'0000ull - addr < mem_size)
+	{
+		sig_log.error("Invalid mem_size (0x%llx)", mem_size);
+		report_opcode();
+		return false;
+	}
+
+	// check if address is RawSPU MMIO register
+	do
+		if (addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
+		{
+			auto thread = idm::get_unlocked<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
+
+			if (!thread || is_exec)
+			{
+				break;
+			}
+
+			if (!mem_size)
+			{
+				sig_log.error("Invalid or unsupported instruction (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+
+			bool handled = true;
+
+			switch (op)
+			{
+			case A64_LOAD:
+			{
+				u32 value;
+				const u32 addr_aligned = addr & -4;
+
+				if (addr % 4 + mem_size > 4)
+				{
+					handled = false;
+					break;
+				}
+
+				if (is_writing || !thread->read_reg(addr_aligned, value))
+				{
+					return false;
+				}
+
+				// Adjust value for 8-bit and 16-bit reads
+				value >>= ((4 - mem_size) * 8) - ((addr % 4) * 8);
+				value &= mem_size == 4 ? u32{umax} : ((1u << (mem_size * 8)) - 1);
+
+				if (mem_size == 4)
+				{
+					value = std::bit_cast<be_t<u32>>(value);
+				}
+				else if (mem_size == 2)
+				{
+					value = std::bit_cast<be_t<u16>>(static_cast<u16>(value));
+				}
+				else
+				{
+					ensure(mem_size == 1);
+				}
+
+				// Update register value
+				put_a64_reg_value(context, reg_index, reg_size, reg_signed, mem_size, value);
+				break;
+			}
+			case A64_STORE:
+			{
+				if (mem_size != 4)
+				{
+					// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+					handled = false;
+					break;
+				}
+
+				if (!is_writing)
+				{
+					return false;
+				}
+
+				const u64 reg_value = get_a64_reg_value(context, reg_index, reg_size);
+				const u32 val32 = static_cast<u32>(reg_value);
+				if (!thread->write_reg(addr, std::bit_cast<be_t<u32>>(val32)))
+				{
+					return false;
+				}
+
+				break;
+			}
+			default:
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				return false;
+			}
+			}
+
+			if (!handled)
+			{
+				sig_log.error("Invalid or unsupported operation (reg=%d, mem_size=%lld, reg_size=0x%llx)", reg_index, mem_size, reg_size);
+				report_opcode();
+				break;
+			}
+
+			// skip processed instruction
+			RIP(context) = reinterpret_cast<std::remove_cvref_t<decltype(RIP(context))>>(reinterpret_cast<const char*>(RIP(context)) + 4);
+			g_tls_fault_spu++;
+			return true;
+		}
+	while (0);
 #endif /* ARCH_ */
 
-	if (vm::check_addr(addr, is_writing ? vm::page_writable : vm::page_readable))
+	const auto required_page_perms = (is_writing ? vm::page_writable : vm::page_readable) + (is_exec ? vm::page_executable : 0);
+
+	if (vm::check_addr(addr, required_page_perms))
 	{
 		return true;
 	}
@@ -1461,9 +1925,7 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 	// Hack: allocate memory in case the emulator is stopping
 	const auto hack_alloc = [&]()
 	{
-		g_tls_access_violation_recovered = true;
-
-		if (vm::check_addr(addr, is_writing ? vm::page_writable : vm::page_readable))
+		if (vm::check_addr(addr, required_page_perms))
 		{
 			return true;
 		}
@@ -1475,17 +1937,45 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 			return false;
 		}
 
+		extern void ppu_register_range(u32 addr, u32 size);
+
+		bool reprotected = false;
+
 		if (vm::writer_lock mlock; area->flags & vm::preallocated || vm::check_addr(addr, 0))
 		{
 			// For allocated memory with protection lower than required (such as protection::no or read-only while writing to it)
 			utils::memory_protect(vm::base(addr & -0x1000), 0x1000, utils::protection::rw);
+			reprotected = true;
+		}
+
+		if (reprotected)
+		{
+			if (is_exec && !vm::check_addr(addr, vm::page_executable))
+			{
+				ppu_register_range(addr & -0x10000, 0x10000);
+			}
+
+			g_tls_access_violation_recovered = addr;
 			return true;
 		}
 
-		return area->falloc(addr & -0x10000, 0x10000) || vm::check_addr(addr, is_writing ? vm::page_writable : vm::page_readable);
+		const bool allocated = area->falloc(addr & -0x10000, 0x10000);
+
+		if (allocated)
+		{
+			if (is_exec && !vm::check_addr(addr, vm::page_executable))
+			{
+				ppu_register_range(addr & -0x10000, 0x10000);
+			}
+
+			g_tls_access_violation_recovered = addr;
+			return true;
+		}
+
+		return false;
 	};
 
-	if (cpu && (cpu->get_class() == thread_class::ppu || cpu->get_class() == thread_class::spu))
+	if (cpu && (cpu->get_class() == thread_class::ppu || cpu->get_class() == thread_class::spu) && !is_exec)
 	{
 		vm::temporary_unlock(*cpu);
 		u32 pf_port_id = 0;
@@ -1627,7 +2117,7 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 
 		if (cpu->get_class() == thread_class::spu)
 		{
-			if (!g_tls_access_violation_recovered)
+			if (g_tls_access_violation_recovered != addr)
 			{
 				vm_log.notice("\n%s", dump_useful_thread_info());
 				vm_log.always()("[%s] Access violation %s location 0x%x (%s)", cpu->get_name(), is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory");
@@ -1663,10 +2153,10 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 
 	// Note: a thread may access violate more than once after hack_alloc recovery
 	// Do not log any further access violations in this case.
-	if (!g_tls_access_violation_recovered)
+	if (g_tls_access_violation_recovered != addr)
 	{
 		vm_log.notice("\n%s", dump_useful_thread_info());
-		vm_log.fatal("Access violation %s location 0x%x (%s)", is_writing ? "writing" : (cpu && cpu->get_class() == thread_class::ppu && cpu->get_pc() == addr ? "executing" : "reading"), addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory");
+		vm_log.fatal("Access violation %s location 0x%x (%s)", is_writing ? "writing" : (is_exec ? "executing" : "reading"), addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory");
 	}
 
 	while (Emu.IsPausedOrReady())
@@ -1715,8 +2205,13 @@ bool handle_access_violation(u32 addr, bool is_writing, ucontext_t* context) noe
 		}
 	}
 
-	if (Emu.IsStopped() && !hack_alloc())
+	if (Emu.IsStopped())
 	{
+		while (!hack_alloc())
+		{
+			thread_ctrl::wait_for(1000);
+		}
+
 		return false;
 	}
 
@@ -1755,6 +2250,7 @@ static LONG exception_handler(PEXCEPTION_POINTERS pExp) noexcept
 	if (pExp->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && !is_executing)
 	{
 		u32 addr = 0;
+		bool is_exec = false;
 
 		if (auto [addr0, ok] = vm::try_get_addr(ptr); ok)
 		{
@@ -1762,14 +2258,21 @@ static LONG exception_handler(PEXCEPTION_POINTERS pExp) noexcept
 		}
 		else if (const usz exec64 = (ptr - vm::g_exec_addr) / 2; exec64 <= u32{umax})
 		{
+			is_exec = true;
+			addr = static_cast<u32>(exec64);
+		}
+		else if (const usz exec64 = (ptr - vm::g_exec_addr - vm::g_exec_addr_seg_offset); exec64 <= u32{umax})
+		{
+			is_exec = true;
 			addr = static_cast<u32>(exec64);
 		}
 		else
 		{
+			std::this_thread::sleep_for(1ms);
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
-		if (thread_ctrl::get_current() && handle_access_violation(addr, is_writing, pExp->ContextRecord))
+		if (thread_ctrl::get_current() && handle_access_violation(addr, is_writing, is_exec, pExp->ContextRecord))
 		{
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
@@ -1891,7 +2394,37 @@ static LONG exception_filter(PEXCEPTION_POINTERS pExp) noexcept
 
 	fmt::append(msg, "RPCS3 image base: %p.\n", GetModuleHandle(NULL));
 
-	// TODO: print registers and the callstack
+#if defined(ARCH_X64)
+	fmt::append(msg, "RAX: %016llX	RBX: %016llX\n", pExp->ContextRecord->Rax, pExp->ContextRecord->Rbx);
+	fmt::append(msg, "RCX: %016llX	RDX: %016llX\n", pExp->ContextRecord->Rcx, pExp->ContextRecord->Rdx);
+	fmt::append(msg, "RSI: %016llX  RDI: %016llX\n", pExp->ContextRecord->Rsi, pExp->ContextRecord->Rdi);
+	fmt::append(msg, "RBP: %016llX  RSP: %016llX\n", pExp->ContextRecord->Rbp, pExp->ContextRecord->Rsp);
+	fmt::append(msg, "R8:  %016llX  R9:  %016llX\n", pExp->ContextRecord->R8,  pExp->ContextRecord->R9);
+	fmt::append(msg, "R10: %016llX  R11: %016llX\n", pExp->ContextRecord->R10, pExp->ContextRecord->R11);
+	fmt::append(msg, "R12: %016llX  R13: %016llX\n", pExp->ContextRecord->R12, pExp->ContextRecord->R13);
+	fmt::append(msg, "R14: %016llX  R15: %016llX\n", pExp->ContextRecord->R14, pExp->ContextRecord->R15);
+	fmt::append(msg, "RFLAGS: %08X\n", pExp->ContextRecord->EFlags);
+#elif defined(ARCH_ARM64)
+	for (int i = 0; i < 29; i += 2)
+	{
+		if (i + 1 < 29)
+			fmt::append(msg, "X%-2d: %016llX  X%-2d: %016llX\n", i, pExp->ContextRecord->X[i], i + 1, pExp->ContextRecord->X[i + 1]);
+		else
+			fmt::append(msg, "X%-2d: %016llX\n", i, pExp->ContextRecord->X[i]);
+	}
+	fmt::append(msg, "SP: %016llX  FP: %016llX  LR: %016llX\n", pExp->ContextRecord->Sp, pExp->ContextRecord->Fp, pExp->ContextRecord->Lr);
+	fmt::append(msg, "CPSR: %08X\n", pExp->ContextRecord->Cpsr);
+#endif
+
+	const auto stack_trace = utils::get_backtrace(64, pExp->ContextRecord);
+	const auto stack_symbols = utils::get_backtrace_symbols(stack_trace);
+
+	msg += "Stack Trace:\n";
+
+	for (const auto& symbol : stack_symbols)
+	{
+		fmt::append(msg, "%s\n", symbol);
+	}
 
 	sys_log.fatal("\n%s", msg);
 	logs::listener::sync_all();
@@ -1955,7 +2488,7 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 #else
-	const u32 insn = is_executing ? 0 : *reinterpret_cast<u32*>(RIP(context));
+	const u32 insn = is_executing ? 0 : read_from_ptr_unsafe<u32>(RIP(context));
 	const bool is_writing =
 		(insn & 0xbfff0000) == 0x0c000000 || // STR <Wt>, [<Xn>, #<imm>] (store word with immediate offset)
 		(insn & 0xbfe00000) == 0x0c800000 || // STP <Wt1>, <Wt2>, [<Xn>, #<imm>] (store pair of registers with immediate offset)
@@ -1977,13 +2510,14 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 #endif
 
 	const u64 exec64 = (reinterpret_cast<u64>(info->si_addr) - reinterpret_cast<u64>(vm::g_exec_addr)) / 2;
+	const u64 exec64_2 = (reinterpret_cast<u64>(info->si_addr) - reinterpret_cast<u64>(vm::g_exec_addr)) - vm::g_exec_addr_seg_offset;
 	const auto cause = is_executing ? "executing" : is_writing ? "writing" :
 	                                                             "reading";
 
 	if (auto [addr, ok] = vm::try_get_addr(info->si_addr); ok && !is_executing)
 	{
 		// Try to process access violation
-		if (thread_ctrl::get_current() && handle_access_violation(addr, is_writing, context))
+		if (thread_ctrl::get_current() && handle_access_violation(addr, is_writing, false, context))
 		{
 			return;
 		}
@@ -1991,7 +2525,14 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 
 	if (exec64 < 0x100000000ull && !is_executing)
 	{
-		if (thread_ctrl::get_current() && handle_access_violation(static_cast<u32>(exec64), is_writing, context))
+		if (thread_ctrl::get_current() && handle_access_violation(static_cast<u32>(exec64), is_writing, true, context))
+		{
+			return;
+		}
+	}
+	else if (exec64_2 < 0x100000000ull && !is_executing)
+	{
+		if (thread_ctrl::get_current() && handle_access_violation(static_cast<u32>(exec64_2), is_writing, true, context))
 		{
 			return;
 		}
@@ -2005,6 +2546,37 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 	}
 
 	append_thread_name(msg);
+
+#ifdef __APPLE__
+	thread_local bool s_tls_is_attempting_recovery = false;
+	thread_local bool s_tls_last_cause_is_executing = false;
+
+	if (reinterpret_cast<u64>(info->si_addr) < 0x10000)
+	{
+		// Do not recover from the virtual page of 0x0 (such as nullptr)
+	}
+	else if (is_executing || is_writing)
+	{
+		if (s_tls_is_attempting_recovery && s_tls_last_cause_is_executing != is_executing)
+		{
+			// Cause changed, inform recovery
+			s_tls_is_attempting_recovery = false;
+		}
+
+		if (!s_tls_is_attempting_recovery)
+		{
+			s_tls_last_cause_is_executing = is_executing;
+			s_tls_is_attempting_recovery = true;
+			pthread_jit_write_protect_np(is_executing ? true : false);
+
+			sys_log.error("\n%s", msg);
+			sys_log.notice("\n%s", dump_useful_thread_info());
+			sys_log.error("Attempting recovery using pthread_jit_write_protect_np()");
+			logs::listener::sync_all();
+			return;
+		}
+	}
+#endif
 
 	sys_log.fatal("\n%s", msg);
 	sys_log.notice("\n%s", dump_useful_thread_info());
@@ -2120,23 +2692,47 @@ void thread_base::start()
 	ensure(m_thread);
 	ensure(::ResumeThread(reinterpret_cast<HANDLE>(+m_thread)) != static_cast<DWORD>(-1));
 #elif defined(__APPLE__) || defined(ANDROID)
+	pthread_t thread_id{};
 	pthread_attr_t stack_size_attr;
 	pthread_attr_init(&stack_size_attr);
 	pthread_attr_setstacksize(&stack_size_attr, 0x800000);
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), &stack_size_attr, entry_point, this) == 0);
+	ensure(pthread_create(&thread_id, &stack_size_attr, entry_point, this) == 0);
 #else
-	ensure(pthread_create(reinterpret_cast<pthread_t*>(&m_thread.raw()), nullptr, entry_point, this) == 0);
+	pthread_t thread_id{};
+	ensure(pthread_create(&thread_id, nullptr, entry_point, this) == 0);
+#endif
+
+#ifndef _WIN32
+	// Update m_thread atomically
+	u64 dest_id = 0;
+	std::memcpy(&dest_id, &thread_id, sizeof(thread_id));
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, dest_id))
+	{
+		ensure(m_thread == dest_id);
+	}
 #endif
 }
 
 void thread_base::initialize(void (*error_cb)())
 {
 #ifndef _WIN32
-#ifdef ANDROID
-	m_thread.release(pthread_self());
+#ifdef __APPLE__
+	while (!m_thread)
+	{
+		rx::busy_wait();
+	}
+	[[maybe_unused]] u64 new_tid = 0;
+#elif defined(ANDROID)
+	const u64 new_tid = pthread_self();
 #else
-	m_thread.release(reinterpret_cast<u64>(pthread_self()));
+	const u64 new_tid = reinterpret_cast<u64>(pthread_self());
 #endif
+
+	if (!m_thread && !m_thread.compare_and_swap_test(0, new_tid))
+	{
+		ensure(m_thread == new_tid);
+	}
 #endif
 
 	// Initialize TLS variables
@@ -2304,7 +2900,7 @@ thread_base::native_entry thread_base::finalize(u64 _self) noexcept
 	g_tls_fault_spu = 0;
 	g_tls_wait_time = 0;
 	g_tls_wait_fail = 0;
-	g_tls_access_violation_recovered = false;
+	g_tls_access_violation_recovered = umax;
 
 	g_tls_log_prefix = []() -> std::string
 	{
@@ -2454,7 +3050,7 @@ void thread_ctrl::wait_for(u64 usec, [[maybe_unused]] bool alert /* true */)
 	if (alert)
 	{
 		list.set<0>(_this->m_sync, 0);
-		list.set<1>(utils::bless<atomic_t<u32>>(&_this->m_taskq)[1], 0);
+		list.template set<1>(_this->m_taskq);
 	}
 	else
 	{
@@ -2749,8 +3345,25 @@ void thread_base::exec()
 	}
 }
 
+void thread_ctrl::set_name(std::string name)
+{
+	ensure(g_tls_this_thread);
+	g_tls_this_thread->m_tname.store(make_single<std::string>(name));
+	g_tls_this_thread->set_name(std::move(name));
+}
+
 [[noreturn]] void thread_ctrl::emergency_exit(std::string_view reason)
 {
+	// Print stacktrace
+#ifdef __cpp_lib_stacktrace
+	if (rpcs3::is_local_build())
+	{
+		std::ostringstream oss;
+		oss << std::stacktrace::current();
+		sys_log.notice("StackTrace\n\n%s\n", oss.str());
+	}
+#endif
+
 	if (const std::string info = dump_useful_thread_info(); !info.empty())
 	{
 		sys_log.notice("\n%s", info);
@@ -2764,6 +3377,16 @@ void thread_base::exec()
 		{
 			fmt::append(reason_buf, "%s (PPU: %s)", reason, func);
 		}
+	}
+
+	if (auto [total, current] = utils::get_memory_usage(); total - current <= 256 * 1024 * 1024)
+	{
+		if (reason_buf.empty())
+		{
+			reason_buf = std::string{reason};
+		}
+
+		fmt::append(reason_buf, " (Possible RAM deficiency: free RAM: %dMB)", (total - current) / (1024 * 1024));
 	}
 
 	if (!reason_buf.empty())
@@ -2800,7 +3423,9 @@ void thread_base::exec()
 							})
 				.second)
 		{
+#ifndef __APPLE__
 			rx::breakpoint();
+#endif
 		}
 	}
 
@@ -2826,6 +3451,32 @@ void thread_base::exec()
 	}
 
 	report_fatal_error(reason);
+}
+
+void thread_ctrl::silent_exit() noexcept
+{
+	if (const auto _this = g_tls_this_thread)
+	{
+		g_tls_error_callback();
+
+		u64 _self = _this->finalize(thread_state::errored);
+
+		if (_self == umax)
+		{
+			// Unused, detached thread support remnant
+			delete _this;
+		}
+
+		thread_base::finalize(umax);
+	}
+
+#ifdef _WIN32
+	_endthreadex(0);
+#else
+	pthread_exit(nullptr);
+#endif
+
+	std::abort();
 }
 
 void thread_ctrl::detect_cpu_layout()
@@ -3321,15 +3972,26 @@ std::pair<void*, usz> thread_ctrl::get_thread_stack()
 
 u64 thread_ctrl::get_tid()
 {
+	static thread_local u64 s_tls_tid = []() -> u64
+	{
 #ifdef _WIN32
-	return GetCurrentThreadId();
+		return GetCurrentThreadId();
 #elif defined(ANDROID)
-	return static_cast<u64>(pthread_self());
+		return pthread_gettid_np(pthread_self());
 #elif defined(__linux__)
-	return syscall(SYS_gettid);
+		return syscall(SYS_gettid);
+#elif defined(__APPLE__)
+		u64 tid{};
+		pthread_threadid_np(nullptr, &tid);
+		return tid;
+#elif defined(__FreeBSD__)
+		return pthread_getthreadid_np();
 #else
-	return reinterpret_cast<u64>(pthread_self());
+		return static_cast<u64>(pthread_self());
 #endif
+	}();
+
+	return s_tls_tid;
 }
 
 bool thread_ctrl::is_main()

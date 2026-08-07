@@ -7,6 +7,8 @@
 #include "util/geometry.h"
 #include "util/mutex.h"
 
+#include <span>
+
 namespace gl
 {
 	namespace glsl
@@ -14,7 +16,7 @@ namespace gl
 		class shader
 		{
 			std::string source;
-			::glsl::program_domain type;
+			::glsl::program_domain type {};
 			GLuint m_id = GL_NONE;
 
 			fence m_compiled_fence;
@@ -61,7 +63,7 @@ namespace gl
 				return source;
 			}
 
-			fence get_compile_fence_sync() const
+			const fence& get_compile_fence_sync() const
 			{
 				return m_compiled_fence;
 			}
@@ -120,6 +122,10 @@ namespace gl
 				{
 					glProgramUniform1ui(m_program.id(), location(), rhs ? 1 : 0);
 				}
+				void operator=(handle64_t rhs) const
+				{
+					glProgramUniformHandleui64ARB(m_program.id(), location(), rhs);
+				}
 				void operator=(const color1i& rhs) const
 				{
 					glProgramUniform1i(m_program.id(), location(), rhs.r);
@@ -160,22 +166,33 @@ namespace gl
 				{
 					glProgramUniform4i(m_program.id(), location(), rhs.x1, rhs.y1, rhs.x2, rhs.y2);
 				}
-				void operator=(const std::vector<int>& rhs) const
+				void operator=(const mat3f& rhs) const
+				{
+					glProgramUniformMatrix3fv(m_program.id(), location(), 1, GL_FALSE, &rhs[0].rgb[0]);
+				}
+				void operator=(const std::span<const int>& rhs) const
 				{
 					glProgramUniform1iv(m_program.id(), location(), ::size32(rhs), rhs.data());
+				}
+				void operator=(const std::span<const handle64_t>& rhs) const
+				{
+					glProgramUniformHandleui64vARB(m_program.id(), location(), ::size32(rhs), rhs.data());
 				}
 			};
 
 			class uniforms_t
 			{
-				program& m_program;
+				program* m_program = nullptr;
 				std::unordered_map<std::string, GLint> locations;
 
 			public:
 				uniforms_t(program* program)
-					: m_program(*program)
+					: m_program(program)
 				{
 				}
+
+				uniforms_t(uniforms_t&&) noexcept = default;
+				uniforms_t& operator=(uniforms_t&&) noexcept = default;
 
 				void clear()
 				{
@@ -188,19 +205,21 @@ namespace gl
 
 				uniform_t operator[](GLint location)
 				{
-					return {m_program, location};
+					return {*m_program, location};
 				}
 
 				uniform_t operator[](const std::string& name)
 				{
-					return {m_program, location(name)};
+					return {*m_program, location(name)};
 				}
 
 			} uniforms{this};
 
 		public:
 			program() = default;
+
 			program(const program&) = delete;
+			program& operator = (const program&) = delete;
 
 			~program()
 			{
@@ -208,6 +227,13 @@ namespace gl
 				{
 					remove();
 				}
+			}
+
+			void swap(program&& other) noexcept
+			{
+				std::swap(m_id, other.m_id);
+				std::swap(m_fence, other.m_fence);
+				std::swap(uniforms, other.uniforms);
 			}
 
 			program& recreate()
@@ -243,6 +269,12 @@ namespace gl
 
 			program& attach(const shader& shader_)
 			{
+				if (const auto& comp_fence = shader_.get_compile_fence_sync();
+					!comp_fence.check_signaled())
+				{
+					comp_fence.server_wait_sync();
+				}
+
 				glAttachShader(m_id, shader_.id());
 				return *this;
 			}

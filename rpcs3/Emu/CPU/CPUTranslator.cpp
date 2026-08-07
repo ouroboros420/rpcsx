@@ -5,6 +5,14 @@
 #include "util/v128.hpp"
 #include "util/logs.hpp"
 
+// Value::hasUseList() only exists from LLVM 21. On older LLVM every Value has a
+// use list, so the guard these call sites want is trivially satisfied.
+#if LLVM_VERSION_MAJOR >= 21
+#define RPCSX_HAS_USE_LIST(v) ((v)->hasUseList())
+#else
+#define RPCSX_HAS_USE_LIST(v) (true)
+#endif
+
 LOG_CHANNEL(llvm_log, "LLVM");
 
 llvm::LLVMContext g_llvm_ctx;
@@ -69,7 +77,7 @@ cpu_translator::cpu_translator(llvm::Module* _module, bool is_be)
 				result = m_ir->CreateInsertElement(v, m_ir->CreateExtractElement(data0, m_ir->CreateExtractElement(mask, i)), i);
 				v->addIncoming(result, loop);
 				m_ir->CreateCondBr(m_ir->CreateICmpULT(i, m_ir->getInt32(16)), loop, next);
-				m_ir->SetInsertPoint(next->getFirstNonPHI());
+			m_ir->SetInsertPoint(next->getFirstNonPHIIt());
 				result = m_ir->CreateSelect(m_ir->CreateICmpSLT(index, zeros), zeros, result);
 
 				return result;
@@ -134,7 +142,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "bdver4" ||
 		cpu == "znver1" ||
 		cpu == "znver2" ||
-		cpu == "znver3")
+		cpu == "znver3" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_fma = true;
 		m_use_avx = true;
@@ -156,7 +167,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "cooperlake" ||
 		cpu == "alderlake" ||
 		cpu == "raptorlake" ||
-		cpu == "meteorlake")
+		cpu == "meteorlake" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_vnni = true;
 	}
@@ -166,7 +180,10 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		cpu == "gracemont" ||
 		cpu == "alderlake" ||
 		cpu == "raptorlake" ||
-		cpu == "meteorlake")
+		cpu == "meteorlake" ||
+		cpu == "arrowlake" ||
+		cpu == "arrowlake-s" ||
+		cpu == "lunarlake")
 	{
 		m_use_gfni = true;
 	}
@@ -188,16 +205,30 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 		m_use_gfni = true;
 	}
 
-	// Aarch64 CPUs
-	if (cpu == "cyclone" || cpu.contains("cortex"))
+#ifdef ARCH_ARM64
+	if (utils::has_dotprod())
 	{
-		m_use_fma = true;
-		// AVX does not use intrinsics so far
-		m_use_avx = true;
+		m_use_dotprod = true;
 	}
+
+	if (utils::has_i8mm())
+	{
+		m_use_i8mm = true;
+	}
+
+	if (utils::has_sve() && utils::sve_length() == 128)
+	{
+		m_use_sve_128 = true;
+	}
+
+	if (utils::has_sve2() && utils::sve_length() == 128)
+	{
+		m_use_sve2_128 = true;
+	}
+#endif
 }
 
-llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type) const
+llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type, std::source_location src_loc) const
 {
 	uint s1 = type->getScalarSizeInBits();
 	uint s2 = val->getType()->getScalarSizeInBits();
@@ -209,20 +240,85 @@ llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type) const
 
 	if (s1 != s2)
 	{
-		fmt::throw_exception("cpu_translator::bitcast(): incompatible type sizes (%u vs %u)", s1, s2);
+		fmt::throw_exception("cpu_translator::bitcast(): incompatible type sizes (%u vs %u)\nCalled from: %s", s1, s2, src_loc);
 	}
 
-	if (const auto c1 = llvm::dyn_cast<llvm::Constant>(val))
+	if (val->getType() == type)
+	{
+		return val;
+	}
+
+	llvm::CastInst* i;
+	llvm::Value* source_val = val;
+
+	// Try to reuse older bitcasts
+	while ((i = llvm::dyn_cast_or_null<llvm::CastInst>(source_val)) && i->getOpcode() == llvm::Instruction::BitCast)
+	{
+		source_val = i->getOperand(0);
+
+		if (source_val->getType() == type)
+		{
+			return source_val;
+		}
+	}
+
+	// Skip use iteration for values that don't have use lists
+	if (RPCSX_HAS_USE_LIST(source_val))
+	{
+		for (llvm::Value* it_val : source_val->uses())
+		{
+			if (!it_val)
+			{
+				continue;
+			}
+
+			llvm::CastInst* bci = llvm::dyn_cast_or_null<llvm::CastInst>(it_val);
+
+			// Walk through bitcasts
+			while (bci && bci->getOpcode() == llvm::Instruction::BitCast)
+			{
+				if (bci->getParent() != m_ir->GetInsertBlock())
+				{
+					break;
+				}
+
+				if (bci->getType() == type)
+				{
+					return bci;
+				}
+
+				// Check if bci has use list before accessing use_begin()
+				if (!RPCSX_HAS_USE_LIST(bci))
+				{
+					break;
+				}
+
+				if (bci->use_begin() == bci->use_end())
+				{
+					break;
+				}
+
+				bci = llvm::dyn_cast_or_null<llvm::CastInst>(*bci->use_begin());
+			}
+		}
+	}
+
+	// Do bitcast on the source
+
+	if (const auto c1 = llvm::dyn_cast<llvm::Constant>(source_val))
 	{
 		return ensure(llvm::ConstantFoldCastOperand(llvm::Instruction::BitCast, c1, type, m_module->getDataLayout()));
 	}
 
-	return m_ir->CreateBitCast(val, type);
+	return m_ir->CreateBitCast(source_val, type);
 }
 
 template <>
 std::pair<bool, v128> cpu_translator::get_const_vector<v128>(llvm::Value* c, u32 _pos, u32 _line)
 {
+	// Bitcasts do not matter
+	c = peek_through_bitcasts(c);
+
 	v128 result{};
 
 	if (!llvm::isa<llvm::Constant>(c))
@@ -486,14 +582,21 @@ void cpu_translator::erase_stores(llvm::ArrayRef<llvm::Value*> args)
 {
 	for (auto v : args)
 	{
-		for (auto it = v->use_begin(); it != v->use_end(); ++it)
+		// Skip use iteration for values that don't have use lists
+		if (!RPCSX_HAS_USE_LIST(v))
+			continue;
+
+		for (llvm::Value* i : v->uses())
 		{
-			llvm::Value* i = *it;
 			llvm::CastInst* bci = nullptr;
 
 			// Walk through bitcasts
 			while (i && (bci = llvm::dyn_cast<llvm::CastInst>(i)) && bci->getOpcode() == llvm::Instruction::BitCast)
 			{
+				// Check if bci has use list before accessing use_begin()
+				if (!RPCSX_HAS_USE_LIST(bci))
+					break;
+
 				i = *bci->use_begin();
 			}
 
@@ -505,4 +608,134 @@ void cpu_translator::erase_stores(llvm::ArrayRef<llvm::Value*> args)
 	}
 }
 
+llvm::KnownBits cpu_translator::get_known_bits_fallback(llvm::Value* value)
+{
+	// TODO: Improve it - add support for integer addition/subtraction and more stuff
+
+	const auto type = value->getType();
+
+	if (!type->isVectorTy())
+	{
+		if (llvm::isa<llvm::IntegerType>(type))
+		{
+			if (auto bin_inst = llvm::dyn_cast<llvm::BinaryOperator>(value))
+			{
+				llvm::Value* lhs = ensure(bin_inst->getOperand(0));
+				llvm::Value* rhs = ensure(bin_inst->getOperand(1));
+
+				llvm::ConstantInt* constant_value = llvm::dyn_cast<llvm::ConstantInt>(rhs) ? llvm::dyn_cast<llvm::ConstantInt>(rhs) : llvm::dyn_cast<llvm::ConstantInt>(lhs);
+
+				if (!constant_value)
+				{
+					return llvm::KnownBits(type->getScalarSizeInBits());
+				}
+
+				if (bin_inst->getOpcode() == llvm::Instruction::Or)
+				{
+					llvm::KnownBits ret(type->getScalarSizeInBits());
+					ret.One = constant_value->getValue();
+					return ret;
+				}
+
+				if (bin_inst->getOpcode() == llvm::Instruction::And)
+				{
+					llvm::KnownBits ret(type->getScalarSizeInBits());
+					ret.Zero = constant_value->getValue();
+					ret.Zero.flipAllBits();
+					return ret;
+				}
+
+				return llvm::KnownBits(type->getScalarSizeInBits());
+			}
+		}
+
+		fmt::throw_exception("Bad KnownBits type: i%ux", type->getScalarSizeInBits());
+	}
+
+	if (auto v = llvm::cast<llvm::FixedVectorType>(type); v->getScalarSizeInBits() * v->getNumElements() != 128)
+	{
+		// Unsupported
+		return llvm::KnownBits(type->getScalarSizeInBits());
+	}
+
+	const auto original_value = peek_through_bitcasts(value);
+
+	auto bin_inst = llvm::dyn_cast<llvm::BinaryOperator>(original_value);
+
+	if (!bin_inst)
+	{
+		return llvm::KnownBits(type->getScalarSizeInBits());
+	}
+
+	llvm::Value* lhs = ensure(bin_inst->getOperand(0));
+	llvm::Value* rhs = ensure(bin_inst->getOperand(1));
+
+	llvm::Value* constant_value = llvm::dyn_cast<llvm::ConstantDataVector>(rhs) ? llvm::dyn_cast<llvm::ConstantDataVector>(rhs) : llvm::dyn_cast<llvm::ConstantDataVector>(lhs);
+
+	if (!constant_value)
+	{
+		return llvm::KnownBits(value->getType()->getScalarSizeInBits());
+	}
+
+	const auto [ok, v128_const] = get_const_vector(constant_value, -1);
+
+	ensure(ok);
+
+	llvm::APInt all_lanes{};
+	llvm::APInt any_lanes{};
+
+	auto combine_bits = [&](const auto& array, u32 size)
+	{
+		auto all = +array[0];
+		auto any = +array[0];
+
+		for (u32 i = 1; i < size; i++)
+		{
+			all &= +array[i];
+			any |= +array[i];
+		}
+
+		return std::make_pair(all, any);
+	};
+
+	if (type->getScalarType()->isIntegerTy(8))
+	{
+		const auto [all, any] = combine_bits(v128_const._u8, 16);
+		all_lanes = llvm::APInt(8, all);
+		any_lanes = llvm::APInt(8, any);
+	}
+	else if (type->getScalarType()->isIntegerTy(16))
+	{
+		const auto [all, any] = combine_bits(v128_const._u16, 8);
+		all_lanes = llvm::APInt(16, all);
+		any_lanes = llvm::APInt(16, any);
+	}
+	else if (type->getScalarType()->isIntegerTy(32))
+	{
+		const auto [all, any] = combine_bits(v128_const._u32, 4);
+		all_lanes = llvm::APInt(32, all);
+		any_lanes = llvm::APInt(32, any);
+	}
+	else // if (type->getScalarType()->isIntegerTy(64))
+	{
+		return llvm::KnownBits(type->getScalarSizeInBits());
+	}
+
+	if (bin_inst->getOpcode() == llvm::Instruction::Or)
+	{
+		llvm::KnownBits ret(type->getScalarSizeInBits());
+		ret.One = all_lanes;
+		return ret;
+	}
+
+	if (bin_inst->getOpcode() == llvm::Instruction::And)
+	{
+		llvm::KnownBits ret(type->getScalarSizeInBits());
+		ret.Zero = any_lanes;
+		ret.Zero.flipAllBits();
+		return ret;
+	}
+
+	return llvm::KnownBits(type->getScalarSizeInBits());
+}
 #endif
