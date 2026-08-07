@@ -118,12 +118,24 @@ bool CubebBackend::Open(std::string_view dev_id, AudioFreq freq, AudioSampleSize
 
 	if (!device.handle)
 	{
-		if (use_default_device)
-			Cubeb.error("Opening default device failed");
-		else
+		if (!use_default_device)
+		{
 			Cubeb.error("Device with id=%s not found", dev_id);
+			return false;
+		}
 
-		return false;
+		// Not every cubeb backend can enumerate devices. Android's AAudio
+		// backend returns CUBEB_ERROR_NOT_SUPPORTED (-4) from
+		// cubeb_enumerate_devices(), so GetDevice() can never resolve a default
+		// and audio would be disabled outright.
+		//
+		// A null output_device tells cubeb_stream_init() to use the system
+		// default, which is exactly what we want, and the code below already
+		// copes with a null handle (see the CUBEB_STREAM_PREF_* selection) and
+		// with ch_cnt == 0. Upstream fell through here as well until e5537c1cb
+		// ("Remove alternative default device detection in Cubeb backend")
+		// turned this path into a hard failure.
+		Cubeb.warning("Cannot detect default device, using the backend default. Channel count detection unavailable.");
 	}
 
 	if (device.ch_cnt == 0)
