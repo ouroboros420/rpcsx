@@ -146,3 +146,7 @@
 [submodule "3rdparty/mbuild"]
 	path = 3rdparty/mbuild
 	url = ../../intelxed/mbuild.git
+[submodule "3rdparty/protobuf/protobuf"]
+	path = 3rdparty/protobuf/protobuf
+	url = ../../protocolbuffers/protobuf.git
+	ignore = dirty
