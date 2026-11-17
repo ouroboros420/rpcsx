@@ -1944,9 +1944,11 @@ static bool initVirtualPad(const std::shared_ptr<Pad> &pad) {
   return true;
 }
 
-extern "C" bool _rpcsx_overlayPadData(int digital1, int digital2,
-                                      int leftStickX, int leftStickY,
-                                      int rightStickX, int rightStickY) {
+// l2Pressure / r2Pressure: PS3 pressure 0-255 for L2/R2 from an analog trigger,
+// or -1 to derive it from the digital bit (0/255) as before.
+static bool overlayPadDataImpl(int digital1, int digital2, int leftStickX,
+                               int leftStickY, int rightStickX, int rightStickY,
+                               int l2Pressure, int r2Pressure) {
 
   auto pad = [] {
     std::shared_ptr<Pad> result;
@@ -1974,6 +1976,17 @@ extern "C" bool _rpcsx_overlayPadData(int digital1, int digital2,
     }
 
     btn.m_value = btn.m_pressed ? 255 : 0;
+
+    // Analog triggers: the pressure value is what cellPad reports as
+    // CELL_PAD_BTN_OFFSET_PRESS_L2/R2 in press mode.
+    if (btn.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL2) {
+      const int pressure = btn.m_outKeyCode == CELL_PAD_CTRL_L2   ? l2Pressure
+                           : btn.m_outKeyCode == CELL_PAD_CTRL_R2 ? r2Pressure
+                                                                  : -1;
+      if (pressure >= 0) {
+        btn.m_value = static_cast<u16>(std::clamp(pressure, 0, 255));
+      }
+    }
   }
 
   pad->m_sticks[0].m_value = leftStickX;
@@ -1981,6 +1994,24 @@ extern "C" bool _rpcsx_overlayPadData(int digital1, int digital2,
   pad->m_sticks[2].m_value = rightStickX;
   pad->m_sticks[3].m_value = rightStickY;
   return true;
+}
+
+extern "C" bool _rpcsx_overlayPadData(int digital1, int digital2,
+                                      int leftStickX, int leftStickY,
+                                      int rightStickX, int rightStickY) {
+  return overlayPadDataImpl(digital1, digital2, leftStickX, leftStickY,
+                            rightStickX, rightStickY, -1, -1);
+}
+
+// Optional, additive entry point (analog L2/R2). An old app never calls it and
+// an old core lacks it (the app's dlsym yields null and it falls back to
+// _rpcsx_overlayPadData), so version skew only loses trigger pressure.
+extern "C" bool _rpcsx_overlayPadDataEx(int digital1, int digital2,
+                                        int leftStickX, int leftStickY,
+                                        int rightStickX, int rightStickY,
+                                        int l2Pressure, int r2Pressure) {
+  return overlayPadDataImpl(digital1, digital2, leftStickX, leftStickY,
+                            rightStickX, rightStickY, l2Pressure, r2Pressure);
 }
 
 // Optional, additive entry point: hand the core the app-private (internal)
